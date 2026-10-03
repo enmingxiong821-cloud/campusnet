@@ -4,17 +4,29 @@ __pycache__/
 .pytest_cache/
 .venv/
 venv/
+*.egg-info/
 
-# 数据库运行时文件（备份文件单独放 database/backup/）
+# 数据库运行时文件与本地备份（schema.sql 需要入库）
 database/*.db
 database/*.db-shm
 database/*.db-wal
+database/backup/
+
+# 密码混淆密钥，绝不能入库
+*.key
+.campusnet_obf.key
 
 # 本地工具配置与日志（MCP 配置、临时输出）
 config.json
 *.log
 nul
 
-# 编辑器
+# 编辑器与系统
 .vscode/
 .idea/
+.DS_Store
+Thumbs.db
+
+# 临时目录
+tmp/
+*.tmp

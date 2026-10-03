@@ -1,0 +1,96 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  python:
+    name: Python ${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.10", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: 安装测试依赖
+        run: python -m pip install --upgrade pip pytest
+
+      - name: 语法检查
+        run: python -m compileall -q project/backend/campusnet utils
+
+      - name: 单元与接口测试
+        env:
+          PYTHONIOENCODING: utf-8
+        run: python -m pytest project/backend/tests -q
+
+  extension:
+    name: 浏览器扩展逻辑
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: 后台脚本语法检查
+        run: node --check project/frontend/extension/background.js
+
+      - name: manifest JSON 合法性
+        run: node -e "JSON.parse(require('fs').readFileSync('project/frontend/extension/manifest.json','utf8'))"
+
+      - name: 扩展逻辑测试
+        run: node project/frontend/extension/test-background.js
+
+  secrets:
+    name: 仓库不得包含凭据
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 检查敏感文件是否被提交
+        run: |
+          set -e
+          fail=0
+          for pattern in '*.db' '*.db-wal' '*.db-shm' '.env' '*.key' 'config.json'; do
+            if git ls-files --error-unmatch "$pattern" >/dev/null 2>&1; then
+              echo "::error::敏感文件被提交: $pattern"
+              fail=1
+            fi
+          done
+          if git ls-files | grep -qiE 'password|secret|token' ; then
+            echo "::warning::文件名含敏感关键词，请人工确认"
+          fi
+          exit $fail
+
+      - name: 检查数据库与密钥是否可恢复
+        run: |
+          set -e
+          # 数据库与混淆密钥绝不能出现在 git 历史里
+          leaked=""
+          for path in database/campusnet.db .campusnet_obf.key; do
+            if git log --all --name-only --pretty=format: | grep -qx "$path"; then
+              leaked="$leaked $path"
+            fi
+          done
+          if [ -n "$leaked" ]; then
+            echo "::error::以下敏感文件曾被提交过:$leaked"
+            exit 1
+          fi
+          echo "历史中未发现敏感文件"

@@ -1,0 +1,35 @@
+# 示例配置：复制为 database/ 下的本地配置后按需修改
+#
+# 本文件只列可选项。数据库结构见 database/schema.sql，
+# 账号信息在 Web 控制台或用 `python utils/run.py add` 添加，不要手写进仓库。
+
+# 服务端口（1001-2000 前端 / 2001-3000 后端，此项目前后端同端口托管）
+port: 2268
+host: 127.0.0.1
+
+# 监控
+interval_seconds: 60        # 探活间隔，最小 10
+max_retries: 3              # 掉线后登录重试次数
+max_events: 2000            # 事件日志保留条数，超出自动裁剪
+autostart: true             # 服务启动时是否自动开启监控
+headless: true              # 浏览器登录是否无头运行
+
+# 探测地址：任一放行即视为在线，按顺序尝试
+probe_urls:
+  - http://www.msftconnecttest.com/connecttest.txt
+  - http://connectivitycheck.gstatic.com/generate_204
+
+# 常见门户参考值，实际以 `python utils/run.py discover` 的输出为准
+portal_reference:
+  Dr.COM:
+    path: /eportal/portal/login
+    username_field: DDDDD
+    password_field: upass
+    password_mode: base64
+    hidden_fields: [0MKKey, user_ip, user_mac]
+  深菱:
+    path: /sportal/authorize/index
+    password_mode: plain
+  H3C新网:
+    path: /eportal/portal/login
+    password_mode: plain
