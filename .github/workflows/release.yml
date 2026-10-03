@@ -1,0 +1,100 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    name: 发布前校验
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Python 测试
+        env:
+          PYTHONIOENCODING: utf-8
+        run: |
+          python -m pip install --upgrade pip pytest
+          python -m pytest project/backend/tests -q
+
+      - name: 扩展测试
+        run: |
+          node --check project/frontend/extension/background.js
+          node project/frontend/extension/test-background.js
+
+      - name: 构建可分发包
+        run: |
+          set -e
+          VERSION="${GITHUB_REF_NAME#v}"
+          NAME="campusnet-${VERSION}"
+          mkdir -p "dist/${NAME}"
+          cp -r project utils database/schema.sql database/config.example.yml README.md LICENSE "dist/${NAME}/"
+          cd "dist/${NAME}"
+          zip -qr "../${NAME}.zip" . -x '*.db' -x '__pycache__/*'
+          cd ../..
+          cd "dist"
+          sha256sum "${NAME}.zip" > "${NAME}.zip.sha256"
+          ls -la "${NAME}.zip" "${NAME}.zip.sha256"
+
+      - name: 校验包内无凭据
+        run: |
+          set -e
+          cd dist
+          for pattern in '*.db' '*.key' 'config.json' '*.log'; do
+            if find . -name "$pattern" | grep -q .; then
+              echo "::error::分发包含敏感文件: $pattern"
+              exit 1
+            fi
+          done
+          cd "${NAME}"
+          # playwright 与 pytest 属可选依赖，不进包
+          rm -rf "project/backend/tests"
+          find . -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
+          cd ../..
+          zip -qr "${NAME}.zip" "${NAME}" -x '*.db' -x '__pycache__/*'
+          sha256sum "${NAME}.zip" > "${NAME}.zip.sha256"
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: campusnet-release
+          path: dist/*.zip
+          retention-days: 30
+
+  release:
+    name: 创建 Release
+    needs: verify
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: campusnet-release
+          path: dist
+
+      - name: 发布
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          VERSION="${GITHUB_REF_NAME#v}"
+          gh release create "$GITHUB_REF_NAME" \
+            "dist/campusnet-${VERSION}.zip" \
+            "dist/campusnet-${VERSION}.zip.sha256" \
+            --title "校园网自连 v${VERSION}" \
+            --generate-notes
