@@ -441,9 +441,12 @@ def browser_login(
                 )
 
             selectors = _browser_selectors(page, user_field, pass_field)
+            # 密码必须走 password_encoded：门户提交前要的是编码后的值。
+            # 填明文会让 base64/md5 模式的门户一律报密码错误，
+            # 而 Dr.COM 这类门户正是 base64，也是本项目的主目标场景。
             for selector, value in (
                 (selectors.get("user"), account.username),
-                (selectors.get("pass"), account.password),
+                (selectors.get("pass"), account.password_encoded),
             ):
                 if not selector:
                     continue
@@ -509,6 +512,10 @@ def _browser_selectors(page, user_field: str, pass_field: str) -> dict[str, str]
     out: dict[str, str] = {}
     user = _selector_for(page, user_field, CREDENTIAL_HINTS)
     pwd = _selector_for(page, pass_field, PASSWORD_HINTS)
+    # 账号框启发式全落空时兜底到页面上第一个可见文本框，
+    # 否则 Dr.COM 这类字段名毫无规律的门户在浏览器模式下必然失败
+    if not user:
+        user = _fallback_text_selector(page)
     out["user"] = user
     out["pass"] = f'{pwd}, input[type="password"]' if pwd else 'input[type="password"]'
     out["submit"] = (
@@ -565,13 +572,61 @@ def _selector_for(page, field_name: str, hints: tuple[str, ...]) -> str:  # noqa
 
 
 def _first_existing(page, selectors: list[str]) -> str:  # noqa: ANN001
-    """返回页面上真实存在的第一个选择器；都不存在则返回空串。"""
+    """返回页面上真实存在的第一个**可填写**选择器。
+
+    判据不能只是 count()>0：`[name*=user]` 这类模糊匹配会命中
+    user_ip / user_mac 这类 hidden 域——它们存在但填不进字。
+    Dr.COM 门户的账号框叫 DDDDD，启发式猜不到 user，
+    只能靠模糊匹配撞，结果撞进隐藏域，报出无意义的点击超时。
+    """
     for selector in selectors:
+        if _is_fillable(page, selector):
+            return selector
+    return ""
+
+
+# 可填写的可见文本输入框：排除 hidden / readonly / disabled
+FILLABLE_TEXT_FALLBACK = (
+    'input[type="text"]:not([type="hidden"]):not([readonly]):not([disabled])'
+)
+
+
+def _is_fillable(page, selector: str) -> bool:  # noqa: ANN001
+    """选择器是否指向至少一个能看见也能改的输入框。"""
+    try:
+        locator = page.locator(selector)
+        count = locator.count()
+    except Exception:  # noqa: BLE001 - 选择器非法
+        return False
+    for index in range(min(count, 4)):
         try:
-            if page.locator(selector).count() > 0:
-                return selector
-        except Exception:  # noqa: BLE001 - 选择器非法时直接跳过
+            el = locator.nth(index)
+            if el.is_visible() and el.is_editable():
+                return True
+        except Exception:  # noqa: BLE001
             continue
+    return False
+
+
+def _fallback_text_selector(page) -> str:  # noqa: ANN001
+    """启发式全落空时的兜底：页面上第一个可见可编辑文本框。
+
+    没有这一步，Dr.COM 这类字段名毫无规律的门户在浏览器模式下
+    必然失败——账号框叫 DDDDD，既不叫 user 也不叫 name。
+    """
+    for selector in (FILLABLE_TEXT_FALLBACK, "input:not([type=hidden]):not([type=password])"):
+        try:
+            locator = page.locator(selector)
+            total = locator.count()
+        except Exception:  # noqa: BLE001
+            continue
+        for index in range(total):
+            try:
+                el = locator.nth(index)
+                if el.is_visible() and el.is_editable():
+                    return f"{selector} >> nth={index}"
+            except Exception:  # noqa: BLE001
+                continue
     return ""
 
 
