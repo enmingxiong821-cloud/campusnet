@@ -47,12 +47,27 @@ class _StubLocator:
     def count(self) -> int:
         return 1 if self.selector in self.page.present else 0
 
+    def nth(self, index: int) -> "_StubLocator":
+        return self
+
+    def is_visible(self) -> bool:
+        return self.selector in self.page.fillable
+
+    def is_editable(self) -> bool:
+        return self.selector in self.page.fillable
+
 
 class _StubPage:
-    """按选择器集合回答「这个元素存在吗」的假页面。"""
+    """按选择器集合回答「这个元素存在且能填吗」的假页面。
 
-    def __init__(self, *present: str) -> None:
+    present 声明存在的元素，fillable 声明其中真正可见可改的。
+    分开是为了模拟 `[name*=user]` 命中 user_ip / user_mac 这类
+    hidden 域的情形：存在但填不进字。
+    """
+
+    def __init__(self, *present: str, fillable: tuple[str, ...] | None = None) -> None:
         self.present = set(present)
+        self.fillable = set(fillable if fillable is not None else present)
 
     def locator(self, selector: str):
         return _StubLocator(selector, self)
@@ -117,11 +132,21 @@ def test_browser_selectors_uses_named_fields() -> None:
 
 
 class _Locator:
-    def __init__(self, count: int) -> None:
+    def __init__(self, count: int, fillable: bool = True) -> None:
         self._count = count
+        self._fillable = fillable
 
     def count(self) -> int:
         return self._count
+
+    def nth(self, index: int) -> "_Locator":
+        return self
+
+    def is_visible(self) -> bool:
+        return self._fillable
+
+    def is_editable(self) -> bool:
+        return self._fillable
 
 
 class _Page:
@@ -139,6 +164,7 @@ class _Page:
         content='{"result":1}',
         url="http://10.0.0.1/ok",
         login_form_ready: bool = True,
+        hidden_selectors: tuple[str, ...] = (),
     ):
         self.calls: list[tuple] = []
         self.fail_fill = set(fail_fill)
@@ -146,11 +172,16 @@ class _Page:
         self._content = content
         self.url = url
         self.login_form_ready = login_form_ready
+        # 这些选择器存在但不可见不可改，模拟 user_ip / user_mac 这类 hidden 域
+        self.hidden_selectors = set(hidden_selectors)
 
     def goto(self, url, wait_until=None, timeout=None):
         self.calls.append(("goto", url, wait_until, timeout))
 
     def locator(self, selector: str):
+        base = selector.split(">> nth=")[0]
+        if base in self.hidden_selectors:
+            return _Locator(1, fillable=False)
         return _Locator(1 if self.login_form_ready else 0)
 
     def fill(self, selector, value, timeout=None):
