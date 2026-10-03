@@ -11,6 +11,7 @@ from __future__ import annotations
 import html
 import json
 import re
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -27,6 +28,30 @@ LOGIN_STATES = ("success", "already_online", "failed", "error", "unknown")
 
 CREDENTIAL_HINTS = ("user", "name", "account", "login", "dddd", "domain", "operator")
 PASSWORD_HINTS = ("pass", "pwd", "password", "upass", "0mkkey", "upwd")
+
+# 已认证会话的标志：命中即说明这台机器本来就在线，不需要再登录。
+# srun_portal_success 是 H3C 新版门户的登录成功页（西北农林科大在用）。
+# 门户按 IP 判定会话，用全新无 cookie 的浏览器打开也会直接落这里。
+ALREADY_AUTH_URL_MARKERS = (
+    "srun_portal_success",
+    "portal_success",
+    "success.html",
+    "/success",
+)
+
+# 登录表单「渲染完成」的判据：必须出现密码框。
+#
+# 不能拿 #username 当判据 —— 西农大门户的已认证成功页上有个 id="username"
+# 的非 input 元素（显示当前账号），只等它出现会把成功页误判成登录页，
+# 然后拿着不存在的表单去填字段，报出一堆无意义的超时。
+# 密码框是所有门户登录页的共同特征，成功页上不会有。
+LOGIN_FORM_READY_SELECTOR = '#password, input[type="password"]'
+
+
+def looks_already_authenticated(url: str) -> bool:
+    """URL 是否指向门户的登录成功页。"""
+    low = (url or "").lower()
+    return any(marker in low for marker in ALREADY_AUTH_URL_MARKERS)
 
 
 # ---------------------------------------------------------------- 表单解析
@@ -380,12 +405,40 @@ def browser_login(
 
     emit("browser", f"正在启动浏览器（{'无头' if headless else '有头'}模式）")
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=headless)
+        # 优先用系统已装的 Chrome/Edge：Playwright 自带的 Chromium 在校园网下常被
+        # CDN 重置下载失败，而 channel 参数直接复用本机浏览器，不需要额外下载。
+        try:
+            browser = pw.chromium.launch(channel="chrome", headless=headless)
+        except Exception:  # noqa: BLE001 - 没有 Chrome 就退回内置 Chromium
+            emit("browser", "未找到系统 Chrome，改用 Playwright 内置 Chromium")
+            browser = pw.chromium.launch(headless=headless)
         try:
             ctx = browser.new_context(user_agent=DEFAULT_USER_AGENT)
             page = ctx.new_page()
             emit("connect", f"正在打开门户 {portal}")
-            page.goto(portal, wait_until="domcontentloaded", timeout=timeout * 1000)
+            page.goto(
+                portal,
+                wait_until="domcontentloaded",
+                timeout=timeout * 1000,
+            )
+
+            # 登录区由 JS 渲染，domcontentloaded 时还没出现。
+            # 先确认是不是已经认证过了——按 IP 判定的门户会直接跳成功页。
+            if not _wait_for_login_form(page, timeout=timeout):
+                if looks_already_authenticated(page.url):
+                    final_url = page.url
+                    ctx.close()
+                    emit("done", "门户显示本机已认证，无需重复登录")
+                    return LoginResult(
+                        "already_online",
+                        "门户按 IP 判定会话，这台机器已认证，无需重复登录",
+                        f"url={final_url}",
+                    )
+                return LoginResult(
+                    "error",
+                    "登录表单没有渲染出来，门户可能改了页面结构",
+                    f"url={page.url}",
+                )
 
             selectors = _browser_selectors(page, user_field, pass_field)
             for selector, value in (
@@ -446,23 +499,79 @@ def _browser_selectors(page, user_field: str, pass_field: str) -> dict[str, str]
     所以 `pwd or 兜底` 里的兜底是死代码。
     改成用逗号把两者串成一个选择器，
     让浏览器按顺序尝试，字段名猜错时仍能落到 type=password 上。
+
+    提交按钮同理：H3C 新版门户（srun_portal_pc，西农大在用）
+    用的是 `<button type="button" id="login-account">`，
+    既不是 submit 类型也没有 login-btn 类，
+    只能靠链尾的裸 button 撞上——顺序一变就点错按钮。
+    把 id 显式放到链首，别指望撞运气。
     """
     out: dict[str, str] = {}
-    user = _selector_for(user_field, CREDENTIAL_HINTS)
-    pwd = _selector_for(pass_field, PASSWORD_HINTS)
+    user = _selector_for(page, user_field, CREDENTIAL_HINTS)
+    pwd = _selector_for(page, pass_field, PASSWORD_HINTS)
     out["user"] = user
     out["pass"] = f'{pwd}, input[type="password"]' if pwd else 'input[type="password"]'
-    out["submit"] = 'input[type="submit"], button[type="submit"], #loginSubmitBtn, .login-btn, button'
+    out["submit"] = (
+        "#login-account, input[type=submit], button[type=submit], "
+        "#loginSubmitBtn, .login-btn, button"
+    )
     return out
 
 
-def _selector_for(field_name: str, hints: tuple[str, ...]) -> str:
+def _wait_for_login_form(page, timeout: float = 30.0) -> bool:  # noqa: ANN001
+    """等登录表单渲染出来。
+
+    门户登录区由 JS 动态插入，domcontentloaded 时 DOM 里一个 input 都没有
+    （实测西农大 srun_portal_pc 就是这样）。直接往下填字段会全部落空。
+
+    分两阶段轮询：先等密码框出现（表单渲染完成的标志），
+    再回查一次已认证 URL —— 有些门户按 IP 判定会话，
+    会直接跳成功页，那边永远等不到密码框。
+    """
+    deadline = time.monotonic() + min(timeout, 20.0)
+    interval = 0.4
+    while time.monotonic() < deadline:
+        try:
+            if page.locator(LOGIN_FORM_READY_SELECTOR).count() > 0:
+                return True
+        except Exception:  # noqa: BLE001 - 页面正在跳转时定位器会抛
+            pass
+        if looks_already_authenticated(page.url):
+            return False
+        try:
+            page.wait_for_timeout(int(interval * 1000))
+        except Exception:  # noqa: BLE001
+            pass
+        interval = min(interval * 1.4, 1.5)
+    return False
+
+
+def _selector_for(page, field_name: str, hints: tuple[str, ...]) -> str:  # noqa: ANN001
+    """在真实 DOM 上逐个试探候选选择器，返回第一个真能命中的。
+
+    不能按顺序盲取第一个：`_candidate_selectors` 把 name 放最前，
+    但西农大门户的输入框只有 id、没有 name，
+    `input[name="username"]` 在页面上永远匹配不到。
+    """
     if field_name:
-        for selector in _candidate_selectors(field_name):
-            return selector
+        hit = _first_existing(page, _candidate_selectors(field_name))
+        if hit:
+            return hit
     for hint in hints:
-        for selector in _candidate_selectors(hint):
-            return selector
+        hit = _first_existing(page, _candidate_selectors(hint))
+        if hit:
+            return hit
+    return ""
+
+
+def _first_existing(page, selectors: list[str]) -> str:  # noqa: ANN001
+    """返回页面上真实存在的第一个选择器；都不存在则返回空串。"""
+    for selector in selectors:
+        try:
+            if page.locator(selector).count() > 0:
+                return selector
+        except Exception:  # noqa: BLE001 - 选择器非法时直接跳过
+            continue
     return ""
 
 
