@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from . import crypto
-from .paths import DB_PATH, SCHEMA_PATH
+from .paths import SCHEMA_PATH, db_path as db_path_default
 
 _WRITE_LOCK = threading.Lock()
 
@@ -90,8 +90,10 @@ class Account:
 
 
 class Store:
-    def __init__(self, db_path: Path | str = DB_PATH) -> None:
-        self.db_path = Path(db_path)
+    """SQLite 存储。默认路径在实例化时才解析，改环境变量能立刻生效。"""
+
+    def __init__(self, db_path: Path | str | None = None) -> None:
+        self.db_path = Path(db_path) if db_path else db_path_default()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.init_db()
 

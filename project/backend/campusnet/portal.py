@@ -359,6 +359,13 @@ def browser_login(
 ) -> LoginResult:
     """用 Playwright 驱动真实浏览器完成登录，覆盖 JS / 验证码场景。"""
     emit = on_progress or _noop
+
+    # 先校验自己的配置，再查依赖：没配门户地址时让用户去装 playwright
+    # 是白折腾，改配置比重装依赖常见得多。
+    portal = account.portal_url.strip()
+    if not portal:
+        return LoginResult("error", "未配置门户地址", "")
+
     try:
         from playwright.sync_api import sync_playwright  # type: ignore
     except ImportError:
@@ -367,10 +374,6 @@ def browser_login(
             "未安装 playwright，无法使用浏览器登录；请 pip install playwright && playwright install chromium",
             "",
         )
-
-    portal = account.portal_url.strip()
-    if not portal:
-        return LoginResult("error", "未配置门户地址", "")
 
     user_field = account.username_field
     pass_field = account.password_field
@@ -408,7 +411,9 @@ def browser_login(
                     except Exception:  # noqa: BLE001
                         continue
 
-            click_target = selectors.get("submit") or "input[type=submit], button[type=submit], button"
+            click_target = selectors.get("submit") or (
+                'input[type="submit"], button[type="submit"], button'
+            )
             try:
                 page.click(click_target, timeout=8000)
             except Exception as exc:  # noqa: BLE001
@@ -435,12 +440,18 @@ def browser_login(
 
 
 def _browser_selectors(page, user_field: str, pass_field: str) -> dict[str, str]:  # noqa: ANN001
-    """把字段名映射成 CSS 选择器，并准备常见兜底。"""
+    """把字段名映射成 CSS 选择器，并准备常见兜底。
+
+    密码框要特殊处理：`PASSWORD_HINTS` 永远能猜出一个名字，
+    所以 `pwd or 兜底` 里的兜底是死代码。
+    改成用逗号把两者串成一个选择器，
+    让浏览器按顺序尝试，字段名猜错时仍能落到 type=password 上。
+    """
     out: dict[str, str] = {}
     user = _selector_for(user_field, CREDENTIAL_HINTS)
     pwd = _selector_for(pass_field, PASSWORD_HINTS)
     out["user"] = user
-    out["pass"] = pwd or 'input[type="password"]'
+    out["pass"] = f'{pwd}, input[type="password"]' if pwd else 'input[type="password"]'
     out["submit"] = 'input[type="submit"], button[type="submit"], #loginSubmitBtn, .login-btn, button'
     return out
 

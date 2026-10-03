@@ -18,7 +18,21 @@ FRONTEND_DIR = ROOT / "project" / "frontend"
 UTILS_DIR = ROOT / "utils"
 DOC_DIR = ROOT / "doc"
 DATABASE_DIR = ROOT / "database"
-DB_PATH = Path(os.environ.get("CAMPUSNET_DB", DATABASE_DIR / "campusnet.db"))
+def db_path() -> Path:
+    """解析数据库路径。
+
+    必须在调用时读环境变量：如果在模块导入时求值成常量，
+    之后设置的 CAMPUSNET_DB 就完全失效，测试与多实例隔离都做不到。
+    """
+    override = os.environ.get("CAMPUSNET_DB")
+    if override:
+        return Path(override)
+    return DATABASE_DIR / "campusnet.db"
+
+
+# 兼容旧引用：导入时的快照，仅供不便改动调用方时使用。
+# 新代码请调 db_path()，否则环境变量改不动。
+DB_PATH = db_path()
 SCHEMA_PATH = DATABASE_DIR / "schema.sql"
 
 # 后端 API 端口（2001-3000），前端静态端口（1001-2000）

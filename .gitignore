@@ -6,6 +6,13 @@ __pycache__/
 venv/
 *.egg-info/
 
+# 测试覆盖率产物
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.pytest-workspace/
+
 # 数据库运行时文件与本地备份（schema.sql 需要入库）
 database/*.db
 database/*.db-shm
