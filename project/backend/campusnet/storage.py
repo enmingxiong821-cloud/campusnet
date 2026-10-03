@@ -248,6 +248,16 @@ class Store:
             row = conn.execute("SELECT COUNT(*) AS n FROM events").fetchone()
         return int(row["n"]) if row else 0
 
+    def event_exists(self, event_id: int) -> bool:
+        """确认某条事件还在表里。
+
+        裁剪限频要用它兜底：记过一次公告后，后续轮次的裁剪会把那条
+        公告本身删掉，若只看时间戳就永远不会补记。
+        """
+        with self.connect() as conn:
+            row = conn.execute("SELECT 1 FROM events WHERE id = ? LIMIT 1", (event_id,)).fetchone()
+        return row is not None
+
     # ---------- settings ----------
     def set_setting(self, key: str, value: Any) -> None:
         blob = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)

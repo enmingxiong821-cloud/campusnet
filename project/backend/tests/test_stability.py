@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from campusnet.monitor import DEFAULT_MAX_EVENTS, Monitor
+from campusnet.monitor import DEFAULT_MAX_EVENTS, PRUNE_STATS_KEY, Monitor
 from campusnet.storage import Store
 
 
@@ -82,6 +82,129 @@ def test_monitor_prunes_after_each_round(store, account, online_probe) -> None: 
 
     # 裁剪后只剩最近 5 条，加上「已裁剪 N 条」这条日志本身
     assert store.event_count() <= 6
+
+
+def test_prune_announces_only_once(store, account, online_probe) -> None:  # noqa: ANN001
+    """裁剪公告不能每轮都写。
+
+    每轮补一条 maintenance 记录的话，它自己就成了永远保留的那条，
+    长跑下来 2000 条里塞满裁剪公告（实测 341 条）。
+
+    注意断言的是「不刷屏」而非「永远留存」：公告本身也是历史事件，
+    keep=5 时它照样会被后续轮次裁掉，这符合预期。
+    """
+    store.add_account(account)
+    store.set_setting("max_events", 5)
+    mon = Monitor(store, interval=10)
+
+    max_maintenance = 0
+    for _ in range(30):
+        for i in range(10):
+            store.add_event(f"噪声 {i}")
+        mon.check_all()
+        count = len([e for e in store.list_events(limit=500) if e["stage"] == "maintenance"])
+        max_maintenance = max(max_maintenance, count)
+
+    assert max_maintenance <= 1, f"30 轮内公告最多出现 1 次，实际 {max_maintenance} 次"
+    assert mon._prune_announced is True
+    # 首次裁剪时确实记过一次公告
+    assert store.event_count() <= 6
+
+
+def test_prune_stats_accumulate_in_settings(store, account, online_probe) -> None:  # noqa: ANN001
+    """裁剪统计落在 settings，不放 events。
+
+    公告写进 events 会被下一轮裁掉，于是「计数器认为已记录、
+    实际记录已消失」，长跑下来公告永远不再出现。
+    """
+    store.add_account(account)
+    store.set_setting("max_events", 5)
+    mon = Monitor(store, interval=10)
+
+    for _ in range(20):
+        for i in range(10):
+            store.add_event(f"噪声 {i}")
+        mon.check_all()
+
+    stats = mon.prune_stats()
+    assert stats["total_removed"] > 0
+    assert stats["keep"] == 5
+    assert stats["last_at"] is not None
+    # 统计写在 settings 里，因此不会被裁剪掉
+    assert store.get_setting(PRUNE_STATS_KEY) is not None
+
+
+def test_prune_stats_persist_across_monitor_restart(store, account, online_probe) -> None:  # noqa: ANN001
+    """重启Monitor 后累计统计仍在，且不会重复发公告。"""
+    store.add_account(account)
+    store.set_setting("max_events", 5)
+
+    for _ in range(10):
+        for i in range(10):
+            store.add_event(f"噪声 {i}")
+        Monitor(store, interval=10).check_all()
+
+    first_total = Monitor(store, interval=10).prune_stats()["total_removed"]
+    assert first_total > 0
+
+    for _ in range(10):
+        for i in range(10):
+            store.add_event(f"噪声 {i}")
+        Monitor(store, interval=10).check_all()
+
+    second = Monitor(store, interval=10).prune_stats()
+    assert second["total_removed"] > first_total
+    maintenance = [e for e in store.list_events(limit=2000) if e["stage"] == "maintenance"]
+    assert len(maintenance) == 1
+
+
+def test_prune_stats_survive_event_pruning(store, account, online_probe) -> None:  # noqa: ANN001
+    """无论事件怎么裁，统计都不会丢。"""
+    store.add_account(account)
+    store.set_setting("max_events", 3)
+    mon = Monitor(store, interval=10)
+
+    for _ in range(40):
+        for i in range(10):
+            store.add_event(f"噪声 {i}")
+        mon.check_all()
+
+    assert store.event_count() <= 4
+    assert mon.prune_stats()["total_removed"] > 0
+    assert store.get_setting(PRUNE_STATS_KEY)["keep"] == 3
+
+
+def test_prune_not_written_when_nothing_removed(store, account, online_probe) -> None:  # noqa: ANN001
+    """没裁掉东西时不该产生任何裁剪记录。"""
+    store.add_account(account)
+    store.set_setting("max_events", 1000)
+    mon = Monitor(store, interval=10)
+
+    for _ in range(5):
+        mon.check_all()
+
+    maintenance = [e for e in store.list_events(limit=500) if e["stage"] == "maintenance"]
+    assert maintenance == []
+    assert mon.prune_stats()["total_removed"] == 0
+    assert mon.prune_stats()["last_at"] is None
+
+
+def test_prune_stats_default_shape_when_never_run(store) -> None:  # noqa: ANN001
+    """没裁过时统计也有完整结构，前端不会拿到 None。"""
+    stats = Monitor(store, interval=10).prune_stats()
+    assert set(stats) >= {"last_removed", "last_at", "total_removed", "keep", "suppressed"}
+    assert stats["keep"] == DEFAULT_MAX_EVENTS
+
+
+def test_prune_stats_key_is_constant() -> None:
+    """统计的 settings 键名不能随手改，否则读不到历史统计。"""
+    assert PRUNE_STATS_KEY == "prune_stats"
+
+
+def test_prune_log_interval_rejects_negative(store) -> None:  # noqa: ANN001
+    """负数间隔会被夹到 0，不会让限频逻辑失效。"""
+    mon = Monitor(store, interval=10, prune_log_interval=-99.0)
+    assert mon.prune_log_interval == 0.0
 
 
 def test_monitor_prune_failure_does_not_break_results(
