@@ -22,6 +22,29 @@ DEFAULT_INTERVAL = 60
 MIN_INTERVAL = 10
 MAX_INTERVAL = 3600
 DEFAULT_MAX_EVENTS = 2000
+DEFAULT_PROGRESS_CAP = 300
+
+
+@dataclass
+class ProgressItem:
+    """一条实时进度：谁、在干什么、什么时候。"""
+
+    account_id: int
+    account_name: str
+    stage: str
+    message: str
+    ts: float
+    seq: int = 0
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "account_id": self.account_id,
+            "account_name": self.account_name,
+            "stage": self.stage,
+            "message": self.message,
+            "ts": round(self.ts, 3),
+            "seq": self.seq,
+        }
 
 
 @dataclass
@@ -57,16 +80,67 @@ class Monitor:
         interval: int = DEFAULT_INTERVAL,
         headless: bool = True,
         on_event: Callable[[dict[str, Any]], None] | None = None,
+        on_progress: Callable[[dict[str, Any]], None] | None = None,
+        progress_cap: int = DEFAULT_PROGRESS_CAP,
     ) -> None:
         self.store = store
         self.interval = self._clamp(interval)
         self.headless = headless
         self.on_event = on_event
+        self.on_progress = on_progress
+        self.progress_cap = max(10, int(progress_cap))
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
+        self._progress: list[ProgressItem] = []
+        self._progress_seq = 0
+        self._progress_lock = threading.Lock()
         self.last_results: list[dict[str, Any]] = []
         self.running = False
+
+    # ---------- 实时进度 ----------
+    def emit_progress(self, account: Account, stage: str, message: str) -> None:
+        """记录一条进度并推给订阅者。
+
+        环形缓冲 + seq 单调递增：前端拿 seq 增量拉取，
+        断线重连也不会漏消息或重复。
+        """
+        with self._progress_lock:
+            self._progress_seq += 1
+            item = ProgressItem(
+                account_id=account.id,
+                account_name=account.name,
+                stage=stage,
+                message=message,
+                ts=time.time(),
+                seq=self._progress_seq,
+            )
+            self._progress.append(item)
+            if len(self._progress) > self.progress_cap:
+                del self._progress[: len(self._progress) - self.progress_cap]
+        if self.on_progress:
+            try:
+                self.on_progress(item.as_dict())
+            except Exception:  # noqa: BLE001 - 订阅者异常不能影响检测
+                pass
+
+    def progress_since(self, seq: int = 0, account_id: int | None = None) -> dict[str, Any]:
+        with self._progress_lock:
+            items = [p for p in self._progress if p.seq > seq]
+            if account_id is not None:
+                items = [p for p in items if p.account_id == account_id]
+            return {
+                "items": [p.as_dict() for p in items],
+                "seq": self._progress_seq,
+            }
+
+    def latest_progress(self, limit: int = 30) -> dict[str, Any]:
+        with self._progress_lock:
+            items = self._progress[-max(1, min(limit, self.progress_cap)) :]
+            return {
+                "items": [p.as_dict() for p in items],
+                "seq": self._progress_seq,
+            }
 
     @staticmethod
     def _clamp(value: int) -> int:
@@ -103,10 +177,16 @@ class Monitor:
             self._stop.wait(self.interval)
 
     def check_account(self, account: Account) -> CheckOutcome:
-        """探活一次；离线则按 max_retries 重试登录。"""
+        """探活一次；离线则按 max_retries 重试登录。
+
+        每个阶段都 emit_progress，调用方能实时看到「卡在哪一步」。
+        """
         started = time.perf_counter()
+        self.emit_progress(account, "start", f"开始检测 {account.name}")
+        self.emit_progress(account, "probe", f"正在探测 {account.probe_url}")
         check = probe_mod.probe(account.probe_url)
         if check.online:
+            self.emit_progress(account, "done", "网络已放行，无需登录")
             outcome = CheckOutcome(
                 account.id, account.name, True, STATE_ONLINE, "网络已放行", check.detail
             )
@@ -128,14 +208,26 @@ class Monitor:
             state=STATE_OFFLINE,
             account_id=account.id,
         )
+        self.emit_progress(
+            account, "offline", f"检测到掉线（{check.status}），准备登录重连"
+        )
 
         attempts = 0
         last = portal.LoginResult("failed", "未执行登录", "")
         for attempt in range(1, max(1, account.max_retries) + 1):
             if self._stop.is_set():
+                self.emit_progress(account, "abort", "收到停止指令，中断重连")
                 break
             attempts = attempt
-            last = portal.login(account, headless=self.headless)
+            total = max(1, account.max_retries)
+            self.emit_progress(
+                account, "retry", f"第 {attempt}/{total} 次尝试登录"
+            )
+
+            def _progress(stage: str, message: str, _acc: Account = account) -> None:
+                self.emit_progress(_acc, stage, message)
+
+            last = portal.login(account, headless=self.headless, on_progress=_progress)
             self.store.add_event(
                 f"{account.name}: 第 {attempt} 次登录 -> {last.state} ({last.message})",
                 level="info" if last.ok else "warning",
@@ -144,10 +236,19 @@ class Monitor:
                 account_id=account.id,
             )
             if last.ok:
+                self.emit_progress(account, "verify", "门户已受理，复检网络状态")
                 confirm = probe_mod.probe(account.probe_url)
                 if confirm.online:
+                    self.emit_progress(account, "done", f"重连成功（{last.message}）")
                     break
-            time.sleep(min(3 * attempt, 8))
+                self.emit_progress(account, "warn", "门户说成功，但复检仍未放行")
+            else:
+                self.emit_progress(account, "warn", f"登录未成功：{last.message}")
+
+            if attempt < max(1, account.max_retries):
+                wait = min(3 * attempt, 8)
+                self.emit_progress(account, "wait", f"{wait} 秒后重试")
+                time.sleep(wait)
 
         elapsed = time.perf_counter() - started
         if last.ok:
@@ -159,6 +260,7 @@ class Monitor:
 
         state = STATE_FAILED if last.state == "failed" else STATE_OFFLINE
         self.store.set_state(account.id, state)
+        self.emit_progress(account, "fail", f"重连未成功：{last.message}")
         self.store.add_event(
             f"{account.name}: 重连未成功 - {last.message}",
             level="error",

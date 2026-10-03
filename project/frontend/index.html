@@ -114,11 +114,57 @@
   .hint{font-size:12px;color:var(--txt-mute);margin-top:4px}
   .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
   .flex-end{justify-content:flex-end}
+
+  /* 实时进度面板 */
+  #progressPanel{
+    margin-bottom:20px;padding:0;overflow:hidden;
+    opacity:0;transform:translateY(-6px);
+    transition:opacity .22s ease,transform .22s ease;
+    pointer-events:none;
+  }
+  #progressPanel.show{opacity:1;transform:none;pointer-events:auto}
+  .pg-head{
+    display:flex;align-items:center;gap:10px;padding:13px 18px;
+    border-bottom:1px solid var(--line);
+  }
+  .pg-head h3{
+    font-size:12px;color:var(--txt-dim);text-transform:uppercase;
+    letter-spacing:.8px;font-weight:600;
+  }
+  .pg-spin{
+    width:13px;height:13px;border:2px solid rgba(79,140,255,.28);
+    border-top-color:var(--accent);border-radius:50%;animation:spin .75s linear infinite;
+  }
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .pg-stage{
+    margin-left:auto;font-size:11.5px;font-weight:600;padding:3px 10px;
+    border-radius:999px;background:var(--accent-soft);color:var(--accent);
+  }
+  .pg-body{padding:12px 18px;max-height:260px;overflow-y:auto}
+  .pg-body:empty::after{
+    content:'等待检测…';color:var(--txt-mute);font-size:12.5px;
+  }
+  .pg-item{
+    display:flex;gap:10px;padding:5px 0;font-size:12.5px;
+    animation:pgIn .2s ease;
+  }
+  @keyframes pgIn{from{opacity:0;transform:translateX(-6px)}}
+  .pg-item .t{
+    color:var(--txt-mute);font-family:var(--mono);font-size:11px;
+    white-space:nowrap;padding-top:1px;min-width:58px;
+  }
+  .pg-item .who{color:var(--txt-dim);font-weight:550;white-space:nowrap}
+  .pg-item .msg{color:var(--txt)}
+  .pg-item.done .msg{color:var(--ok)}
+  .pg-item.fail .msg,.pg-item.warn .msg{color:var(--warn)}
+  .pg-item.offline .msg{color:var(--err)}
+
   @media(max-width:640px){
     main{padding:14px} header{padding:12px 14px;gap:10px}
     .brand span.full{display:none}
     .card .val{font-size:20px}
     th:nth-child(3),td:nth-child(3){display:none}
+    .pg-item .who{display:none}
   }
 </style>
 </head>
@@ -142,6 +188,15 @@
     <div class="card"><h3>在线</h3><div class="val" id="cOnline" style="color:var(--ok)">0</div><div class="sub" id="cOnlineSub">—</div></div>
     <div class="card"><h3>掉线</h3><div class="val" id="cOffline" style="color:var(--err)">0</div><div class="sub" id="cOfflineSub">—</div></div>
     <div class="card"><h3>检测间隔</h3><div class="val" id="cInterval">—</div><div class="sub" id="cLastRun">尚未运行</div></div>
+  </div>
+
+  <div class="panel" id="progressPanel">
+    <div class="pg-head">
+      <div class="pg-spin"></div>
+      <h3 id="pgTitle">正在检测</h3>
+      <span class="pg-stage" id="pgStage">连接中</span>
+    </div>
+    <div class="pg-body" id="pgBody"></div>
   </div>
 
   <div class="panel">
@@ -247,6 +302,13 @@ const STATE_TEXT = {
   online:'在线', logged_in:'已登录', offline:'掉线', failed:'登录失败', unknown:'未检测'
 };
 
+/* 进度阶段 → 中文标签。后端只给英文 stage，中文映射留在前端。 */
+const STAGE_TEXT = {
+  start:'开始', probe:'探活', offline:'掉线', retry:'重试', connect:'连接门户',
+  parse:'识别表单', submit:'提交登录', verify:'复检网络', done:'完成',
+  fail:'失败', warn:'注意', abort:'已中断', wait:'等待', browser:'启动浏览器'
+};
+
 async function api(path, opts = {}) {
   const res = await fetch(path, {
     headers: { 'Content-Type': 'application/json' },
@@ -256,6 +318,59 @@ async function api(path, opts = {}) {
   const data = await res.json().catch(() => ({ ok:false, error:'响应不是 JSON' }));
   if (!res.ok || data.ok === false) throw new Error(data.error || `HTTP ${res.status}`);
   return data;
+}
+
+/* ---------------- 实时进度 ---------------- */
+
+const progress = { seq: 0, items: [], active: false };
+
+function fmtClock(ts) {
+  const d = new Date(ts * 1000);
+  return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}:${String(d.getSeconds()).padStart(2,'0')}`;
+}
+
+function renderProgress() {
+  const panel = $('progressPanel'), body = $('pgBody');
+  if (!progress.active) { panel.classList.remove('show'); return; }
+  panel.classList.add('show');
+
+  $('pgStage').textContent = STAGE_TEXT[progress.items.at(-1)?.stage] || '进行中';
+  body.innerHTML = progress.items.slice(-40).map(it => `
+    <div class="pg-item ${esc(it.stage)}">
+      <span class="t">${fmtClock(it.ts)}</span>
+      <span class="who">${esc(it.account_name)}</span>
+      <span class="msg">${esc(it.message)}</span>
+    </div>`).join('');
+  body.scrollTop = body.scrollHeight;
+}
+
+/**
+ * 增量拉进度。带 seq 只取新增，断线重连不丢消息也不重复。
+ * 完成后面板淡出，不长期占屏。
+ */
+async function pollProgress() {
+  try {
+    const data = await api(`/api/progress?seq=${progress.seq}`);
+    progress.seq = data.seq;
+    if (data.items && data.items.length) {
+      progress.items.push(...data.items);
+      if (progress.items.length > 120) progress.items.splice(0, progress.items.length - 120);
+      progress.active = true;
+      renderProgress();
+    } else if (!data.checking && progress.active) {
+      progress.active = false;
+      renderProgress();
+    }
+  } catch {
+    // 进度轮询失败不该影响主流程，等下一轮
+  }
+}
+
+function resetProgress() {
+  progress.seq = 0;
+  progress.items = [];
+  progress.active = true;
+  renderProgress();
 }
 
 function toast(msg, kind = '') {
@@ -324,11 +439,17 @@ function esc(s) {
 async function rowAction(act, id) {
   const acc = state.accounts.find(a => a.id === id);
   if (act === 'login') {
+    // 手动登录也可能跑十几秒（浏览器模式），期间持续拉进度
+    resetProgress();
+    pollProgress();
+    const watcher = setInterval(pollProgress, 900);
     try {
       const r = await api(`/api/accounts/${id}/login`, { method:'POST', body:{} });
+      await pollProgress();
       toast(`${acc.name}: ${r.message}`, r.state === 'failed' ? 'err' : 'ok');
       refresh();
     } catch (e) { toast('登录失败: ' + e.message, 'err'); }
+    finally { clearInterval(watcher); await pollProgress(); }
   } else if (act === 'edit') {
     openModal(acc);
   } else if (act === 'del') {
@@ -437,14 +558,24 @@ async function toggleMonitor() {
 async function probeNow() {
   $('btnProbe').disabled = true;
   state.monitor.checking = true; renderStatus();
+  resetProgress();               // 检测前清空进度，立刻开始拉
+  pollProgress();                // 先拉一次，避免第一条进度晚 900ms 才到
+  const watcher = setInterval(pollProgress, 900);
   try {
     const r = await api('/api/check', { method:'POST', body:{} });
     const bad = r.results.filter(x => !x.online);
     toast(bad.length ? `${r.results.length} 个账号，${bad.length} 个掉线` : '全部在线', bad.length ? 'err' : 'ok');
+    await pollProgress();        // 收尾再拉一次，拿到最后几条
     refresh();
     if (!$('tab-events').hidden) loadEvents();
   } catch (e) { toast('检测失败: ' + e.message, 'err'); }
-  finally { state.monitor.checking = false; $('btnProbe').disabled = false; renderStatus(); }
+  finally {
+    clearInterval(watcher);
+    await pollProgress();
+    state.monitor.checking = false;
+    $('btnProbe').disabled = false;
+    renderStatus();
+  }
 }
 
 async function loadSettings() {
@@ -506,7 +637,9 @@ $('btnDetectPortal').onclick = async () => {
 document.addEventListener('keydown', e => { if (e.key === 'Escape') $('modalBg').classList.remove('open'); });
 
 refresh();
-state.timer = setInterval(refresh, 10000);
+// 常态轮询：10 秒刷一次账号与状态，同时低频拉进度，
+// 这样后台监控触发重连时页面也会自动显示阶段，不必手动点。
+state.timer = setInterval(() => { refresh(); pollProgress(); }, 10000);
 </script>
 </body>
 </html>

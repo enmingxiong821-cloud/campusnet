@@ -250,7 +250,12 @@ def routes_actions(store: Store, manager: MonitorManager) -> dict[tuple[str, str
         if account is None:
             raise ApiError(HTTPStatus.NOT_FOUND, f"账号 {account_id} 不存在")
         monitor = manager.ensure(store)
-        result = portal.login(account, headless=monitor.headless)
+        # 手动登录也吐进度：浏览器模式下可能要等十几秒，不能让前端干等
+        result = portal.login(
+            account,
+            headless=monitor.headless,
+            on_progress=lambda stage, message: monitor.emit_progress(account, stage, message),
+        )
         store.add_event(
             f"手动登录 {account.name}: {result.state} - {result.message}",
             level="info" if result.ok else "warning",
@@ -264,6 +269,28 @@ def routes_actions(store: Store, manager: MonitorManager) -> dict[tuple[str, str
             {"ok": True, "state": result.state, "message": result.message, "detail": result.detail},
         )
 
+    def progress(ctx: dict[str, Any], h: ApiHandler) -> None:
+        """增量拉取实时进度。前端带上次 seq 回来，只拿新增部分。"""
+        query = ctx["query"]
+        try:
+            seq = int((query.get("seq") or ["0"])[0])
+        except ValueError:
+            raise ApiError(HTTPStatus.BAD_REQUEST, "seq 必须是整数") from None
+        account_raw = (query.get("account_id") or [""])[0]
+        try:
+            account_id = int(account_raw) if account_raw else None
+        except ValueError:
+            raise ApiError(HTTPStatus.BAD_REQUEST, f"account_id 非法: {account_raw}") from None
+
+        monitor = manager.ensure(store)
+        if (query.get("latest") or [""])[0] not in ("", "0", "false"):
+            payload = monitor.latest_progress(limit=int((query.get("limit") or ["30"])[0]))
+        else:
+            payload = monitor.progress_since(seq, account_id=account_id)
+        payload["ok"] = True
+        payload["checking"] = monitor.running
+        h._send(HTTPStatus.OK, payload)
+
     def check_all(_: dict[str, Any], h: ApiHandler) -> None:
         monitor = manager.ensure(store)
         results = monitor.check_all()
@@ -273,6 +300,7 @@ def routes_actions(store: Store, manager: MonitorManager) -> dict[tuple[str, str
         ("GET", "/api/probe"): probe_now,
         ("GET", "/api/detect-portal"): detect_portal,
         ("GET", "/api/discover"): discover_portal,
+        ("GET", "/api/progress"): progress,
         ("POST", "/api/accounts/{id}/login"): login_now,
         ("POST", "/api/check"): check_all,
     }
