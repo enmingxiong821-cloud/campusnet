@@ -1,0 +1,261 @@
+"""稳定性测试：事件裁剪、单实例锁、跨进程互斥。"""
+
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+from campusnet.monitor import DEFAULT_MAX_EVENTS, Monitor
+from campusnet.storage import Store
+
+
+@pytest.fixture()
+def online_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """让探活一律返回在线，避免测试碰真实网络。"""
+    from campusnet import monitor as monitor_mod
+
+    def fake_probe(url: str, timeout: float = 5.0, insecure: bool = False):
+        return monitor_mod.probe_mod.ProbeResult(True, "online", "ok", url)
+
+    monkeypatch.setattr(monitor_mod.probe_mod, "probe", fake_probe)
+
+
+# ---------- 事件裁剪 ----------
+
+
+def test_prune_events_keeps_latest(store: Store) -> None:
+    for i in range(50):
+        store.add_event(f"第 {i} 条")
+    deleted = store.prune_events(keep=10)
+
+    assert deleted == 40
+    events = store.list_events(limit=100)
+    assert len(events) == 10
+    assert events[0]["message"] == "第 49 条"
+
+
+def test_prune_events_is_noop_below_limit(store: Store) -> None:
+    for i in range(5):
+        store.add_event(f"e{i}")
+    assert store.prune_events(keep=100) == 0
+    assert store.event_count() == 5
+
+
+def test_prune_events_min_keep_is_one(store: Store) -> None:
+    for i in range(10):
+        store.add_event(f"e{i}")
+    store.prune_events(keep=0)
+    assert store.event_count() == 1
+
+
+def test_prune_events_rejects_negative(store: Store) -> None:
+    store.add_event("x")
+    store.prune_events(keep=-5)
+    assert store.event_count() == 1
+
+
+def test_prune_events_on_empty_table(store: Store) -> None:
+    assert store.prune_events(keep=10) == 0
+
+
+def test_event_count_tracks_writes(store: Store) -> None:
+    assert store.event_count() == 0
+    store.add_event("a")
+    store.add_event("b")
+    assert store.event_count() == 2
+    store.clear_events()
+    assert store.event_count() == 0
+
+
+def test_monitor_prunes_after_each_round(store, account, online_probe) -> None:  # noqa: ANN001
+    """一轮检查后应自动裁剪，而不是让事件表无限膨胀。"""
+    store.add_account(account)
+    store.set_setting("max_events", 5)
+    for i in range(30):
+        store.add_event(f"历史 {i}")
+
+    Monitor(store, interval=10).check_all()
+
+    # 裁剪后只剩最近 5 条，加上「已裁剪 N 条」这条日志本身
+    assert store.event_count() <= 6
+
+
+def test_monitor_prune_failure_does_not_break_results(
+    store, account, online_probe, monkeypatch
+) -> None:  # noqa: ANN001
+    """裁剪是维护任务，失败不该让检测结果丢失。"""
+    store.add_account(account)
+
+    def boom(*_a, **_k):
+        raise RuntimeError("prune down")
+
+    monkeypatch.setattr(store, "prune_events", boom)
+
+    results = Monitor(store, interval=10).check_all()
+
+    assert len(results) == 1 and results[0]["online"] is True
+    assert any("事件裁剪失败" in e["message"] for e in store.list_events(limit=50))
+
+
+def test_default_max_events_is_sane() -> None:
+    assert 100 <= DEFAULT_MAX_EVENTS <= 100_000
+
+
+# ---------- 单实例锁 ----------
+
+
+def test_lock_acquire_and_release(tmp_path: Path) -> None:
+    from campusnet.lockfile import SingleInstance
+
+    lock = SingleInstance(tmp_path / "cn.lock")
+    assert lock.acquire() is True
+    assert lock.holder_pid() == os.getpid()
+    lock.release()
+    assert lock.path.exists() is False
+
+
+def test_lock_repeat_acquire_is_idempotent(tmp_path: Path) -> None:
+    """同一实例重复 acquire 仍是 True，且 release 能真正清掉。"""
+    from campusnet.lockfile import SingleInstance
+
+    lock = SingleInstance(tmp_path / "cn.lock")
+    assert lock.acquire() is True
+    assert lock.acquire() is True
+    lock.release()
+    assert lock.path.exists() is False
+
+
+def test_lock_release_without_acquire_is_safe(tmp_path: Path) -> None:
+    from campusnet.lockfile import SingleInstance
+
+    SingleInstance(tmp_path / "cn.lock").release()  # 不应抛异常
+
+
+def test_lock_ignores_dead_holder(tmp_path: Path) -> None:
+    """上次崩溃留下的锁不能让服务永远起不来。"""
+    from campusnet.lockfile import SingleInstance
+
+    lock_path = tmp_path / "cn.lock"
+    lock_path.write_text("999999", encoding="utf-8")
+
+    lock = SingleInstance(lock_path)
+    assert lock.is_held_by_other_process() is False
+    assert lock.acquire() is True
+    lock.release()
+
+
+def test_lock_reports_live_foreign_holder(tmp_path: Path) -> None:
+    """别的活进程持锁时要认出来。"""
+    from campusnet.lockfile import SingleInstance
+
+    helper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        lock_path = tmp_path / "cn.lock"
+        lock_path.write_text(str(helper.pid), encoding="utf-8")
+
+        lock = SingleInstance(lock_path)
+        assert lock.is_held_by_other_process() is True
+        assert lock.acquire() is False
+    finally:
+        helper.terminate()
+        helper.wait(timeout=10)
+
+
+def test_lock_rejects_garbage_holder_file(tmp_path: Path) -> None:
+    from campusnet.lockfile import SingleInstance
+
+    lock_path = tmp_path / "cn.lock"
+    lock_path.write_text("这不是 PID", encoding="utf-8")
+
+    lock = SingleInstance(lock_path)
+    assert lock.holder_pid() is None
+    assert lock.acquire() is True
+    lock.release()
+
+
+def test_lock_works_as_context_manager(tmp_path: Path) -> None:
+    from campusnet.lockfile import SingleInstance
+
+    lock_path = tmp_path / "cn.lock"
+    with SingleInstance(lock_path) as lock:
+        assert lock.acquired is True
+        assert lock_path.exists()
+    assert lock_path.exists() is False
+
+
+# ---------- 跨进程互斥（真实验证） ----------
+
+
+_HELPER = """
+import sys, time
+sys.path.insert(0, sys.argv[2])
+from campusnet.lockfile import SingleInstance
+lock = SingleInstance(sys.argv[1])
+print('ACQUIRED' if lock.acquire() else 'BLOCKED', flush=True)
+time.sleep(3)
+lock.release()
+"""
+
+
+def _run_helper(lock_path: Path, backend: Path) -> str:
+    proc = subprocess.run(
+        [sys.executable, "-c", _HELPER, str(lock_path), str(backend)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    return proc.stdout.strip()
+
+
+def test_second_process_is_blocked_while_first_holds_lock(tmp_path: Path) -> None:
+    """真起一个子进程持锁，主进程必须拿不到 —— 这才是互斥要挡的场景。"""
+    from campusnet.lockfile import SingleInstance
+
+    backend = Path(__file__).resolve().parents[1]
+    lock_path = tmp_path / "cn.lock"
+
+    mine = SingleInstance(lock_path)
+    assert mine.acquire() is True
+
+    # 另一个进程看到本进程 PID 的锁，应当被挡
+    proc = subprocess.Popen(
+        [sys.executable, "-c", _HELPER, str(lock_path), str(backend)],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        line = proc.stdout.readline().strip()
+        assert line == "BLOCKED", f"子进程应被挡住，实际输出 {line!r}"
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)
+
+    mine.release()
+
+    # 释放后子进程就能拿到
+    assert _run_helper(lock_path, backend).startswith("ACQUIRED")
+
+
+def test_lock_survives_holder_process_exit(tmp_path: Path) -> None:
+    """持锁进程被杀掉后，锁必须能被接管。"""
+    backend = Path(__file__).resolve().parents[1]
+    lock_path = tmp_path / "cn.lock"
+
+    proc = subprocess.Popen(
+        [sys.executable, "-c", _HELPER, str(lock_path), str(backend)],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    assert proc.stdout.readline().strip() == "ACQUIRED"
+    proc.kill()
+    proc.wait(timeout=10)
+
+    from campusnet.lockfile import SingleInstance
+
+    lock = SingleInstance(lock_path)
+    assert lock.acquire() is True
+    lock.release()

@@ -17,6 +17,7 @@ import urllib.request
 from dataclasses import dataclass, field
 from http.cookiejar import CookieJar
 
+from . import charset as charset_mod
 from . import probe as probe_mod
 from .paths import DEFAULT_USER_AGENT
 from .storage import Account
@@ -194,20 +195,18 @@ def _fetch(
     if referer:
         headers["Referer"] = referer
     request = urllib.request.Request(url, data=data, headers=headers)
-    method = "POST" if data is not None else "GET"
     try:
         with opener.open(request, timeout=timeout) as resp:
-            body = resp.read(200_000).decode("utf-8", errors="replace")
             hdrs = {k.lower(): v for k, v in resp.headers.items()}
-            return resp.status, body, resp.geturl(), hdrs
+            raw = resp.read(200_000)
+            return resp.status, charset_mod.decode(raw, content_type=hdrs.get("content-type")), resp.geturl(), hdrs
     except urllib.error.HTTPError as exc:
-        body = ""
-        try:
-            body = exc.read(200_000).decode("utf-8", errors="replace")
-        except Exception:  # noqa: BLE001
-            pass
         hdrs = {k.lower(): v for k, v in exc.headers.items()} if exc.headers else {}
-        return exc.code, body, url, hdrs
+        try:
+            raw = exc.read(200_000)
+        except Exception:  # noqa: BLE001
+            raw = b""
+        return exc.code, charset_mod.decode(raw, content_type=hdrs.get("content-type")), url, hdrs
 
 
 def classify_response(body: str, status: int, final_url: str) -> LoginResult:

@@ -10,8 +10,10 @@ import urllib.error
 import urllib.request
 import zlib
 from dataclasses import dataclass
+from typing import Any
 from urllib.parse import urlsplit
 
+from . import charset as charset_mod
 from .paths import DEFAULT_USER_AGENT
 
 DEFAULT_PROBES = (
@@ -49,10 +51,15 @@ def _build_opener(insecure: bool) -> urllib.request.OpenerDirector:
     return opener
 
 
-def _decode_body(raw: bytes, encoding_header: str | None) -> str:
+def _decode_body(raw: bytes, headers: Any = None) -> str:
+    """解压后按页面声明的字符集解码，中文门户大量使用 GBK。"""
     if not raw:
         return ""
-    encoding = (encoding_header or "").lower()
+    encoding = ""
+    content_type = ""
+    if headers is not None:
+        encoding = (headers.get("Content-Encoding") or headers.get("content-encoding") or "").lower()
+        content_type = headers.get("Content-Type") or headers.get("content-type") or ""
     try:
         if "gzip" in encoding:
             raw = gzip.GzipFile(fileobj=io.BytesIO(raw)).read()
@@ -60,12 +67,7 @@ def _decode_body(raw: bytes, encoding_header: str | None) -> str:
             raw = zlib.decompress(raw, -zlib.MAX_WBITS)
     except OSError:
         pass
-    for charset in ("utf-8", "gbk", "latin-1"):
-        try:
-            return raw.decode(charset)
-        except UnicodeDecodeError:
-            continue
-    return raw.decode("utf-8", errors="replace")
+    return charset_mod.decode(raw, content_type=content_type)
 
 
 def probe(url: str, timeout: float = 5.0, insecure: bool = False) -> ProbeResult:
@@ -76,7 +78,7 @@ def probe(url: str, timeout: float = 5.0, insecure: bool = False) -> ProbeResult
     request = urllib.request.Request(url, headers={"Cache-Control": "no-cache"})
     try:
         with opener.open(request, timeout=timeout) as resp:
-            body = _decode_body(resp.read(4096), resp.headers.get("Content-Encoding"))
+            body = _decode_body(resp.read(4096), resp.headers)
             return ProbeResult(True, "online", body.strip()[:120], resp.geturl())
     except urllib.error.HTTPError as exc:
         location = exc.headers.get("Location", "") if exc.headers else ""

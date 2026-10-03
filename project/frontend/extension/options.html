@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>校园网自连 · 设置</title>
+<style>
+  :root{
+    --bg:#0f1218; --card:#1b212c; --line:#252c39;
+    --txt:#e6eaf2; --dim:#98a2b3; --mute:#6b7686;
+    --accent:#4f8cff; --ok:#2fbf71;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{
+    font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",sans-serif;
+    background:var(--bg); color:var(--txt); padding:32px 20px;
+  }
+  .wrap{max-width:720px;margin:0 auto}
+  h1{font-size:20px;font-weight:650;margin-bottom:6px}
+  .sub{color:var(--dim);font-size:13px;margin-bottom:26px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:20px;margin-bottom:18px}
+  h2{font-size:12px;color:var(--mute);text-transform:uppercase;letter-spacing:.8px;margin-bottom:14px;font-weight:600}
+  label{display:block;margin-bottom:14px}
+  label span{display:block;font-size:12px;color:var(--dim);margin-bottom:5px}
+  input,select,textarea{
+    width:100%;background:#161b24;border:1px solid var(--line);color:var(--txt);
+    padding:9px 11px;border-radius:8px;font:inherit;font-size:13.5px;
+  }
+  input:focus,select:focus,textarea:focus{
+    outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(79,140,255,.13);
+  }
+  textarea{min-height:90px;resize:vertical;font-family:ui-monospace,Consolas,monospace;font-size:12.5px}
+  .grid{display:grid;gap:0 18px;grid-template-columns:repeat(auto-fit,minmax(240px,1fr))}
+  .row{display:flex;gap:9px;align-items:center}
+  button{
+    background:rgba(79,140,255,.14);color:var(--accent);border:1px solid rgba(79,140,255,.28);
+    padding:9px 16px;border-radius:8px;cursor:pointer;font:inherit;font-size:13px;font-weight:550;
+    transition:background .15s,transform .1s;
+  }
+  button:hover{background:rgba(79,140,255,.24)}
+  button:active{transform:translateY(1px)}
+  button.ghost{background:none;border-color:var(--line);color:var(--dim)}
+  .hint{font-size:12px;color:var(--mute);margin-top:5px}
+  #toast{
+    position:fixed;right:20px;bottom:20px;background:var(--card);border:1px solid var(--line);
+    border-left:3px solid var(--ok);padding:11px 18px;border-radius:8px;font-size:13px;
+    opacity:0;transition:opacity .25s;pointer-events:none;
+  }
+  #toast.show{opacity:1}
+  #toast.err{border-left-color:#e5534b}
+  .state{padding:9px 12px;background:#161b24;border-radius:8px;font-size:12.5px;color:var(--dim);margin-bottom:14px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>校园网自连</h1>
+  <div class="sub">浏览器插件设置 · 数据保存在本地 chrome.storage</div>
+
+  <div class="state" id="currentState">读取中…</div>
+
+  <div class="card">
+    <h2>门户与账号</h2>
+    <label><span>认证门户地址 *</span>
+      <input id="portalUrl" placeholder="http://10.0.0.1/eportal/portal/login">
+      <div class="hint">掉线后插件会向这个地址提交登录表单</div>
+    </label>
+    <div class="grid">
+      <label><span>学号 / 账号</span><input id="username" autocomplete="off"></label>
+      <label><span>密码</span><input id="password" type="password" autocomplete="off"></label>
+      <label><span>账号字段名</span><input id="usernameField" placeholder="留空用 username"></label>
+      <label><span>密码字段名</span><input id="passwordField" placeholder="留空用 password"></label>
+      <label><span>密码提交编码</span>
+        <select id="passwordMode">
+          <option value="plain">明文</option>
+          <option value="base64">Base64</option>
+        </select>
+      </label>
+    </div>
+    <label><span>附加字段 JSON</span>
+      <textarea id="extraFields" placeholder='{"0MKKey":"1","user_ip":"10.0.0.5"}'></textarea>
+      <div class="hint">门户要求的隐藏参数，如 Dr.COM 的 0MKKey；与上面的字段名会合并提交</div>
+    </label>
+  </div>
+
+  <div class="card">
+    <h2>探活与频率</h2>
+    <label><span>检测间隔（分钟）</span>
+      <input id="intervalMinutes" type="number" min="0.25" step="0.25" value="1">
+      <div class="hint">浏览器插件最小 0.25 分钟（15 秒）；MV3 后台休眠时实际唤醒会有延迟</div>
+    </label>
+    <label><span>探测地址（每行一个，任一放行即视为在线）</span>
+      <textarea id="probeUrls" placeholder="http://www.msftconnecttest.com/connecttest.txt"></textarea>
+    </label>
+    <div class="row">
+      <button id="btnProbe">测试探测</button>
+      <span class="hint" id="probeResult"></span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>维护</h2>
+    <div class="row">
+      <button id="btnSave">保存设置</button>
+      <button class="ghost" id="btnReset">恢复默认</button>
+      <button class="ghost" id="btnExport">导出配置</button>
+    </div>
+    <div class="hint" style="margin-top:9px">密码以明文存在插件本地存储中，浏览器扩展无法加密。共用电脑请慎用。</div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+
+const DEFAULTS = {
+  portalUrl: '',
+  username: '',
+  password: '',
+  fields: { usernameField: '', passwordField: '' },
+  passwordMode: 'plain',
+  extraFieldsRaw: '',
+  intervalMinutes: 1,
+  probeUrls: [
+    'http://www.msftconnecttest.com/connecttest.txt',
+    'http://connectivitycheck.gstatic.com/generate_204',
+  ],
+  enabled: false,
+};
+
+function toast(msg, kind = '') {
+  const el = $('toast');
+  el.textContent = msg;
+  el.className = 'show' + (kind ? ' ' + kind : '');
+  setTimeout(() => { el.className = ''; }, 2600);
+}
+
+async function loadSettings() {
+  const stored = await chrome.storage.local.get(Object.keys(DEFAULTS));
+  const s = { ...DEFAULTS, ...stored };
+  $('portalUrl').value = s.portalUrl || '';
+  $('username').value = s.username || '';
+  $('password').value = s.password || '';
+  $('usernameField').value = (s.fields && s.fields.usernameField) || '';
+  $('passwordField').value = (s.fields && s.fields.passwordField) || '';
+  $('passwordMode').value = s.passwordMode || 'plain';
+  $('extraFields').value = s.extraFieldsRaw || '';
+  $('intervalMinutes').value = s.intervalMinutes || 1;
+  $('probeUrls').value = (s.probeUrls || []).join('\n');
+}
+
+function parseExtra() {
+  const raw = $('extraFields').value.trim();
+  if (!raw) return {};
+  try {
+    const obj = JSON.parse(raw);
+    return (obj && typeof obj === 'object' && !Array.isArray(obj)) ? obj : {};
+  } catch {
+    return null;
+  }
+}
+
+async function saveSettings() {
+  const extra = parseExtra();
+  if (extra === null) {
+    toast('附加字段 JSON 格式不对', 'err');
+    return;
+  }
+  const probeUrls = $('probeUrls').value.split('\n').map(s => s.trim()).filter(Boolean);
+  if (!probeUrls.length) {
+    toast('至少需要一个探测地址', 'err');
+    return;
+  }
+  await chrome.storage.local.set({
+    portalUrl: $('portalUrl').value.trim(),
+    username: $('username').value.trim(),
+    password: $('password').value,
+    fields: {
+      usernameField: $('usernameField').value.trim(),
+      passwordField: $('passwordField').value.trim(),
+      ...extra,
+    },
+    passwordMode: $('passwordMode').value,
+    extraFieldsRaw: $('extraFields').value.trim(),
+    intervalMinutes: Math.max(0.25, parseFloat($('intervalMinutes').value) || 1),
+    probeUrls,
+  });
+  toast('设置已保存');
+  await sendEnabledRefresh();
+}
+
+async function sendEnabledRefresh() {
+  const resp = await chrome.runtime.sendMessage({ type: 'getState' });
+  if (resp && resp.ok) showState(resp);
+}
+
+function showState(resp) {
+  const s = resp.state || {};
+  const cfg = resp.settings || {};
+  const when = s.lastCheckedAt ? new Date(s.lastCheckedAt).toLocaleTimeString() : '尚未检测';
+  const status = s.online === true ? '在线' : s.online === false ? '掉线' : '未知';
+  $('currentState').textContent =
+    `状态：${status} · 监控：${cfg.enabled ? '运行中' : '已停止'} · 上次检测：${when}` +
+    (s.lastMessage ? ` · ${s.lastMessage}` : '');
+}
+
+async function refreshState() {
+  const resp = await chrome.runtime.sendMessage({ type: 'getState' });
+  if (resp && resp.ok) showState(resp);
+}
+
+$('btnSave').onclick = saveSettings;
+
+$('btnReset').onclick = async () => {
+  if (!confirm('恢复默认设置？已保存的账号信息会被清空。')) return;
+  await chrome.storage.local.remove(Object.keys(DEFAULTS));
+  await loadSettings();
+  toast('已恢复默认');
+  refreshState();
+};
+
+$('btnExport').onclick = async () => {
+  const stored = await chrome.storage.local.get(Object.keys(DEFAULTS));
+  const blob = new Blob([JSON.stringify(stored, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'campusnet-settings.json';
+  a.click();
+  URL.revokeObjectURL(url);
+  toast('已导出（含明文密码，请妥善保管）');
+};
+
+$('btnProbe').onclick = async () => {
+  const urls = $('probeUrls').value.split('\n').map(s => s.trim()).filter(Boolean);
+  if (!urls.length) { toast('先填探测地址', 'err'); return; }
+  $('probeResult').textContent = '检测中…';
+  for (const url of urls) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 5000);
+    try {
+      const resp = await fetch(url, { redirect: 'manual', cache: 'no-store', signal: controller.signal });
+      clearTimeout(timer);
+      if ([301, 302, 303, 307, 308].includes(resp.status)) {
+        const loc = resp.headers.get('location') || '';
+        $('probeResult').textContent = `${url} → 未放行（跳转 ${resp.status}）${loc ? ' 到 ' + loc : ''}`;
+        return;
+      }
+      if (resp.ok || resp.status === 204) {
+        $('probeResult').textContent = `${url} → 已放行（HTTP ${resp.status}）`;
+        return;
+      }
+      $('probeResult').textContent = `${url} → HTTP ${resp.status}`;
+    } catch (err) {
+      clearTimeout(timer);
+      $('probeResult').textContent = `${url} → ${err.name === 'AbortError' ? '超时' : err.message}`;
+    }
+  }
+};
+
+loadSettings();
+refreshState();
+setInterval(refreshState, 4000);
+</script>
+</body>
+</html>

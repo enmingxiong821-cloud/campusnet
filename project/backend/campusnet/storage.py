@@ -229,6 +229,25 @@ class Store:
         with _WRITE_LOCK, self.connect() as conn:
             conn.execute("DELETE FROM events")
 
+    def prune_events(self, keep: int = 2000) -> int:
+        """只保留最近 keep 条，避免监控长期运行把库撑爆。
+
+        监控默认 60 秒一轮，每轮至少写一条事件，一年下来就是几十万行。
+        """
+        keep = max(1, int(keep))
+        with _WRITE_LOCK, self.connect() as conn:
+            cur = conn.execute(
+                "DELETE FROM events WHERE id NOT IN "
+                "(SELECT id FROM events ORDER BY id DESC LIMIT ?)",
+                (keep,),
+            )
+            return max(0, cur.rowcount or 0)
+
+    def event_count(self) -> int:
+        with self.connect() as conn:
+            row = conn.execute("SELECT COUNT(*) AS n FROM events").fetchone()
+        return int(row["n"]) if row else 0
+
     # ---------- settings ----------
     def set_setting(self, key: str, value: Any) -> None:
         blob = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)

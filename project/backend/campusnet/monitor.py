@@ -21,6 +21,7 @@ from .storage import (
 DEFAULT_INTERVAL = 60
 MIN_INTERVAL = 10
 MAX_INTERVAL = 3600
+DEFAULT_MAX_EVENTS = 2000
 
 
 @dataclass
@@ -182,10 +183,29 @@ class Monitor:
                 if self.on_event:
                     self.on_event(outcome.as_dict())
             self.last_results = results
+            self._prune_events()
             return results
         finally:
             self.running = False
             self._lock.release()
+
+    def _prune_events(self) -> None:
+        """每轮检查后裁剪历史事件。
+
+        默认 60 秒一轮、每轮至少一条事件，不裁剪的话库会一直涨。
+        裁剪本身出错只记事件，不影响本轮检测结果。
+        """
+        try:
+            keep = int(self.store.get_setting("max_events", DEFAULT_MAX_EVENTS) or DEFAULT_MAX_EVENTS)
+            removed = self.store.prune_events(keep)
+            if removed:
+                self.store.add_event(
+                    f"已裁剪 {removed} 条历史事件（保留最近 {keep} 条）",
+                    level="info",
+                    stage="maintenance",
+                )
+        except Exception as exc:  # noqa: BLE001
+            self.store.add_event(f"事件裁剪失败: {exc}", level="error", stage="maintenance")
 
     def status(self) -> dict[str, Any]:
         return {
