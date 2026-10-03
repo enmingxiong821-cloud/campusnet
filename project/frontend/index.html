@@ -1,0 +1,512 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>校园网自连 · 控制台</title>
+<style>
+  :root{
+    --bg:#0f1218; --bg-soft:#161b24; --card:#1b212c; --line:#252c39;
+    --txt:#e6eaf2; --txt-dim:#98a2b3; --txt-mute:#6b7686;
+    --accent:#4f8cff; --accent-soft:rgba(79,140,255,.14);
+    --ok:#2fbf71; --warn:#e2a336; --err:#e5534b;
+    --radius:12px; --radius-sm:8px;
+    --shadow:0 6px 24px rgba(0,0,0,.35);
+    --mono:"JetBrains Mono","Fira Code",Consolas,monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{
+    font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+    background:var(--bg); color:var(--txt); min-height:100vh;
+  }
+  code,.mono{font-family:var(--mono);font-size:12.5px}
+  header{
+    position:sticky;top:0;z-index:20;display:flex;align-items:center;gap:16px;
+    padding:14px 24px;background:rgba(15,18,24,.92);backdrop-filter:blur(12px);
+    border-bottom:1px solid var(--line);
+  }
+  .brand{display:flex;align-items:center;gap:10px;font-weight:650;letter-spacing:.2px}
+  .dot{width:9px;height:9px;border-radius:50%;background:var(--txt-mute);transition:background .2s}
+  .dot.on{background:var(--ok);box-shadow:0 0 0 4px rgba(47,191,113,.16)}
+  .dot.off{background:var(--err);box-shadow:0 0 0 4px rgba(229,83,75,.16)}
+  .dot.busy{background:var(--warn);box-shadow:0 0 0 4px rgba(226,163,54,.16);animation:pulse 1.1s infinite}
+  @keyframes pulse{50%{opacity:.35}}
+  .head-actions{margin-left:auto;display:flex;gap:8px;align-items:center}
+  main{max-width:1240px;margin:0 auto;padding:24px}
+  .grid{display:grid;gap:16px}
+  .cards{grid-template-columns:repeat(auto-fit,minmax(230px,1fr));margin-bottom:20px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:16px 18px}
+  .card h3{font-size:12px;color:var(--txt-mute);text-transform:uppercase;letter-spacing:.8px;margin-bottom:8px;font-weight:600}
+  .card .val{font-size:24px;font-weight:650;line-height:1.2}
+  .card .sub{font-size:12px;color:var(--txt-dim);margin-top:4px}
+  .panel{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);overflow:hidden}
+  .panel>header{position:static;background:none;border-bottom:1px solid var(--line);padding:14px 18px}
+  .panel-body{padding:18px}
+  .tabs{display:flex;gap:4px;padding:0 18px;border-bottom:1px solid var(--line);background:none;position:static}
+  .tab{
+    padding:12px 14px;background:none;border:none;border-bottom:2px solid transparent;
+    color:var(--txt-dim);cursor:pointer;font-size:13.5px;font-weight:550;transition:color .15s,border-color .15s;
+  }
+  .tab:hover{color:var(--txt)}
+  .tab.active{color:var(--accent);border-bottom-color:var(--accent)}
+  button,.btn{
+    background:var(--accent-soft);color:var(--accent);border:1px solid rgba(79,140,255,.28);
+    padding:7px 14px;border-radius:var(--radius-sm);cursor:pointer;font-size:13px;font-weight:550;
+    font-family:inherit;transition:background .15s,border-color .15s,transform .1s;
+  }
+  button:hover:not(:disabled){background:rgba(79,140,255,.22);border-color:rgba(79,140,255,.5)}
+  button:active:not(:disabled){transform:translateY(1px)}
+  button:disabled{opacity:.45;cursor:not-allowed}
+  button.ghost{background:none;border-color:var(--line);color:var(--txt-dim)}
+  button.ghost:hover:not(:disabled){background:var(--bg-soft);color:var(--txt)}
+  button.danger{background:rgba(229,83,75,.12);border-color:rgba(229,83,75,.3);color:var(--err)}
+  button.danger:hover:not(:disabled){background:rgba(229,83,75,.2)}
+  button.ok{background:rgba(47,191,113,.12);border-color:rgba(47,191,113,.3);color:var(--ok)}
+  input,select,textarea{
+    width:100%;background:var(--bg-soft);border:1px solid var(--line);color:var(--txt);
+    padding:9px 11px;border-radius:var(--radius-sm);font-family:inherit;font-size:13.5px;
+    transition:border-color .15s,box-shadow .15s;
+  }
+  input:focus,select:focus,textarea:focus{
+    outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(79,140,255,.13);
+  }
+  label{display:block;margin-bottom:14px}
+  label span.lbl{display:block;font-size:12px;color:var(--txt-dim);margin-bottom:5px}
+  .form-grid{display:grid;gap:0 16px;grid-template-columns:repeat(auto-fit,minmax(210px,1fr))}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th{text-align:left;padding:10px 14px;color:var(--txt-mute);font-size:11.5px;text-transform:uppercase;letter-spacing:.6px;border-bottom:1px solid var(--line);font-weight:600}
+  td{padding:11px 14px;border-bottom:1px solid rgba(37,44,57,.6);vertical-align:middle}
+  tr:last-child td{border-bottom:none}
+  tbody tr{transition:background .12s}
+  tbody tr:hover{background:rgba(255,255,255,.022)}
+  .badge{display:inline-block;padding:2.5px 9px;border-radius:999px;font-size:11.5px;font-weight:600;letter-spacing:.3px}
+  .s-online,.s-logged_in{background:rgba(47,191,113,.14);color:var(--ok)}
+  .s-offline,.s-failed{background:rgba(229,83,75,.14);color:var(--err)}
+  .s-unknown{background:rgba(152,162,179,.14);color:var(--txt-dim)}
+  .e-info{color:var(--txt-dim)} .e-warning{color:var(--warn)} .e-error{color:var(--err)}
+  .row-actions{display:flex;gap:6px}
+  .empty{padding:40px 18px;text-align:center;color:var(--txt-mute)}
+  .toast{
+    position:fixed;right:20px;bottom:20px;z-index:99;display:flex;flex-direction:column;gap:8px;
+  }
+  .toast>div{
+    background:var(--card);border:1px solid var(--line);border-left:3px solid var(--accent);
+    padding:11px 16px;border-radius:var(--radius-sm);box-shadow:var(--shadow);max-width:340px;font-size:13px;
+    animation:slide .22s ease;
+  }
+  .toast>div.err{border-left-color:var(--err)}
+  .toast>div.ok{border-left-color:var(--ok)}
+  @keyframes slide{from{transform:translateX(24px);opacity:0}}
+  .modal-bg{
+    position:fixed;inset:0;background:rgba(6,8,12,.68);backdrop-filter:blur(3px);z-index:50;
+    display:none;align-items:center;justify-content:center;padding:20px;
+  }
+  .modal-bg.open{display:flex}
+  .modal{
+    background:var(--card);border:1px solid var(--line);border-radius:var(--radius);
+    box-shadow:var(--shadow);width:min(720px,100%);max-height:88vh;display:flex;flex-direction:column;
+    animation:pop .18s ease;
+  }
+  @keyframes pop{from{transform:scale(.97);opacity:0}}
+  .modal h2{font-size:16px;padding:16px 20px;border-bottom:1px solid var(--line)}
+  .modal .content{padding:20px;overflow-y:auto}
+  .modal .foot{padding:14px 20px;border-top:1px solid var(--line);display:flex;gap:8px;justify-content:flex-end}
+  .hint{font-size:12px;color:var(--txt-mute);margin-top:4px}
+  .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .flex-end{justify-content:flex-end}
+  @media(max-width:640px){
+    main{padding:14px} header{padding:12px 14px;gap:10px}
+    .brand span.full{display:none}
+    .card .val{font-size:20px}
+    th:nth-child(3),td:nth-child(3){display:none}
+  }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">
+    <div class="dot" id="statusDot"></div>
+    <span>校园网自连</span>
+    <span class="full" style="color:var(--txt-mute);font-weight:400">浏览器验证 · 自动重连</span>
+  </div>
+  <div class="head-actions">
+    <span class="mono" id="statusText" style="color:var(--txt-dim)">连接中…</span>
+    <button id="btnToggleMonitor">启动监控</button>
+    <button class="ghost" id="btnProbe">立即检测</button>
+  </div>
+</header>
+
+<main>
+  <div class="grid cards">
+    <div class="card"><h3>账号总数</h3><div class="val" id="cTotal">0</div><div class="sub" id="cEnabled">启用 0</div></div>
+    <div class="card"><h3>在线</h3><div class="val" id="cOnline" style="color:var(--ok)">0</div><div class="sub" id="cOnlineSub">—</div></div>
+    <div class="card"><h3>掉线</h3><div class="val" id="cOffline" style="color:var(--err)">0</div><div class="sub" id="cOfflineSub">—</div></div>
+    <div class="card"><h3>检测间隔</h3><div class="val" id="cInterval">—</div><div class="sub" id="cLastRun">尚未运行</div></div>
+  </div>
+
+  <div class="panel">
+    <div class="tabs">
+      <button class="tab active" data-tab="accounts">账号</button>
+      <button class="tab" data-tab="events">事件日志</button>
+      <button class="tab" data-tab="settings">设置</button>
+    </div>
+
+    <section id="tab-accounts">
+      <div class="panel-body">
+        <div class="row">
+          <button id="btnAdd">+ 添加账号</button>
+          <span class="hint">门户地址填认证页面 URL；字段名留空则自动识别</span>
+        </div>
+      </div>
+      <div id="accountTable"></div>
+    </section>
+
+    <section id="tab-events" hidden>
+      <div class="panel-body row">
+        <select id="evtAccount" style="max-width:220px"><option value="">全部账号</option></select>
+        <button class="ghost" id="btnRefreshEvents">刷新</button>
+        <button class="ghost danger" id="btnClearEvents">清空</button>
+      </div>
+      <div id="eventList"></div>
+    </section>
+
+    <section id="tab-settings" hidden>
+      <div class="panel-body">
+        <div class="form-grid">
+          <label><span class="lbl">监控间隔（秒）</span><input type="number" id="setInterval" min="10" max="3600"></label>
+          <label><span class="lbl">浏览器登录是否无头</span>
+            <select id="setHeadless"><option value="1">无头（后台）</option><option value="0">有头（可见窗口）</option></select>
+          </label>
+          <label><span class="lbl">服务启动时自动开监控</span>
+            <select id="setAutostart"><option value="1">是</option><option value="0">否</option></select>
+          </label>
+        </div>
+        <div class="row">
+          <button id="btnSaveSettings">保存设置</button>
+          <button class="ghost" id="btnDetectPortal">检测门户地址</button>
+          <span class="hint" id="detectResult"></span>
+        </div>
+        <label style="margin-top:18px"><span class="lbl">用于检测门户地址的探测网址</span>
+          <input id="setDetectUrl" value="http://www.msftconnecttest.com/connecttest.txt">
+        </label>
+      </div>
+    </section>
+  </div>
+</main>
+
+<div class="modal-bg" id="modalBg">
+  <div class="modal">
+    <h2 id="modalTitle">添加账号</h2>
+    <div class="content">
+      <div class="form-grid">
+        <label><span class="lbl">备注名 *</span><input id="fName" placeholder="宿舍 / 实验室"></label>
+        <label><span class="lbl">认证账号 *</span><input id="fUsername"></label>
+        <label><span class="lbl">认证密码 *</span><input type="password" id="fPassword"></label>
+        <label><span class="lbl">门户地址 *</span><input id="fPortal" placeholder="http://10.0.0.1/eportal/portal/login"></label>
+        <label><span class="lbl">探测地址</span><input id="fProbe" value="http://www.msftconnecttest.com/connecttest.txt"></label>
+        <label><span class="lbl">登录方式</span>
+          <select id="fLoginMode">
+            <option value="http">HTTP 表单登录</option>
+            <option value="browser">浏览器登录（Playwright）</option>
+            <option value="manual">人工（只检测不登录）</option>
+          </select>
+        </label>
+        <label><span class="lbl">密码提交编码</span>
+          <select id="fPasswordMode">
+            <option value="plain">明文</option>
+            <option value="base64">Base64</option>
+            <option value="md5">MD5</option>
+            <option value="md5_base64">MD5 + Base64</option>
+            <option value="sha256">SHA256</option>
+          </select>
+        </label>
+        <label><span class="lbl">失败重试次数</span><input type="number" id="fMaxRetries" value="3" min="1" max="10"></label>
+        <label><span class="lbl">账号字段名</span><input id="fUsernameField" placeholder="留空自动识别，如 DDDDD"></label>
+        <label><span class="lbl">密码字段名</span><input id="fPasswordField" placeholder="留空自动识别，如 upass"></label>
+        <label><span class="lbl">附加字段 JSON</span><input id="fExtra" placeholder='{"0MKKey":"1"}'></label>
+        <label><span class="lbl">状态</span>
+          <select id="fEnabled"><option value="1">启用</option><option value="0">停用</option></select>
+        </label>
+      </div>
+      <p class="hint" id="modalHint"></p>
+    </div>
+    <div class="foot">
+      <button class="ghost" id="btnCancel">取消</button>
+      <button id="btnSave">保存</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+const state = { accounts: [], monitor: { alive:false, interval:60, checking:false }, editingId: null, timer: null };
+
+const STATE_TEXT = {
+  online:'在线', logged_in:'已登录', offline:'掉线', failed:'登录失败', unknown:'未检测'
+};
+
+async function api(path, opts = {}) {
+  const res = await fetch(path, {
+    headers: { 'Content-Type': 'application/json' },
+    ...opts,
+    body: opts.body ? JSON.stringify(opts.body) : undefined,
+  });
+  const data = await res.json().catch(() => ({ ok:false, error:'响应不是 JSON' }));
+  if (!res.ok || data.ok === false) throw new Error(data.error || `HTTP ${res.status}`);
+  return data;
+}
+
+function toast(msg, kind = '') {
+  const el = document.createElement('div');
+  el.className = kind;
+  el.textContent = msg;
+  $('toast').appendChild(el);
+  setTimeout(() => { el.style.opacity = '0'; el.style.transition = 'opacity .3s'; }, 3400);
+  setTimeout(() => el.remove(), 3800);
+}
+
+function renderStatus() {
+  const dot = $('statusDot'), m = state.monitor;
+  dot.className = 'dot ' + (m.checking ? 'busy' : m.alive ? 'on' : 'off');
+  $('statusText').textContent = m.checking ? '检测中…' : m.alive ? `监控中 · 每 ${m.interval}s` : '监控未启动';
+  $('btnToggleMonitor').textContent = m.alive ? '停止监控' : '启动监控';
+  $('btnToggleMonitor').className = m.alive ? 'danger' : 'ok';
+  $('cInterval').textContent = m.interval + ' 秒';
+}
+
+function renderCards() {
+  const list = state.accounts;
+  const enabled = list.filter(a => a.enabled);
+  const online = list.filter(a => ['online','logged_in'].includes(a.last_state));
+  const offline = list.filter(a => ['offline','failed'].includes(a.last_state));
+  $('cTotal').textContent = list.length;
+  $('cEnabled').textContent = '启用 ' + enabled.length;
+  $('cOnline').textContent = online.length;
+  $('cOnlineSub').textContent = list.length ? Math.round(online.length / list.length * 100) + '% 可用' : '—';
+  $('cOffline').textContent = offline.length;
+  $('cOfflineSub').textContent = offline.length ? '需要关注' : '一切正常';
+  const last = (m.last_results || [])[0];
+  $('cLastRun').textContent = last ? '上次检测 ' + last.elapsed + 's' : '尚未运行';
+}
+
+function renderAccounts() {
+  const box = $('accountTable');
+  if (!state.accounts.length) {
+    box.innerHTML = '<div class="empty">还没有账号，点「添加账号」开始配置。</div>';
+    return;
+  }
+  const rows = state.accounts.map(a => `
+    <tr>
+      <td><strong>${esc(a.name)}</strong><div class="hint mono">${esc(a.username)}</div></td>
+      <td><span class="badge s-${a.last_state}">${STATE_TEXT[a.last_state] || a.last_state}</span></td>
+      <td class="mono" style="color:var(--txt-dim)">${esc(a.login_mode)} / ${esc(a.password_mode)}</td>
+      <td class="mono" style="color:var(--txt-mute);max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(a.portal_url)}</td>
+      <td>
+        <div class="row-actions">
+          <button class="ghost" data-act="login" data-id="${a.id}">登录</button>
+          <button class="ghost" data-act="edit" data-id="${a.id}">编辑</button>
+          <button class="ghost danger" data-act="del" data-id="${a.id}">删除</button>
+        </div>
+      </td>
+    </tr>`).join('');
+  box.innerHTML = `<table><thead><tr>
+      <th>账号</th><th>状态</th><th>方式</th><th>门户地址</th><th style="text-align:right">操作</th>
+    </tr></thead><tbody>${rows}</tbody></table>`;
+  box.querySelectorAll('button[data-act]').forEach(b => b.onclick = () => rowAction(b.dataset.act, +b.dataset.id));
+}
+
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+}
+
+async function rowAction(act, id) {
+  const acc = state.accounts.find(a => a.id === id);
+  if (act === 'login') {
+    try {
+      const r = await api(`/api/accounts/${id}/login`, { method:'POST', body:{} });
+      toast(`${acc.name}: ${r.message}`, r.state === 'failed' ? 'err' : 'ok');
+      refresh();
+    } catch (e) { toast('登录失败: ' + e.message, 'err'); }
+  } else if (act === 'edit') {
+    openModal(acc);
+  } else if (act === 'del') {
+    if (!confirm(`确定删除账号「${acc.name}」？`)) return;
+    try {
+      await api(`/api/accounts/${id}`, { method:'DELETE' });
+      toast('已删除', 'ok');
+      refresh();
+    } catch (e) { toast('删除失败: ' + e.message, 'err'); }
+  }
+}
+
+async function loadEvents() {
+  const sel = $('evtAccount').value;
+  const q = sel ? `?limit=200&account_id=${sel}` : '?limit=200';
+  try {
+    const { events } = await api('/api/events' + q);
+    const box = $('eventList');
+    if (!events.length) { box.innerHTML = '<div class="empty">暂无事件。</div>'; return; }
+    box.innerHTML = `<table><thead><tr><th>时间</th><th>级别</th><th>阶段</th><th>信息</th></tr></thead><tbody>${
+      events.map(e => `<tr>
+        <td class="mono" style="color:var(--txt-mute);white-space:nowrap">${esc(e.ts)}</td>
+        <td class="e-${e.level}">${esc(e.level)}</td>
+        <td style="color:var(--txt-dim)">${esc(e.stage || '—')}</td>
+        <td>${esc(e.message)}</td></tr>`).join('')
+    }</tbody></table>`;
+  } catch (e) { toast('加载日志失败: ' + e.message, 'err'); }
+}
+
+async function refresh() {
+  try {
+    const [a, s] = await Promise.all([api('/api/accounts'), api('/api/monitor')]);
+    state.accounts = a.accounts;
+    state.monitor = s.status;
+    renderAccounts(); renderCards(); renderStatus();
+    const sel = $('evtAccount');
+    const cur = sel.value;
+    sel.innerHTML = '<option value="">全部账号</option>' +
+      state.accounts.map(x => `<option value="${x.id}">${esc(x.name)}</option>`).join('');
+    sel.value = cur;
+  } catch (e) { toast('加载失败: ' + e.message, 'err'); }
+}
+
+function openModal(acc) {
+  state.editingId = acc ? acc.id : null;
+  $('modalTitle').textContent = acc ? '编辑账号' : '添加账号';
+  $('modalHint').textContent = acc
+    ? '密码留空表示不修改原密码'
+    : '门户地址与表单字段名不确定也没关系：字段名留空会自动识别，必要时改用浏览器登录。';
+  const set = (id, v) => { $(id).value = v ?? ''; };
+  set('fName', acc?.name); set('fUsername', acc?.username); set('fPassword', '');
+  set('fPortal', acc?.portal_url); set('fProbe', acc?.probe_url || 'http://www.msftconnecttest.com/connecttest.txt');
+  set('fLoginMode', acc?.login_mode || 'http'); set('fPasswordMode', acc?.password_mode || 'plain');
+  set('fMaxRetries', acc?.max_retries ?? 3);
+  set('fUsernameField', acc?.username_field); set('fPasswordField', acc?.password_field);
+  set('fExtra', Object.keys(acc?.extra_fields || {}).length ? JSON.stringify(acc.extra_fields) : '');
+  set('fEnabled', acc ? (acc.enabled ? '1' : '0') : '1');
+  $('modalBg').classList.add('open');
+  $('fName').focus();
+}
+
+async function saveAccount() {
+  let extra = {};
+  const rawExtra = $('fExtra').value.trim();
+  if (rawExtra) {
+    try { extra = JSON.parse(rawExtra); }
+    catch { toast('附加字段 JSON 格式不对', 'err'); return; }
+  }
+  const body = {
+    name: $('fName').value.trim(),
+    username: $('fUsername').value.trim(),
+    password: $('fPassword').value,
+    portal_url: $('fPortal').value.trim(),
+    probe_url: $('fProbe').value.trim(),
+    login_mode: $('fLoginMode').value,
+    password_mode: $('fPasswordMode').value,
+    max_retries: +$('fMaxRetries').value || 3,
+    username_field: $('fUsernameField').value.trim(),
+    password_field: $('fPasswordField').value.trim(),
+    extra_fields: extra,
+    enabled: $('fEnabled').value === '1',
+  };
+  try {
+    if (state.editingId) await api(`/api/accounts/${state.editingId}`, { method:'PUT', body });
+    else await api('/api/accounts', { method:'POST', body });
+    $('modalBg').classList.remove('open');
+    toast(state.editingId ? '已保存' : '已添加', 'ok');
+    refresh();
+  } catch (e) { toast('保存失败: ' + e.message, 'err'); }
+}
+
+async function toggleMonitor() {
+  const on = state.monitor.alive;
+  try {
+    if (on) {
+      await api('/api/monitor/stop', { method:'POST', body:{} });
+      toast('监控已停止', 'ok');
+    } else {
+      const s = await api('/api/monitor/start', { method:'POST', body:{} });
+      toast(s.started ? '监控已启动' : '监控已在运行中', 'ok');
+    }
+    refresh();
+  } catch (e) { toast('操作失败: ' + e.message, 'err'); }
+}
+
+async function probeNow() {
+  $('btnProbe').disabled = true;
+  state.monitor.checking = true; renderStatus();
+  try {
+    const r = await api('/api/check', { method:'POST', body:{} });
+    const bad = r.results.filter(x => !x.online);
+    toast(bad.length ? `${r.results.length} 个账号，${bad.length} 个掉线` : '全部在线', bad.length ? 'err' : 'ok');
+    refresh();
+    if (!$('tab-events').hidden) loadEvents();
+  } catch (e) { toast('检测失败: ' + e.message, 'err'); }
+  finally { state.monitor.checking = false; $('btnProbe').disabled = false; renderStatus(); }
+}
+
+async function loadSettings() {
+  try {
+    const { settings } = await api('/api/settings');
+    $('setInterval').value = settings.interval ?? 60;
+    $('setHeadless').value = (settings.headless === false) ? '0' : '1';
+    $('setAutostart').value = (settings.autostart === false) ? '0' : '1';
+  } catch (e) { toast('加载设置失败: ' + e.message, 'err'); }
+}
+
+async function saveSettings() {
+  const body = {
+    interval: +$('setInterval').value || 60,
+    headless: $('setHeadless').value === '1',
+    autostart: $('setAutostart').value === '1',
+  };
+  try {
+    await api('/api/monitor/start', { method:'POST', body });
+    toast('设置已保存并应用', 'ok');
+    refresh();
+  } catch (e) { toast('保存失败: ' + e.message, 'err'); }
+}
+
+document.querySelectorAll('.tab').forEach(t => t.onclick = () => {
+  document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
+  t.classList.add('active');
+  ['accounts','events','settings'].forEach(k => {
+    $('tab-' + k).hidden = k !== t.dataset.tab;
+  });
+  if (t.dataset.tab === 'events') loadEvents();
+  if (t.dataset.tab === 'settings') loadSettings();
+});
+
+$('btnAdd').onclick = () => openModal(null);
+$('btnCancel').onclick = () => $('modalBg').classList.remove('open');
+$('btnSave').onclick = saveAccount;
+$('modalBg').onclick = e => { if (e.target === $('modalBg')) $('modalBg').classList.remove('open'); };
+$('btnToggleMonitor').onclick = toggleMonitor;
+$('btnProbe').onclick = probeNow;
+$('btnRefreshEvents').onclick = loadEvents;
+$('evtAccount').onchange = loadEvents;
+$('btnClearEvents').onclick = async () => {
+  if (!confirm('清空全部事件日志？')) return;
+  await api('/api/events/clear', { method:'POST', body:{} });
+  loadEvents();
+};
+$('btnSaveSettings').onclick = saveSettings;
+$('btnDetectPortal').onclick = async () => {
+  const url = $('setDetectUrl').value.trim();
+  $('detectResult').textContent = '检测中…';
+  try {
+    const r = await api('/api/detect-portal?url=' + encodeURIComponent(url));
+    $('detectResult').textContent = r.portal_url ? '识别到：' + r.portal_url : r.hint;
+    if (r.portal_url) $('fPortal').value = r.portal_url;
+  } catch (e) { $('detectResult').textContent = '失败: ' + e.message; }
+};
+
+document.addEventListener('keydown', e => { if (e.key === 'Escape') $('modalBg').classList.remove('open'); });
+
+refresh();
+state.timer = setInterval(refresh, 10000);
+</script>
+</body>
+</html>
