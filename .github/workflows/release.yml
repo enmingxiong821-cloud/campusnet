@@ -35,37 +35,43 @@ jobs:
           node --check project/frontend/extension/background.js
           node project/frontend/extension/test-background.js
 
-      - name: 构建可分发包
+      - name: 收集分发文件
         run: |
           set -e
           VERSION="${GITHUB_REF_NAME#v}"
           NAME="campusnet-${VERSION}"
+          echo "NAME=${NAME}" >> "$GITHUB_ENV"
           mkdir -p "dist/${NAME}"
+          # 注意：cp -r 不受 .gitignore 约束，本地 *.log 会被一起带进来
           cp -r project utils database/schema.sql database/config.example.yml README.md LICENSE "dist/${NAME}/"
-          cd "dist/${NAME}"
-          zip -qr "../${NAME}.zip" . -x '*.db' -x '__pycache__/*'
-          cd ../..
-          cd "dist"
-          sha256sum "${NAME}.zip" > "${NAME}.zip.sha256"
-          ls -la "${NAME}.zip" "${NAME}.zip.sha256"
+          # 测试与可选依赖不进包
+          rm -rf "dist/${NAME}/project/backend/tests"
+          find "dist/${NAME}" -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
+          find "dist/${NAME}" \( -name '*.log' -o -name '*.db' -o -name '*.db-wal' -o -name '*.key' \) -delete
 
       - name: 校验包内无凭据
         run: |
           set -e
-          cd dist
-          for pattern in '*.db' '*.key' 'config.json' '*.log'; do
+          cd "dist/${NAME}"
+          fail=0
+          for pattern in '*.db' '*.db-wal' '*.key' 'config.json' '*.log'; do
             if find . -name "$pattern" | grep -q .; then
               echo "::error::分发包含敏感文件: $pattern"
-              exit 1
+              fail=1
             fi
           done
-          cd "${NAME}"
-          # playwright 与 pytest 属可选依赖，不进包
-          rm -rf "project/backend/tests"
-          find . -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
-          cd ../..
+          [ "$fail" -eq 0 ] || exit 1
+          echo "包内未发现凭据"
+
+      - name: 打包
+        run: |
+          set -e
+          cd dist
           zip -qr "${NAME}.zip" "${NAME}" -x '*.db' -x '__pycache__/*'
           sha256sum "${NAME}.zip" > "${NAME}.zip.sha256"
+          ls -la "${NAME}.zip" "${NAME}.zip.sha256"
+          echo "--- 包内顶层结构 ---"
+          unzip -l "${NAME}.zip" | head -20
 
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
