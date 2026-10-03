@@ -16,6 +16,7 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from http.cookiejar import CookieJar
+from typing import Callable
 
 from . import charset as charset_mod
 from . import probe as probe_mod
@@ -151,6 +152,14 @@ def pick_login_form(forms: list[LoginForm]) -> LoginForm | None:
 
 # ---------------------------------------------------------------- HTTP 登录
 
+# 进度回调：(阶段名, 人类可读信息)。阶段名用于前端配色与图标。
+ProgressCallback = Callable[[str, str], None]
+
+
+def _noop(_stage: str, _message: str) -> None:
+    """默认进度回调：什么都不做，保证 on_progress 可选。"""
+    return
+
 
 @dataclass
 class LoginResult:
@@ -207,6 +216,12 @@ def _fetch(
         except Exception:  # noqa: BLE001
             raw = b""
         return exc.code, charset_mod.decode(raw, content_type=hdrs.get("content-type")), url, hdrs
+    except urllib.error.URLError as exc:
+        # 门户不可达（超时/拒绝连接/DNS 失败）必须转成状态，不能往上抛，
+        # 否则一轮 check_all 抛异常会打断整个监控线程。
+        return 0, "", url, {"error": str(getattr(exc, "reason", exc))}
+    except (TimeoutError, OSError) as exc:
+        return 0, "", url, {"error": f"{type(exc).__name__}: {exc}"}
 
 
 def classify_response(body: str, status: int, final_url: str) -> LoginResult:
@@ -238,8 +253,18 @@ def classify_response(body: str, status: int, final_url: str) -> LoginResult:
     return LoginResult("error", f"门户返回异常状态 {status}", f"status={status} url={final_url}")
 
 
-def http_login(account: Account, timeout: float = 10.0, insecure: bool = False) -> LoginResult:
-    """按账号配置执行一次 HTTP 门户登录。"""
+def http_login(
+    account: Account,
+    timeout: float = 10.0,
+    insecure: bool = False,
+    on_progress: ProgressCallback | None = None,
+) -> LoginResult:
+    """按账号配置执行一次 HTTP 门户登录。
+
+    on_progress(stage, message) 会在每个关键阶段回调一次，
+    让调用方能实时把进度吐给界面，而不是干等十几秒。
+    """
+    emit = on_progress or _noop
     portal = account.portal_url.strip()
     if not portal:
         return LoginResult("error", "未配置门户地址", "")
@@ -248,12 +273,18 @@ def http_login(account: Account, timeout: float = 10.0, insecure: bool = False) 
     opener = _opener(cookies, insecure=insecure)
     insecure_scheme = portal.lower().startswith("https")
 
-    status, page, final_url, _ = _fetch(
+    emit("connect", f"正在连接认证门户 {portal}")
+    status, page, final_url, hdrs = _fetch(
         _opener(cookies, insecure=insecure_scheme), portal, referer="", timeout=timeout
     )
+    if status == 0:
+        # 连接层失败：门户地址不对、网段没通、或服务没起
+        reason = hdrs.get("error", "未知原因")
+        return LoginResult("error", f"连不上门户（{reason}）", f"url={final_url}")
     if status >= 400:
         return LoginResult("error", f"打开门户失败 HTTP {status}", f"url={final_url}")
 
+    emit("parse", f"门户已响应（HTTP {status}），正在识别登录表单")
     forms = parse_forms(page)
     form = pick_login_form(forms)
     if form is None:
@@ -290,26 +321,44 @@ def http_login(account: Account, timeout: float = 10.0, insecure: bool = False) 
         url = f"{target}?{urllib.parse.urlencode(payload)}"
         method = "GET"
 
+    hidden = [k for k in payload if k not in (user_field, pass_field)]
+    emit(
+        "submit",
+        f"以 {method} 提交账号 {account.username}，"
+        f"账号框={user_field} 密码框={pass_field}"
+        + (f"，附加字段 {','.join(hidden)}" if hidden else ""),
+    )
     st, body, res_url, _ = _fetch(
         _opener(cookies, insecure=insecure_scheme), url, data=data, referer=final_url, timeout=timeout
     )
     result = classify_response(body, st, res_url)
+    if not result.ok:
+        emit("done", f"门户拒绝登录：{result.message}")
+        return result
 
-    # 门户登录成功与否，最终以探活结果为准
-    if result.ok:
-        check = probe_mod.probe(account.probe_url, timeout=timeout, insecure=insecure)
-        if check.online:
-            return LoginResult("success", "登录成功且网络已放行", check.detail)
-        if result.state == "success":
-            return LoginResult("success", "门户返回成功，但探活未放行（可能需手动确认）", check.detail)
+    emit("verify", "门户已受理，正在复检网络是否放行")
+    check = probe_mod.probe(account.probe_url, timeout=timeout, insecure=insecure)
+    if check.online:
+        emit("done", "登录成功，网络已放行")
+        return LoginResult("success", "登录成功且网络已放行", check.detail)
+    if result.state == "success":
+        emit("done", "门户返回成功，但复检仍未放行")
+        return LoginResult("success", "门户返回成功，但探活未放行（可能需手动确认）", check.detail)
+    emit("done", f"登录未成功：{result.message}")
     return result
 
 
 # ---------------------------------------------------------------- 浏览器登录
 
 
-def browser_login(account: Account, headless: bool = True, timeout: float = 30.0) -> LoginResult:
+def browser_login(
+    account: Account,
+    headless: bool = True,
+    timeout: float = 30.0,
+    on_progress: ProgressCallback | None = None,
+) -> LoginResult:
     """用 Playwright 驱动真实浏览器完成登录，覆盖 JS / 验证码场景。"""
+    emit = on_progress or _noop
     try:
         from playwright.sync_api import sync_playwright  # type: ignore
     except ImportError:
@@ -326,11 +375,13 @@ def browser_login(account: Account, headless: bool = True, timeout: float = 30.0
     user_field = account.username_field
     pass_field = account.password_field
 
+    emit("browser", f"正在启动浏览器（{'无头' if headless else '有头'}模式）")
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=headless)
         try:
             ctx = browser.new_context(user_agent=DEFAULT_USER_AGENT)
             page = ctx.new_page()
+            emit("connect", f"正在打开门户 {portal}")
             page.goto(portal, wait_until="domcontentloaded", timeout=timeout * 1000)
 
             selectors = _browser_selectors(page, user_field, pass_field)
@@ -415,13 +466,18 @@ def _candidate_selectors(field_name: str) -> list[str]:
     ]
 
 
-def login(account: Account, headless: bool = True) -> LoginResult:
+def login(
+    account: Account,
+    headless: bool = True,
+    on_progress: ProgressCallback | None = None,
+) -> LoginResult:
+    """按账号配置选择登录路径，并全程回调进度。"""
     mode = (account.login_mode or "http").lower()
     if mode == "browser":
-        return browser_login(account, headless=headless)
+        return browser_login(account, headless=headless, on_progress=on_progress)
     if mode == "manual":
         check = probe_mod.probe(account.probe_url)
         if check.online:
             return LoginResult("already_online", "网络已放行，无需登录", check.detail)
         return LoginResult("error", "当前为人工模式：请在浏览器里手动完成认证", check.detail)
-    return http_login(account)
+    return http_login(account, on_progress=on_progress)
