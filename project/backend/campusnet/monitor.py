@@ -23,6 +23,10 @@ MIN_INTERVAL = 10
 MAX_INTERVAL = 3600
 DEFAULT_MAX_EVENTS = 2000
 DEFAULT_PROGRESS_CAP = 300
+PRUNE_LOG_INTERVAL = 300.0
+
+# 裁剪统计存这张 settings 表的行键：单行覆盖，不增长、不参与 events 裁剪
+PRUNE_STATS_KEY = "prune_stats"
 
 
 @dataclass
@@ -82,6 +86,7 @@ class Monitor:
         on_event: Callable[[dict[str, Any]], None] | None = None,
         on_progress: Callable[[dict[str, Any]], None] | None = None,
         progress_cap: int = DEFAULT_PROGRESS_CAP,
+        prune_log_interval: float = PRUNE_LOG_INTERVAL,
     ) -> None:
         self.store = store
         self.interval = self._clamp(interval)
@@ -89,12 +94,17 @@ class Monitor:
         self.on_event = on_event
         self.on_progress = on_progress
         self.progress_cap = max(10, int(progress_cap))
+        self.prune_log_interval = max(0.0, float(prune_log_interval))
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
         self._progress: list[ProgressItem] = []
         self._progress_seq = 0
         self._progress_lock = threading.Lock()
+        self._last_pruned_at: float | None = None
+        self._prune_log_suppressed = 0
+        self._prune_total_removed = 0
+        self._prune_announced = False
         self.last_results: list[dict[str, Any]] = []
         self.running = False
 
@@ -296,18 +306,64 @@ class Monitor:
 
         默认 60 秒一轮、每轮至少一条事件，不裁剪的话库会一直涨。
         裁剪本身出错只记事件，不影响本轮检测结果。
+
+        裁剪统计必须放在 settings 表，不能放events：
+        公告一旦写进 events，下一轮裁剪就会把它删掉，
+        于是"限频计数器认为已记录、实际记录已消失"，
+        长跑下来 2000 条里塞满裁剪公告（实测 341 条）。
+        settings 是单行覆盖，不增长也不参与裁剪。
         """
         try:
             keep = int(self.store.get_setting("max_events", DEFAULT_MAX_EVENTS) or DEFAULT_MAX_EVENTS)
             removed = self.store.prune_events(keep)
-            if removed:
+            if not removed:
+                return
+
+            now = time.time()
+            self._last_pruned_at = now
+            self._prune_log_suppressed += 1
+            # 累计值要从 settings 续接：重启后新建的 Monitor 计数器是 0，
+            # 直接用实例字段会把上一段进程的累计覆盖掉。
+            previous = self.store.get_setting(PRUNE_STATS_KEY, None)
+            carried = int(previous.get("total_removed", 0)) if isinstance(previous, dict) else 0
+            self._prune_total_removed = carried + removed
+            self.store.set_setting(
+                PRUNE_STATS_KEY,
+                {
+                    "last_removed": removed,
+                    "last_at": now,
+                    "total_removed": self._prune_total_removed,
+                    "keep": keep,
+                    "suppressed": self._prune_log_suppressed - 1,
+                },
+            )
+
+            # 只在裁剪首次生效时留一条事件，之后靠 settings 查统计
+            if not self._prune_announced:
+                self._prune_announced = True
                 self.store.add_event(
-                    f"已裁剪 {removed} 条历史事件（保留最近 {keep} 条）",
+                    f"事件日志已启用自动裁剪（保留最近 {keep} 条），"
+                    f"本次裁掉 {removed} 条；后续统计见 settings.{PRUNE_STATS_KEY}",
                     level="info",
                     stage="maintenance",
                 )
         except Exception as exc:  # noqa: BLE001
             self.store.add_event(f"事件裁剪失败: {exc}", level="error", stage="maintenance")
+
+    def prune_stats(self) -> dict[str, Any]:
+        """裁剪统计，从 settings 读，不受 events 裁剪影响。"""
+        data = self.store.get_setting(PRUNE_STATS_KEY, None)
+        if isinstance(data, dict):
+            return data
+        return {
+            "last_removed": 0,
+            "last_at": None,
+            "total_removed": self._prune_total_removed,
+            "keep": int(
+                self.store.get_setting("max_events", DEFAULT_MAX_EVENTS) or DEFAULT_MAX_EVENTS
+            ),
+            "suppressed": self._prune_log_suppressed,
+        }
 
     def status(self) -> dict[str, Any]:
         return {
