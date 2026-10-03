@@ -1,0 +1,464 @@
+"""厂商无关的门户自动发现：网关探测 → 路径扫描 → 指纹识别 → 字段提取。
+
+设计前提：校园网门户没有统一标准，各家字段名、编码方式、提交方式都不同。
+本模块不绑定任何厂商，而是给出一组高频候选路径与指纹特征，命中即用。
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import socket
+import ssl
+import urllib.error
+import urllib.request
+from dataclasses import dataclass, field
+from typing import Any
+from urllib.parse import urlsplit
+
+from . import probe as probe_mod
+from .paths import DEFAULT_USER_AGENT
+
+# 高频门户路径候选：Dr.COM / 深菱 / H3C / 新网 / 华为 / H3C-web 等常见形态
+PORTAL_PATHS: tuple[str, ...] = (
+    "/eportal/portal/login",
+    "/eportal/portal/login/",
+    "/eportal/login",
+    "/portal/login",
+    "/portal",
+    "/login",
+    "/webauth/portal_login.html",
+    "/webauth/auth",
+    "/auth/login",
+    "/sportal/authorize/index",
+    "/sportal/login",
+    "/index/login",
+    "/login.html",
+    "/cas/login",
+    "/authserver/login",
+    "/nms/login",
+    "/cgi-bin/login.cgi",
+)
+
+# 厂商指纹：特征串 -> 厂商名。命中任意一项即标注，用于 UI 提示与默认字段猜测。
+VENDOR_SIGNATURES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("Dr.COM / 深澜", ("drcom", "dr.com", "eportal/portal", "hiddenpwd", "0mkkey")),
+    ("深菱 spl", ("/sportal/", "sportal", "spl-", "ispub")),
+    ("H3C / 新网", ("h3c", "newstart", "wlan.campus", "portal_new")),
+    ("华为", ("huawei", "华为", "eportal.hw", "portal.huawei", "hwportal")),
+    ("锐捷", ("ruijie", "锐捷", "eportal_ruijie", "wlanlogin")),
+    ("斐讯 Pholus", ("pholus", "斐讯", "ph-cloud", "fonline")),
+    ("水木 / 自建 CAS", ("cas/login", "j_cas", "cas ", "sso/cas")),
+    ("Web认证通用", ("webauth", "web-auth", "portal-login")),
+)
+
+# 各家常见的密码提交编码，识别到厂商后作为默认值建议
+VENDOR_PASSWORD_MODES: dict[str, str] = {
+    "Dr.COM / 深澜": "base64",
+    "深菱 spl": "plain",
+    "H3C / 新网": "plain",
+    "华为": "base64",
+    "锐捷": "plain",
+    "斐讯 Pholus": "base64",
+    "水木 / 自建 CAS": "plain",
+    "Web认证通用": "plain",
+}
+
+VENDOR_LOGIN_MODES: dict[str, str] = {
+    "Dr.COM / 深澜": "http",
+    "深菱 spl": "http",
+    "H3C / 新网": "http",
+    "华为": "browser",
+    "锐捷": "http",
+    "斐讯 Pholus": "browser",
+    "水木 / 自建 CAS": "browser",
+    "Web认证通用": "browser",
+}
+
+# 探测地址池：按顺序尝试，任一放行即视为在线
+PROBE_CANDIDATES: tuple[str, ...] = (
+    "http://www.msftconnecttest.com/connecttest.txt",
+    "http://connectivitycheck.gstatic.com/generate_204",
+    "http://www.baidu.com/",
+    "http://www.qq.com/",
+    "http://detectportal.firefox.com/success.txt",
+)
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D102, ANN001
+        return None
+
+
+def _fetch_opener() -> urllib.request.OpenerDirector:
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    opener = urllib.request.build_opener(
+        _NoRedirect(),
+        urllib.request.HTTPSHandler(context=ctx),
+    )
+    opener.addheaders = [
+        ("User-Agent", DEFAULT_USER_AGENT),
+        ("Accept", "text/html,application/xhtml+xml,*/*;q=0.8"),
+    ]
+    return opener
+
+
+def _fetch(url: str, timeout: float, method: str = "GET", data: bytes | None = None,
+           referer: str = "") -> tuple[int, str, str, dict[str, str]] | None:
+    opener = _fetch_opener()
+    if referer:
+        opener.addheaders.append(("Referer", referer))
+    request = urllib.request.Request(url, data=data, method=method)
+    try:
+        with opener.open(request, timeout=timeout) as resp:
+            body = resp.read(200_000).decode("utf-8", errors="replace")
+            hdrs = {k.lower(): v for k, v in resp.headers.items()}
+            return resp.status, body, resp.geturl(), hdrs
+    except urllib.error.HTTPError as exc:
+        raw = ""
+        try:
+            raw = exc.read(50_000).decode("utf-8", errors="replace")
+        except Exception:  # noqa: BLE001
+            pass
+        hdrs = {k.lower(): v for k, v in exc.headers.items()} if exc.headers else {}
+        return exc.code, raw, url, hdrs
+    except Exception:  # noqa: BLE001 - 探测必须永不抛异常
+        return None
+
+
+# ---------------------------------------------------------------- 网关发现
+
+
+def local_ipv4() -> str | None:
+    """不依赖外部库的取本机出口 IP 方法。"""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.settimeout(0.5)
+        sock.connect(("10.255.255.255", 1))
+        return sock.getsockname()[0]
+    except OSError:
+        return None
+    finally:
+        sock.close()
+
+
+def gateway_of(ip: str | None = None) -> str | None:
+    """从本机 IP 推导默认网关。
+
+    校园网常见的 /16 掩码会让网关落在 x.y.0.1，/24 及更窄则落在 x.y.z.1。
+    这里只按 /16 与 /24 两种常见形态推，命中不了就交给 scan_gateway 扫。
+    """
+    if ip is None:
+        ip = local_ipv4()
+    if not ip:
+        return None
+    parts = ip.split(".")
+    if len(parts) != 4:
+        return None
+    try:
+        a, b, c, _d = (int(p) for p in parts)
+    except ValueError:
+        return None
+    return f"{a}.{b}.0.1"
+
+
+def gateway_candidates(ip: str | None = None) -> list[str]:
+    """同一台机器可能的两个网关：/16 网段的 x.y.0.1 与 /24 的 x.y.z.1。"""
+    if ip is None:
+        ip = local_ipv4()
+    if not ip:
+        return []
+    parts = ip.split(".")
+    if len(parts) != 4:
+        return []
+    try:
+        a, b, c, d = (int(p) for p in parts)
+    except ValueError:
+        return []
+    out = [f"{a}.{b}.0.1"]
+    narrow = f"{a}.{b}.{c}.1"
+    if narrow not in out:
+        out.append(narrow)
+    return out
+
+
+def guess_gateways() -> list[str]:
+    """常见网关候选：本机推导 + 经典校园网段，顺序即优先级。"""
+    out: list[str] = list(gateway_candidates())
+    for extra in ("10.0.0.1", "192.168.1.1", "172.16.0.1", "10.1.1.1", "192.168.0.1"):
+        if extra not in out:
+            out.append(extra)
+    return out
+
+
+# ---------------------------------------------------------------- 指纹与字段
+
+
+def identify_vendor(html_text: str, url: str = "") -> tuple[str, str]:
+    """返回 (厂商, 命中的特征串)；未命中则厂商为 '未知厂商'。"""
+    haystack = f"{url}\n{html_text}".lower()
+    for vendor, tokens in VENDOR_SIGNATURES:
+        for token in tokens:
+            if token in haystack:
+                return vendor, token
+    return "未知厂商", ""
+
+
+_CAPTCHA_HINTS = ("captcha", "验证码", "vercode", "codeinput", "yzcode")
+
+
+def needs_captcha(html_text: str) -> bool:
+    low = html_text.lower()
+    return any(hint in low for hint in _CAPTCHA_HINTS)
+
+
+@dataclass
+class PortalCandidate:
+    url: str
+    status: int
+    title: str = ""
+    vendor: str = "未知厂商"
+    signature: str = ""
+    login_path: str = ""
+    username_field: str = ""
+    password_field: str = ""
+    hidden_fields: dict[str, str] = field(default_factory=dict)
+    extra_fields: dict[str, str] = field(default_factory=dict)
+    needs_captcha: bool = False
+    suggested_login_mode: str = "http"
+    suggested_password_mode: str = "plain"
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "url": self.url,
+            "status": self.status,
+            "title": self.title,
+            "vendor": self.vendor,
+            "signature": self.signature,
+            "login_path": self.login_path,
+            "username_field": self.username_field,
+            "password_field": self.password_field,
+            "hidden_fields": self.hidden_fields,
+            "extra_fields": self.extra_fields,
+            "needs_captcha": self.needs_captcha,
+            "suggested_login_mode": self.suggested_login_mode,
+            "suggested_password_mode": self.suggested_password_mode,
+        }
+
+
+_TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.I | re.S)
+
+
+def _title_of(html_text: str) -> str:
+    match = _TITLE_RE.search(html_text or "")
+    return html_lib_unescape(match.group(1)).strip()[:60] if match else ""
+
+
+def html_lib_unescape(text: str) -> str:
+    import html as html_mod
+
+    return html_mod.unescape(text or "")
+
+
+def analyze_portal(url: str, html_text: str, timeout: float = 6.0) -> PortalCandidate:
+    """把一个门户页面解析成可直接用于登录的配置建议。"""
+    from . import portal as portal_mod
+
+    vendor, signature = identify_vendor(html_text, url)
+    candidate = PortalCandidate(
+        url=url,
+        status=200,
+        title=_title_of(html_text),
+        vendor=vendor,
+        signature=signature,
+        needs_captcha=needs_captcha(html_text),
+        suggested_login_mode=VENDOR_LOGIN_MODES.get(vendor, "browser"),
+        suggested_password_mode=VENDOR_PASSWORD_MODES.get(vendor, "plain"),
+    )
+
+    forms = portal_mod.parse_forms(html_text)
+    form = portal_mod.pick_login_form(forms)
+    if form is not None:
+        candidate.login_path = form.action
+        candidate.username_field = form.username_field
+        candidate.password_field = form.password_field
+        # 隐藏字段基本都是门户要求的固定参数，直接当附加字段带上；
+        # 空值隐藏字段（如 0MKKey）也必须带，否则门户会拒
+        for key, value in form.fields.items():
+            if key in (candidate.username_field, candidate.password_field):
+                continue
+            if key:
+                candidate.hidden_fields[key] = value
+        candidate.extra_fields = dict(candidate.hidden_fields)
+
+    if candidate.needs_captcha:
+        # 出现验证码就别指望纯 HTTP 直连了
+        candidate.suggested_login_mode = "browser"
+    return candidate
+
+
+# ---------------------------------------------------------------- 扫描门户
+
+
+def scan_gateway(
+    gateway: str,
+    paths: tuple[str, ...] = PORTAL_PATHS,
+    timeout: float = 4.0,
+    limit: int = 6,
+) -> list[PortalCandidate]:
+    """在网关上按候选路径扫一遍，返回可用的门户候选。
+
+    候选路径大多会直接拒绝连接，所以对每个网关只保留少量结果就返回，
+    避免在断网的校园网里空转几十秒。
+    """
+    found: list[PortalCandidate] = []
+    for scheme in ("http", "https"):
+        for path in paths:
+            url = f"{scheme}://{gateway}{path}"
+            got = _fetch(url, timeout=timeout)
+            if got is None:
+                continue
+            status, body, final_url, _ = got
+            if status >= 400 and not body.strip():
+                continue
+            candidate = analyze_portal(url, body, timeout=timeout)
+            candidate.status = status
+            found.append(candidate)
+            if len(found) >= limit:
+                return found
+    return found
+
+
+def scan_all_gateways(
+    gateways: list[str] | None = None,
+    paths: tuple[str, ...] = PORTAL_PATHS,
+    timeout: float = 3.0,
+    per_gateway_limit: int = 2,
+    total_limit: int = 6,
+) -> list[PortalCandidate]:
+    """逐个网关扫描，命中立即停止，避免把时间耗在无关网段上。"""
+    gateways = gateways if gateways is not None else guess_gateways()
+    out: list[PortalCandidate] = []
+    for gateway in gateways:
+        out.extend(scan_gateway(gateway, paths=paths, timeout=timeout, limit=per_gateway_limit))
+        if out:
+            break
+    return out[:total_limit]
+
+
+def scan_urls(urls: tuple[str, ...] | list[str], timeout: float = 5.0) -> list[PortalCandidate]:
+    """直接分析一组已知地址（例如从 302 跳转里拿到的）。"""
+    out: list[PortalCandidate] = []
+    for url in urls:
+        if not url:
+            continue
+        got = _fetch(url, timeout=timeout)
+        if got is None:
+            continue
+        status, body, final_url, _ = got
+        candidate = analyze_portal(final_url, body, timeout=timeout)
+        candidate.status = status
+        out.append(candidate)
+    return out
+
+
+def discover(
+    seed: str = "",
+    timeout: float = 4.0,
+    include_gateway_scan: bool = True,
+) -> dict[str, Any]:
+    """一站式发现：先看种子地址/探活跳转，再退回到扫网关。
+
+    返回结构化建议，供前端一键填充，也供 CLI 直接建账号。
+    """
+    report: dict[str, Any] = {
+        "ok": False,
+        "seed": seed,
+        "probe_status": "",
+        "redirect_portal": "",
+        "gateways": [],
+        "candidates": [],
+        "hints": [],
+        "probe_candidates": list(PROBE_CANDIDATES),
+    }
+
+    seed = seed or PROBE_CANDIDATES[0]
+    check = probe_mod.probe(seed, timeout=timeout)
+    report["probe_status"] = check.status
+    report["probe_detail"] = check.detail
+
+    if not check.online:
+        report["hints"].append("当前未放行，门户重定向是首选线索")
+        if check.final_url and probe_mod.is_portal_url(check.final_url):
+            report["redirect_portal"] = check.final_url
+
+    seeds: list[str] = []
+    if report["redirect_portal"]:
+        seeds.append(report["redirect_portal"])
+    detected = probe_mod.detect_portal_url(seed, timeout=timeout)
+    if detected and detected not in seeds:
+        seeds.append(detected)
+
+    candidates = scan_urls(seeds, timeout=timeout) if seeds else []
+
+    if not candidates and include_gateway_scan:
+        gateways = guess_gateways()
+        report["gateways"] = gateways
+        candidates = scan_all_gateways(
+            gateways[:3], timeout=min(timeout, 3.0), per_gateway_limit=2, total_limit=6
+        )
+
+    if not candidates:
+        report["hints"].append("未能自动发现门户，可在控制台手动填写门户地址与字段名")
+        report["hints"].append("若门户需要 JS 渲染或验证码，请把登录方式改为「浏览器登录」")
+        return report
+
+    # 去重后按可信度排序：有登录表单 > 有标题 > 路径含 login
+    seen: set[str] = set()
+    unique: list[PortalCandidate] = []
+    for candidate in candidates:
+        if candidate.url in seen:
+            continue
+        seen.add(candidate.url)
+        unique.append(candidate)
+    unique.sort(
+        key=lambda c: (
+            bool(c.username_field and c.password_field),
+            bool(c.title),
+            "login" in c.url.lower(),
+            c.status < 400,
+        ),
+        reverse=True,
+    )
+
+    report["candidates"] = [c.as_dict() for c in unique]
+    report["ok"] = True
+    best = unique[0]
+    report["hints"].append(
+        f"最佳候选：{best.vendor} / {best.url}"
+        + (f"，需浏览器登录" if best.needs_captcha else "")
+    )
+    return report
+
+
+def to_account_fields(candidate: dict[str, Any]) -> dict[str, Any]:
+    """把候选建议转成创建账号所需的字段字典。"""
+    return {
+        "portal_url": candidate.get("url", ""),
+        "username_field": candidate.get("username_field", ""),
+        "password_field": candidate.get("password_field", ""),
+        "extra_fields": candidate.get("extra_fields", {}) or {},
+        "login_mode": candidate.get("suggested_login_mode", "http"),
+        "password_mode": candidate.get("suggested_password_mode", "plain"),
+    }
+
+
+def dump(report: dict[str, Any]) -> str:
+    return json.dumps(report, ensure_ascii=False, indent=2)
+
+
+def is_url(value: str) -> bool:
+    parts = urlsplit(value)
+    return parts.scheme in ("http", "https") and bool(parts.netloc)

@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# 数据库运行时文件（备份文件单独放 database/backup/）
+database/*.db
+database/*.db-shm
+database/*.db-wal
+
+# 本地工具配置与日志（MCP 配置、临时输出）
+config.json
+*.log
+nul
+
+# 编辑器
+.vscode/
+.idea/
