@@ -39,20 +39,60 @@ def test_candidate_selectors_escape_id_for_css() -> None:
     assert "\\." in got[2], f"点号应被转义，实际 {got[2]}"
 
 
+class _StubLocator:
+    def __init__(self, selector: str, page: _StubPage) -> None:
+        self.selector = selector
+        self.page = page
+
+    def count(self) -> int:
+        return 1 if self.selector in self.page.present else 0
+
+
+class _StubPage:
+    """按选择器集合回答「这个元素存在吗」的假页面。"""
+
+    def __init__(self, *present: str) -> None:
+        self.present = set(present)
+
+    def locator(self, selector: str):
+        return _StubLocator(selector, self)
+
+
 def test_selector_for_prefers_explicit_field() -> None:
-    assert _selector_for("DDDDD", portal.CREDENTIAL_HINTS) == 'input[name="DDDDD"]'
+    page = _StubPage('input[name="DDDDD"]')
+    assert _selector_for(page, "DDDDD", portal.CREDENTIAL_HINTS) == 'input[name="DDDDD"]'
+
+
+def test_selector_for_probes_real_dom_instead_of_blind_first() -> None:
+    """西农大输入框只有 id 没有 name，盲取首个候选必然匹配不到。"""
+    page = _StubPage("#DDDDD")
+    got = _selector_for(page, "DDDDD", portal.CREDENTIAL_HINTS)
+    assert got == "#DDDDD", f"应逐个试探后命中真实存在的，实际 {got!r}"
+
+
+def test_selector_for_returns_empty_when_nothing_matches() -> None:
+    page = _StubPage()
+    assert _selector_for(page, "DDDDD", portal.CREDENTIAL_HINTS) == ""
+
+
+def test_selector_for_falls_back_to_hints_in_priority_order() -> None:
+    """命名字段没命中时按 hints 顺序找，取第一个存在的。"""
+    page = _StubPage('input[name="name"]')
+    got = _selector_for(page, "nope", ("user", "name"))
+    assert got == 'input[name="name"]'
 
 
 def test_selector_for_falls_back_to_first_hint() -> None:
-    """hints 是按优先级排的，取第一个就是最优先的那个。"""
-    assert _selector_for("", ("user", "name")) == 'input[name="user"]'
-    assert _selector_for("", ("user", "name")) != 'input[name="name"]'
+    """hints 是按优先级排的，取第一个能命中的。"""
+    page = _StubPage('input[name="user"]', 'input[name="name"]')
+    assert _selector_for(page, "", ("user", "name")) == 'input[name="user"]'
     # 顺序敏感：调用方靠排列表达优先级
-    assert _selector_for("", ("name", "user")) == 'input[name="name"]'
+    page2 = _StubPage('input[name="name"]')
+    assert _selector_for(page2, "", ("name", "user")) == 'input[name="name"]'
 
 
 def test_selector_for_returns_empty_when_no_hint() -> None:
-    assert _selector_for("", ()) == ""
+    assert _selector_for(_StubPage(), "", ()) == ""
 
 
 def test_browser_selectors_password_keeps_type_fallback() -> None:
@@ -61,34 +101,57 @@ def test_browser_selectors_password_keeps_type_fallback() -> None:
     PASSWORD_HINTS 永远能猜出一个名字，`pwd or 兜底` 是死代码；
     正确做法是用逗号把两者串起来让浏览器依次尝试。
     """
-    got = portal._browser_selectors(None, "", "")
-    assert got["pass"] == 'input[name="pass"], input[type="password"]'
+    got = portal._browser_selectors(_StubPage(), "", "")
+    assert got["pass"] == 'input[type="password"]'
     assert "submit" in got and got["submit"]
 
 
 def test_browser_selectors_uses_named_fields() -> None:
-    got = portal._browser_selectors(None, "DDDDD", "upass")
+    page = _StubPage('input[name="DDDDD"]', 'input[name="upass"]')
+    got = portal._browser_selectors(page, "DDDDD", "upass")
     assert got["user"] == 'input[name="DDDDD"]'
-    # 命名字段优先，但 type=password 仍留在链上
-    assert got["pass"].startswith('input[name="upass"]')
-    assert 'input[type="password"]' in got["pass"]
+    assert got["pass"] == 'input[name="upass"], input[type="password"]'
 
 
 # ---------- playwright stub ----------
 
 
-class _Page:
-    """记录所有调用的假页面。"""
+class _Locator:
+    def __init__(self, count: int) -> None:
+        self._count = count
 
-    def __init__(self, fail_fill=(), fail_click=(), content='{"result":1}', url="http://10.0.0.1/ok"):
+    def count(self) -> int:
+        return self._count
+
+
+class _Page:
+    """记录所有调用的假页面。
+
+    login_form_ready 模拟「JS 已把登录表单渲染出来」这件事。
+    真实门户的登录区是 JS 动态插入的，domcontentloaded 时 DOM 里一个
+    input 都没有，所以 browser_login 会先轮询等它出现。
+    """
+
+    def __init__(
+        self,
+        fail_fill=(),
+        fail_click=(),
+        content='{"result":1}',
+        url="http://10.0.0.1/ok",
+        login_form_ready: bool = True,
+    ):
         self.calls: list[tuple] = []
         self.fail_fill = set(fail_fill)
         self.fail_click = set(fail_click)
         self._content = content
         self.url = url
+        self.login_form_ready = login_form_ready
 
     def goto(self, url, wait_until=None, timeout=None):
         self.calls.append(("goto", url, wait_until, timeout))
+
+    def locator(self, selector: str):
+        return _Locator(1 if self.login_form_ready else 0)
 
     def fill(self, selector, value, timeout=None):
         self.calls.append(("fill", selector, value))
@@ -320,7 +383,10 @@ def test_browser_login_errors_when_both_fill_methods_fail(
     assert "填写字段失败" in result.message
 
 
-SUBMIT_SELECTOR = 'input[type="submit"], button[type="submit"], #loginSubmitBtn, .login-btn, button'
+SUBMIT_SELECTOR = (
+    "#login-account, input[type=submit], button[type=submit], "
+    "#loginSubmitBtn, .login-btn, button"
+)
 
 
 def test_browser_login_reports_submit_click_failure(
