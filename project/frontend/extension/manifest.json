@@ -1,0 +1,29 @@
+{
+  "manifest_version": 3,
+  "name": "校园网自连",
+  "version": "1.0.0",
+  "description": "掉线自动重连校园网：后台探活、掉线重连、一键登录、事件日志。",
+  "permissions": [
+    "storage",
+    "alarms",
+    "notifications",
+    "tabs"
+  ],
+  "host_permissions": [
+    "http://*/*",
+    "https://*/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "校园网自连",
+    "default_popup": "popup.html"
+  },
+  "options_page": "options.html",
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}
