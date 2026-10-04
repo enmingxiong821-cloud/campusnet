@@ -110,6 +110,11 @@ _INPUT_RE = re.compile(
     re.I | re.S,
 )
 
+# result 字段必须带边界匹配：result:10 / result:12 不是成功。
+# 参考 guet-drcom 的处理（要求 1 后面不是数字），Dr.COM 的 result 还会是 -1。
+_RESULT_ONE_RE = re.compile(r'"result"\s*:\s*1(?![\d])')
+_RESULT_FAIL_RE = re.compile(r'"result"\s*:\s*(?!1\b)[\d-]+')
+
 
 
 def _attrs(tag: str) -> dict[str, str]:
@@ -267,8 +272,15 @@ def classify_response(body: str, status: int, final_url: str) -> LoginResult:
     text = html.unescape(body or "")
     low = text.lower()
 
-    for token in ('"result":1', '"result" : 1', "result=1", '"success":true', 'success": true'):
-        if token.replace(" ", "") in low.replace(" ", ""):
+    # result 必须带边界匹配。
+    # 简单 `"result":1` in body 会把 result:10 / result:12 当成功——
+    # guet-drcom 的注释明确提到这点，它的做法是要求 1 后面不是数字。
+    if _RESULT_ONE_RE.search(low):
+        return LoginResult("success", "门户返回成功", "result=1")
+    if "result=1" in low.replace(" ", ""):
+        return LoginResult("success", "门户返回成功", "result=1")
+    for token in ('"success":true', 'success":true'):
+        if token in low.replace(" ", ""):
             return LoginResult("success", "门户返回成功", token)
 
     if any(k in low for k in ("already online", "已在线", "already_online", "在线", "重复登录")):
@@ -281,6 +293,13 @@ def classify_response(body: str, status: int, final_url: str) -> LoginResult:
     for token in ('"result":0', '"success":false', "登录失败", "认证失败", "userdeny"):
         if token.replace(" ", "") in low.replace(" ", ""):
             return LoginResult("failed", "门户返回登录失败", token)
+
+    # body 里带了 result 字段但不是 1，就是失败。
+    # 不加这条会掉进下面的兜底分支被判成功——那才是真正的坑：
+    # 我先只改正则，result:10 照样判成功，原因是兜底。
+    fail_hit = _RESULT_FAIL_RE.search(low)
+    if fail_hit:
+        return LoginResult("failed", "门户返回登录失败", fail_hit.group(0))
 
     if probe_mod.is_portal_url(final_url) and status in (200, 302, 401, 403):
         return LoginResult("failed", "提交后仍停留在登录页", f"status={status} url={final_url}")
