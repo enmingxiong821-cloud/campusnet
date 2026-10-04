@@ -21,11 +21,17 @@ from __future__ import annotations
 import argparse
 import html
 import json
+import sys
 import threading
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "project" / "backend"))
+
+from campusnet import ports  # noqa: E402
 
 DEFAULT_PORTAL_PORT = 2270
 DEFAULT_PROBE_PORT = 2271
@@ -210,13 +216,34 @@ def serve(
     portal_port: int = DEFAULT_PORTAL_PORT,
     probe_port: int = DEFAULT_PROBE_PORT,
     drop: bool = False,
+    auto_shift: bool = False,
 ) -> None:
     global PORTAL_PORT
-    PORTAL_PORT = portal_port
     STATE["online"] = not drop
 
     PAGES["login"] = LOGIN_PAGE
     PAGES["admin"] = ADMIN_PAGE.replace("__USER__", USERNAME).replace("__PASS__", PASSWORD)
+
+    # 先探端口：直接构造 HTTPServer 时端口被占会抛一个
+    # 新手读不懂的 traceback，而现象是命令永远不返回。
+    try:
+        resolved = ports.resolve_ports(
+            {portal_port: "门户", probe_port: "探测"},
+            auto_shift=auto_shift,
+        )
+    except OSError as exc:
+        print(f"[错误] {exc}", file=sys.stderr)
+        print(
+            "        端口被占时新开一个终端跑：\n"
+            f"          python {Path(__file__).name} --portal-port 2290 --probe-port 2291\n"
+            "        或先关掉占用它的那个程序。",
+            file=sys.stderr,
+        )
+        raise SystemExit(1) from exc
+
+    portal_port = resolved[portal_port]
+    probe_port = resolved[probe_port]
+    PORTAL_PORT = portal_port
 
     portal = ThreadingHTTPServer(("127.0.0.1", portal_port), PortalHandler)
     probe = ThreadingHTTPServer(("127.0.0.1", probe_port), ProbeHandler)
@@ -258,9 +285,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--portal-port", type=int, default=DEFAULT_PORTAL_PORT)
     parser.add_argument("--probe-port", type=int, default=DEFAULT_PROBE_PORT)
     parser.add_argument("--drop", action="store_true", help="以掉线状态启动")
+    parser.add_argument(
+        "--auto-shift",
+        action="store_true",
+        help="端口被占时自动往后找一个空闲端口",
+    )
     args = parser.parse_args(argv)
 
-    serve(args.portal_port, args.probe_port, args.drop)
+    serve(args.portal_port, args.probe_port, args.drop, auto_shift=args.auto_shift)
     return 0
 
 

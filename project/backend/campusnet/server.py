@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import sys
 import threading
 import urllib.parse
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable
 
-from . import __version__, discovery, portal, probe as probe_mod
+from . import __version__, discovery, portal, ports, probe as probe_mod
 from .monitor import MonitorManager
 from .paths import API_HOST, API_PORT, FRONTEND_DIR, stdout_ready
 from .storage import Account, Store
@@ -471,15 +472,37 @@ def serve(
     port: int = API_PORT,
     autostart: bool = True,
     blocking: bool = True,
+    auto_shift: bool = False,
 ) -> ThreadingHTTPServer:
-    """启动 API + 前端静态服务。"""
+    """启动 API + 前端静态服务。
+
+    端口被占时默认直接报错退出，而不是抛一串用户读不懂的
+    OSError traceback —— 新手看到「端口被占，换一个」才知道该做什么。
+    auto_shift=True 时自动往后找一个空闲端口。
+    """
     stdout_ready()
     store = store or Store()
     manager = MonitorManager()
     handler_cls = build_handler(store, manager)
     _install_dispatch(handler_cls)
 
-    httpd = ThreadingHTTPServer((host, port), handler_cls)
+    try:
+        port = ports.resolve_ports({port: "服务"}, host=host, auto_shift=auto_shift)[port]
+    except OSError as exc:
+        print(f"[错误] {exc}", file=sys.stderr)
+        print(
+            f"        换个端口启动：python utils/run.py serve --port {port + 20}\n"
+            "        或先关掉占用它的那个程序。",
+            file=sys.stderr,
+        )
+        raise SystemExit(1) from exc
+
+    try:
+        httpd = ThreadingHTTPServer((host, port), handler_cls)
+    except OSError as exc:
+        # 预检通过但 bind 仍失败：端口在竞态窗口内被抢占
+        print(f"[错误] 端口 {port} 绑定失败：{exc}", file=sys.stderr)
+        raise SystemExit(1) from exc
     httpd.daemon_threads = True
 
     if autostart:

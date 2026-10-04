@@ -17,12 +17,16 @@ from .storage import Account, Store
 def cmd_serve(args: argparse.Namespace) -> int:
     from .server import serve
 
-    serve(
-        host=args.host,
-        port=args.port,
-        autostart=not args.no_autostart,
-        blocking=True,
-    )
+    try:
+        serve(
+            host=args.host,
+            port=args.port,
+            autostart=not args.no_autostart,
+            blocking=True,
+            auto_shift=args.auto_shift,
+        )
+    except SystemExit:
+        raise
     return 0
 
 
@@ -178,6 +182,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_serve.add_argument("--port", type=int, default=API_PORT)
     p_serve.add_argument(
         "--no-autostart", action="store_true", help="启动服务但不开启后台监控"
+    )
+    p_serve.add_argument(
+        "--auto-shift",
+        action="store_true",
+        help="端口被占时自动往后找一个空闲端口",
     )
     p_serve.set_defaults(func=cmd_serve)
 
