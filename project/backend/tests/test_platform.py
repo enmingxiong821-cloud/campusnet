@@ -193,16 +193,35 @@ def test_current_process_is_alive() -> None:
 
 
 def test_impossible_pid_is_dead() -> None:
-    """PID 上限之外必然不存在。"""
+    """PID 上限之外必然不存在，且不能抛 OverflowError。
+
+    这个断言是 Linux CI 逼出来的：os.kill 对超出 int 范围的 PID
+    抛 OverflowError，而 OverflowError 不是 OSError 子类，
+    会穿透 except 逃出 _pid_alive，让 acquire() 整个崩掉。
+    """
     assert lockfile._pid_alive(4_294_967_000) is False
 
 
-def test_parent_process_is_alive() -> None:
+def test_absurdly_large_pid_does_not_raise() -> None:
+    """2^40 远超 Linux pid_max，必须判死而不是崩。"""
+    assert lockfile._pid_alive(1 << 40) is False
+    assert lockfile._pid_alive(1 << 62) is False
+
+
+def test_pid_just_above_max_is_dead() -> None:
+    assert lockfile._pid_alive(lockfile._MAX_PID + 1) is False
+
+
+def test_current_process_is_detected_on_this_platform() -> None:
+    """跨平台自检：不碰 ctypes，os.getpid 在任何平台都该判活。"""
+    assert lockfile._pid_alive(os.getpid()) is True
+
+
+@pytest.mark.skipif(os.name != "nt", reason="GetCurrentProcessId 仅 Windows 可用")
+def test_windows_process_api_reports_current_pid() -> None:
     import ctypes
 
-    parent = ctypes.windll.kernel32.GetCurrentProcessId()
-    # GetCurrentProcessId 返回伪句柄，取不到父进程就退化为自检
-    assert parent == os.getpid() or lockfile._pid_alive(parent)
+    assert ctypes.windll.kernel32.GetCurrentProcessId() == os.getpid()
 
 
 def test_child_process_detected_alive_then_dead() -> None:
