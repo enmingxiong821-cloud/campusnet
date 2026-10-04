@@ -47,20 +47,47 @@ def test_xxtea_roundtrip(n: int) -> None:
 
 
 def test_rounds_formula() -> None:
-    """轮数是 6 + 52//n，不是固定值。"""
-    assert srun._rounds_for(2) == 32
-    assert srun._rounds_for(4) == 19
-    assert srun._rounds_for(8) == 12
-    assert srun._rounds_for(64) == 6
+    """轮数是 6 + 52//(n+1)，括号位置差一位就会与门户密文不同。
+
+    我最初写成 `6 + 52//n`，只有 n=2 时两边都是 23 才碰巧对。
+    Portal.js 的原文是 `Math.floor(6 + 52 / (n + 1))`。
+    """
+    assert srun._rounds_for(2) == 23
+    assert srun._rounds_for(3) == 19
+    assert srun._rounds_for(8) == 11
+    assert srun._rounds_for(255) == 6
 
 
-def test_xxtea_known_vector() -> None:
-    """固定向量：算法一改就会暴露，避免"自洽但不对外"。"""
+def test_rounds_differs_from_wrong_formula() -> None:
+    """确认括号位置确实会改变结果，防止改回错的那版。
+
+    只有 n=2 时两版恰好都是 23，所以别拿 n=2 当验证点。
+    """
+    for n in (2, 3, 7, 8):
+        wrong = 6 + 52 // n
+        if srun._rounds_for(n) == wrong:
+            continue  # 该 n 下两版恰好相同，跳过
+        assert srun._rounds_for(n) != wrong, f"n={n} 时括号位置没有生效"
+    # 至少有一处必须不同，否则说明实现退化成了错版
+    assert any(srun._rounds_for(n) != 6 + 52 // n for n in (3, 7, 8))
+
+
+@pytest.mark.parametrize(
+    "n,expected",
+    [
+        (8, "9c10dcf2e0a81419"),
+        (32, "b474335b776c1f96c45c89169b3daae4"),
+        (256, "d8579fb248ceb30cb859d3a97433ccd8"),
+    ],
+)
+def test_xxtea_known_vector(n: int, expected: str) -> None:
+    """基准密文由独立实现算出（BBTea 结构 + 零填充 + rounds=6+52//(n+1)）。
+
+    不引用本模块代码，避免「自洽但与门户算出的密文不同」这种假绿。
+    """
     key = b"0123456789abcdef"
-    enc = xxtea_encrypt(bytes(range(8)), key)
-    # 基准值由独立实现（BBTea 结构 + rounds=6+52//n）算出，
-    # 不引用本模块代码，避免「自洽但与门户算出的密文不同」这种假绿。
-    assert enc.hex() == "b9afbd95fc82eaaf", f"密文与基准不符：{enc.hex()}"
+    enc = xxtea_encrypt(bytes(i % 256 for i in range(n)), key)
+    assert enc.hex()[:32] == expected, f"密文与基准不符：{enc.hex()[:32]}"
 
 
 def test_xxtea_pads_short_input() -> None:
@@ -88,15 +115,28 @@ def test_srun_b64_roundtrip(n: int) -> None:
     assert srun_unb64(srun_b64(raw)) == raw
 
 
-def test_srun_b64_matches_standard_when_tables_align() -> None:
-    """当前换表与标准表同序时结果应一致。
+def test_srun_b64_differs_from_standard_table() -> None:
+    """换表必须真的换掉，不能等于标准表。
 
-    若日后确认门户用的是另一张表，这里会红——那就是该改 _SRUN_ALPHABET 的信号。
+    我最初误用了标准字母表，等于没换——标准库能编出来也能往返自测，
+    但门户解不开，只会回 auth_info_error。所以这里断言的是「与标准表不同」。
     """
     import base64
 
     raw = b"hello srun"
-    assert srun_b64(raw) == base64.b64encode(raw).decode()
+    assert srun_b64(raw) != base64.b64encode(raw).decode()
+
+
+def test_srun_alphabet_matches_reference() -> None:
+    """字母表逐字符比对，经 4 份独立公开实现交叉确认。"""
+    expected = "LVoJPiCN2R8G90yg+hmFHuacZ1OWMnrsSTXkYpUq/3dlbfKwv6xztjI7DeBE45QA"
+    assert srun._SRUN_ALPHABET == expected
+
+
+def test_srun_alphabet_is_valid_permutation() -> None:
+    assert len(srun._SRUN_ALPHABET) == 64
+    assert len(set(srun._SRUN_ALPHABET)) == 64, "字母表不能有重复字符"
+    assert srun._SRUN_ALPHABET != srun._STD_ALPHABET
 
 
 def test_srun_b64_has_no_newlines() -> None:
