@@ -202,6 +202,18 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+class _NoProxy(urllib.request.ProxyHandler):
+    """强制直连，不读 http_proxy 环境变量。
+
+    门户地址是内网 IP（西农大 172.26.8.11），系统代理根本到不了。
+    同类项目的通行做法：guet-drcom 加 `--noproxy '*'`，
+    zju-web-login 用 `session.trust_env = False`。
+    """
+
+    def __init__(self) -> None:
+        super().__init__({})
+
+
 def _opener(cookies: CookieJar, insecure: bool = False) -> urllib.request.OpenerDirector:
     import ssl
 
@@ -210,6 +222,7 @@ def _opener(cookies: CookieJar, insecure: bool = False) -> urllib.request.Opener
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
     opener = urllib.request.build_opener(
+        _NoProxy(),
         _NoRedirect(),
         urllib.request.HTTPCookieProcessor(cookies),
         urllib.request.HTTPSHandler(context=ctx),

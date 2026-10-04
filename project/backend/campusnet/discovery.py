@@ -90,11 +90,22 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+class _NoProxy(urllib.request.ProxyHandler):
+    """强制直连，不读 http_proxy 环境变量。
+
+    扫网关与门户都是内网地址，系统代理到不了。
+    """
+
+    def __init__(self) -> None:
+        super().__init__({})
+
+
 def _fetch_opener() -> urllib.request.OpenerDirector:
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
     opener = urllib.request.build_opener(
+        _NoProxy(),
         _NoRedirect(),
         urllib.request.HTTPSHandler(context=ctx),
     )

@@ -40,12 +40,31 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+class _NoProxy(urllib.request.ProxyHandler):
+    """强制直连，不读 http_proxy / HTTP_PROXY 环境变量。
+
+    实测：设了 `http_proxy=http://127.0.0.1:9` 后，探活返回
+    `unreachable`——请求被代理接管了。而门户地址是内网 IP
+    （西农大是 172.26.8.11），代理根本到不了，走代理必然失败。
+
+    同类项目的通行做法：guet-drcom 每次请求都加 `--noproxy '*'`，
+    zju-web-login 用 `session.trust_env = False`。
+    """
+
+    def __init__(self) -> None:
+        super().__init__({})
+
+
 def _build_opener(insecure: bool) -> urllib.request.OpenerDirector:
     ctx = ssl.create_default_context()
     if insecure:
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
-    handlers = [_NoRedirect(), urllib.request.HTTPSHandler(context=ctx)]
+    handlers = [
+        _NoProxy(),
+        _NoRedirect(),
+        urllib.request.HTTPSHandler(context=ctx),
+    ]
     opener = urllib.request.build_opener(*handlers)
     opener.addheaders = [("User-Agent", DEFAULT_USER_AGENT), ("Accept", "*/*")]
     return opener

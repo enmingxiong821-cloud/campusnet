@@ -327,6 +327,17 @@ class SrunConfig:
         return self.base_url.rstrip("/") + AUTH_PATH
 
 
+class _NoProxy(urllib.request.ProxyHandler):
+    """强制直连，不读 http_proxy 环境变量。
+
+    SRUN 的认证服务器是内网地址（西农大 172.26.8.11），
+    走系统代理必然到不了。同类项目普遍这么处理。
+    """
+
+    def __init__(self) -> None:
+        super().__init__({})
+
+
 def _opener(insecure: bool):
     import ssl
 
@@ -335,6 +346,7 @@ def _opener(insecure: bool):
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
     opener = urllib.request.build_opener(
+        _NoProxy(),
         urllib.request.HTTPSHandler(context=ctx),
     )
     opener.addheaders = [
