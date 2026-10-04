@@ -9,9 +9,20 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+# Linux 默认 pid_max=4194304（2^22），这里放宽到 2^31 覆盖所有现实配置。
+# 再大的值 os.kill 会抛 OverflowError，直接判死即可。
+_MAX_PID = 1 << 31
+
 
 def _pid_alive(pid: int) -> bool:
     if pid <= 0:
+        return False
+    # Linux 的 PID 空间受 /proc/sys/kernel/pid_max 限制，
+    # 常见上限 4194304；超出范围的 PID 直接判死，不去问内核。
+    # 不加这道闸，os.kill(1<<40, 0) 会抛 OverflowError，
+    # 而 OverflowError 不是 OSError 子类，会穿透下面的 except 逃出去，
+    # 让整个 acquire() 崩掉——锁文件被写坏就能让服务起不来。
+    if pid > _MAX_PID:
         return False
     if os.name == "nt":
         # Windows 没有 os.kill(0)，用 ctypes 查 OpenProcess 退出码
@@ -37,7 +48,7 @@ def _pid_alive(pid: int) -> bool:
         return False
     except PermissionError:
         return True  # 存在但不是我们开的
-    except OSError:
+    except (OSError, OverflowError, ValueError):
         return False
     return True
 
