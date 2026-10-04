@@ -59,7 +59,7 @@ def _account_from_payload(payload: dict[str, Any], existing: Account | None = No
         raise ApiError(HTTPStatus.BAD_REQUEST, "门户地址必须以 http:// 或 https:// 开头")
     if account.password_mode not in ("plain", "base64", "md5", "md5_base64", "sha256"):
         raise ApiError(HTTPStatus.BAD_REQUEST, f"不支持的密码编码方式: {account.password_mode}")
-    if account.login_mode not in ("http", "browser", "manual"):
+    if account.login_mode not in ("http", "browser", "manual", "srun"):
         raise ApiError(HTTPStatus.BAD_REQUEST, f"不支持的登录模式: {account.login_mode}")
     if not account.password and existing is not None and not payload.get("password"):
         account.password = existing.password
