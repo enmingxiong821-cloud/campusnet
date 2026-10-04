@@ -237,8 +237,16 @@ python -m playwright install chromium
 
 ## 常见问题
 
-**控制台打不开**
-端口被占了。换端口：`python utils/run.py serve --port 2468`。
+**控制台打不开 / 启动后没反应**
+端口被占。程序会在启动前检查并直接告诉你占用者：
+
+```
+[错误]   端口 2268（服务）已被占用，占用者：PID 12345（多半是上一个没关掉的实例）
+        换个端口启动：python utils/run.py serve --port 2288
+        或先关掉占用它的那个程序。
+```
+
+也可以让它自己找空闲端口：`python utils/run.py serve --auto-shift`
 
 **显示 `连不上门户`**
 门户地址不对，或当前不在该校园网网段。先跑 `discover` 确认。
