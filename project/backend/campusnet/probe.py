@@ -21,7 +21,22 @@ DEFAULT_PROBES = (
     "http://connectivitycheck.gstatic.com/generate_204",
 )
 
-ONLINE_MARKERS = ("microsoft connect test", "ok", "204")
+# 正文明文，放行时应命中其中之一。
+# RFC 8952 建议用「canary」请求：响应与预期不一致即判定被劫持。
+ONLINE_MARKERS = ("microsoft connect test", "microsoft ncsi", "ok", "204")
+
+# 门户页常见特征。命中则 302/200 都判为未认证。
+PORTAL_BODY_MARKERS = (
+    "eportal",
+    "srun_portal",
+    "drcom",
+    "captive",
+    "portal/login",
+    "请登录",
+    "上网登录",
+    "用户认证",
+    "网络认证",
+)
 
 
 @dataclass
@@ -89,8 +104,24 @@ def _decode_body(raw: bytes, headers: Any = None) -> str:
     return charset_mod.decode(raw, content_type=content_type)
 
 
+def looks_like_portal_body(text: str) -> bool:
+    """正文是否是门户/认证页。"""
+    if not text:
+        return False
+    low = text.lower()
+    return any(marker in low for marker in PORTAL_BODY_MARKERS)
+
+
 def probe(url: str, timeout: float = 5.0, insecure: bool = False) -> ProbeResult:
-    """请求一个明文探测地址；被重定向到门户登录页即视为未认证。"""
+    """请求一个明文探测地址；被劫持到门户页才视为未认证。
+
+    判定依据来自 RFC 8952 与 Firefox 的 CaptiveDetect.sys.mjs：
+    用「canary」请求探活，响应与预期不一致才算被劫持。
+
+    关键区分——302 不等于掉线。实测 www.qq.com 首页就返回
+    302 跳 https（正常行为），早前一律判 redirected 会误报掉线，
+    触发无意义的重连。所以 302 时要先看跳转目标像不像门户。
+    """
     if not url:
         url = DEFAULT_PROBES[0]
     opener = _build_opener(insecure)
@@ -98,11 +129,26 @@ def probe(url: str, timeout: float = 5.0, insecure: bool = False) -> ProbeResult
     try:
         with opener.open(request, timeout=timeout) as resp:
             body = _decode_body(resp.read(4096), resp.headers)
-            return ProbeResult(True, "online", body.strip()[:120], resp.geturl())
+            final = resp.geturl()
+            # 跟到门户页也算被劫持：某些门户直接 200 吐登录表单
+            if is_portal_url(final) or looks_like_portal_body(body):
+                return ProbeResult(
+                    False, "portal_page", f"HTTP {resp.status} 但返回了门户页", final
+                )
+            return ProbeResult(True, "online", body.strip()[:120], final)
     except urllib.error.HTTPError as exc:
         location = exc.headers.get("Location", "") if exc.headers else ""
         if exc.code in (301, 302, 303, 307, 308) and location:
-            return ProbeResult(False, "redirected", f"HTTP {exc.code} -> {location}", location)
+            # 跳到门户才是掉线；跳到同站 https 属正常跳转
+            if is_portal_url(location):
+                return ProbeResult(False, "redirected", f"HTTP {exc.code} -> {location}", location)
+            try:
+                followed = probe(location, timeout=timeout, insecure=insecure)
+            except Exception:  # noqa: BLE001
+                followed = ProbeResult(False, "redirected", f"HTTP {exc.code} -> {location}", location)
+            if followed.online:
+                return ProbeResult(True, "redirected_ok", f"HTTP {exc.code} -> {location}", location)
+            return followed
         if exc.code in (204, 200):
             return ProbeResult(True, "online", f"HTTP {exc.code}", url)
         return ProbeResult(False, "http_error", f"HTTP {exc.code}", url)
