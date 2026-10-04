@@ -650,9 +650,88 @@ def login(
     mode = (account.login_mode or "http").lower()
     if mode == "browser":
         return browser_login(account, headless=headless, on_progress=on_progress)
+    if mode == "srun":
+        return srun_login(account, on_progress=on_progress)
     if mode == "manual":
         check = probe_mod.probe(account.probe_url)
         if check.online:
             return LoginResult("already_online", "网络已放行，无需登录", check.detail)
         return LoginResult("error", "当前为人工模式：请在浏览器里手动完成认证", check.detail)
     return http_login(account, on_progress=on_progress)
+
+
+def srun_login(account: Account, on_progress: ProgressCallback | None = None) -> LoginResult:
+    """深澜 SRUN 认证：challenge + HMAC-MD5 + xxtea。
+
+    与 http_login 的区别是没有任何 HTML 表单——登录全靠三段密文，
+    页面里的 `<form>` 数量为 0，靠解析表单必然失败。
+    """
+    emit = on_progress or _noop
+    from . import srun as srun_mod
+
+    base = account.portal_url.strip()
+    if not base:
+        return LoginResult("error", "未配置门户地址", "")
+
+    ip = account.extra_fields.get("ip") or account.extra_fields.get("user_ip") or ""
+    if not ip:
+        ip = _local_ip_for_portal(base)
+    if not ip:
+        return LoginResult(
+            "error",
+            "无法确定本机 IPv4，SRUN 认证必须带上 ip 参数",
+            "可在附加字段里手动填 {\"ip\": \"10.x.x.x\"}",
+        )
+
+    config = srun_mod.SrunConfig(
+        base_url=base,
+        username=account.username,
+        password=account.password,
+        ip=ip,
+        ac_id=account.extra_fields.get("ac_id", srun_mod.DEFAULT_AC_ID),
+        timeout=10.0,
+    )
+
+    try:
+        ok, reason = srun_mod.srun_login(config, on_progress=on_progress)
+    except srun_mod.SrunError as exc:
+        emit("fail", str(exc))
+        return LoginResult("error", str(exc), "")
+
+    if not ok:
+        return LoginResult("failed", reason, f"ip={ip}")
+
+    check = probe_mod.probe(account.probe_url)
+    if check.online:
+        emit("done", "登录成功，网络已放行")
+        return LoginResult("success", "登录成功且网络已放行", check.detail)
+    emit("warn", "门户已受理，但复检仍未放行")
+    return LoginResult("success", f"门户返回成功（{reason}），但复检未放行", check.detail)
+
+
+def _local_ip_for_portal(portal_url: str) -> str:
+    """用一次 UDP connect 猜本机出口 IP。
+
+    不建立真实连接，不发包，只是让内核按路由表选源地址。
+    目的地址用门户 IP，保证路由选择与实际访问门户一致。
+    """
+    import socket
+    from urllib.parse import urlsplit
+
+    parts = urlsplit(portal_url)
+    host = parts.hostname
+    if not host:
+        return ""
+    if parts.scheme not in ("http", "https"):
+        return ""
+
+    probe_host = "10.255.255.255" if host.count(".") == 3 else "8.8.8.8"
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.settimeout(0.5)
+        sock.connect((probe_host, 1))
+        return sock.getsockname()[0]
+    except OSError:
+        return ""
+    finally:
+        sock.close()

@@ -204,7 +204,12 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["plain", "base64", "md5", "md5_base64", "sha256"],
         help="密码在提交前的编码方式",
     )
-    p_add.add_argument("--login-mode", default="http", choices=["http", "browser", "manual"])
+    p_add.add_argument(
+        "--login-mode",
+        default="http",
+        choices=["http", "browser", "manual", "srun"],
+        help="http=表单登录；browser=真浏览器；srun=深澜challenge 加密；manual=只检测不登录",
+    )
     p_add.add_argument("--extra", default="", help='附加字段 JSON，如 \'{"upass":"1"}\'')
     p_add.add_argument("--max-retries", type=int, default=3)
     p_add.add_argument("--disabled", action="store_true")

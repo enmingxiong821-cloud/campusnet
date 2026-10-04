@@ -373,13 +373,53 @@ function resetProgress() {
   renderProgress();
 }
 
-function toast(msg, kind = '') {
+/**
+ * toast 去重：后台每 10 秒自动刷新一次，同一个错误会在屏幕上堆出一叠。
+ * 同一个 key 正在显示时只把内容更新一次，不新增节点。
+ * 这样「加载失败」不会变成一列一模一样的红条。
+ */
+const _toastSeen = new Map();
+
+function toast(msg, kind = '', key = msg) {
+  const box = $('toast');
+  const now = Date.now();
+  const existing = _toastSeen.get(key);
+
+  if (existing && now - existing.at < 4000) {
+    existing.el.textContent = msg;
+    existing.el.className = kind;
+    existing.at = now;
+    clearTimeout(existing.fade);
+    clearTimeout(existing.drop);
+    existing.fade = setTimeout(() => {
+      existing.el.style.opacity = '0';
+      existing.el.style.transition = 'opacity .3s';
+    }, 3400);
+    existing.drop = setTimeout(() => {
+      existing.el.remove();
+      _toastSeen.delete(key);
+    }, 3800);
+    return;
+  }
+
   const el = document.createElement('div');
   el.className = kind;
   el.textContent = msg;
-  $('toast').appendChild(el);
-  setTimeout(() => { el.style.opacity = '0'; el.style.transition = 'opacity .3s'; }, 3400);
-  setTimeout(() => el.remove(), 3800);
+  box.appendChild(el);
+
+  const record = { el, at: now, fade: 0, drop: 0 };
+  record.fade = setTimeout(() => {
+    el.style.opacity = '0';
+    el.style.transition = 'opacity .3s';
+  }, 3400);
+  record.drop = setTimeout(() => {
+    el.remove();
+    _toastSeen.delete(key);
+  }, 3800);
+  _toastSeen.set(key, record);
+
+  // 最多同时显示 5 条，超出立刻清掉最旧的
+  while (box.children.length > 5) box.removeChild(box.firstChild);
 }
 
 function renderStatus() {
@@ -402,7 +442,7 @@ function renderCards() {
   $('cOnlineSub').textContent = list.length ? Math.round(online.length / list.length * 100) + '% 可用' : '—';
   $('cOffline').textContent = offline.length;
   $('cOfflineSub').textContent = offline.length ? '需要关注' : '一切正常';
-  const last = (m.last_results || [])[0];
+  const last = (state.monitor.last_results || [])[0];
   $('cLastRun').textContent = last ? '上次检测 ' + last.elapsed + 's' : '尚未运行';
 }
 
