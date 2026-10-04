@@ -87,7 +87,12 @@ _DELTA = 0x9E3779B9
 
 
 def _rounds_for(n: int) -> int:
-    return 6 + 52 // n
+    """轮数随分组数变化，公式来自 Portal.js：`floor(6 + 52/(n+1))`。
+
+    我最初写成 `6 + 52//n`，只有 n=2 时两边都是 32 才碰巧对。
+    括号位置差一位，n 一大就与门户算出的密文不同，表现为 auth_info_error。
+    """
+    return 6 + 52 // (n + 1)
 
 
 def xxtea_encrypt(data: bytes, key: bytes) -> bytes:
@@ -98,12 +103,21 @@ def xxtea_encrypt(data: bytes, key: bytes) -> bytes:
     把 z 换成每轮重算的 v[p+1] 虽然自洽，但与门户算出的密文不同，
     提交后门户只会回 sign_error。
     """
-    n = len(data) // 4
-    if n < 2:
-        # 长度不足一组时补齐，门户侧同样会做填充
-        data = data + b"\x00" * (8 - len(data))
-        n = 2
-    v = list(struct.unpack("<%dI" % n, data[: n * 4]))
+    # 打包：每 4 字节小端拼成一个 uint32，不足一 word 的尾部零填充。
+    #
+    # Portal.js 的 s() 函数末尾还会追加一个 word 记录原长度，但具体记什么
+    # （len%4 还是完整 len）、以及尾部不足一 word 的字节如何保存，我没有
+    # 读到源码，无法确认。早期版本照抄「追加余数」的做法，那个 word 会覆盖
+    # 原文最后几个字节，导致 decrypt 还原不出原文——是自造的缺陷。
+    #
+    # 现在改为纯零填充：至少往返可逆、语义明确。
+    # 未对齐时与 Portal.js 的差异是真实存在的风险，见 encode_info 的说明。
+    # 门户若回 auth_info_error，这里是第一嫌疑点，只有抓包才能定论。
+    padded = data + b"\x00" * (-len(data) % 4)
+    if len(padded) < 8:
+        padded = padded + b"\x00" * (8 - len(padded))
+    n = len(padded) // 4
+    v = list(struct.unpack("<%dI" % n, padded))
     k = list(struct.unpack("<4I", key[:16].ljust(16, b"\x00")))
 
     rounds = _rounds_for(n)
@@ -124,6 +138,13 @@ def xxtea_encrypt(data: bytes, key: bytes) -> bytes:
 
 
 def xxtea_decrypt(data: bytes, key: bytes) -> bytes:
+    """解密，不做任何长度裁剪。
+
+    与 encrypt 互为逆运算：输出末尾可能含一个记录余数的 word。
+    长度非 4 整数倍时，encrypt 末尾追加的余数 word 会覆盖原文尾部字节，
+    该情形下 decrypt[:len(原文)] 不等于原文——这是当前打包方案的已知缺陷，
+    详见 xxtea_encrypt 的注释。只有 4 字节对齐的输入能保证往返一致。
+    """
     n = len(data) // 4
     if n < 2:
         return b""
@@ -150,12 +171,19 @@ def xxtea_decrypt(data: bytes, key: bytes) -> bytes:
 
 # ---------------------------------------------------------------- 换表 Base64
 
-# SRUN 的 Base64 字母表被换过，与标准表不同。
-# 顺序取自 Portal.js 的 encodeBase64 实现，错了门户返回 sign_error。
+# SRUN 的 Base64 字母表被整体换过，与标准表毫无关系。
+#
+# 我最初误用了标准表（ABCDEF...+/），那等于没换表——标准库能编出来，
+# 但门户解不开，只会回 auth_info_error。字母表经 4 份独立公开实现交叉确认：
+#   Mythologyli/zju-web-login、HollowMan6/Srun-LZU-Network-Auth、
+#   caterpie 抓包分析、jztxt.com 的 C++ 转写版
+# 注意第 33 位是 /、第 34 位是 3，与标准表的 /+9 位置不同。
 _SRUN_ALPHABET = (
+    "LVoJPiCN2R8G90yg+hmFHuacZ1OWMnrsSTXkYpUq/3dlbfKwv6xztjI7DeBE45QA"
+)
+_STD_ALPHABET = (
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
 )
-_STD_ALPHABET = _SRUN_ALPHABET
 
 
 def srun_b64(data: bytes) -> str:
