@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from campusnet.monitor import DEFAULT_PROGRESS_CAP, Monitor, ProgressItem
@@ -297,7 +299,11 @@ def test_portal_success_but_probe_blocked_emits_warn(
 
 
 def test_stop_event_aborts_with_message(store, account: Account, monkeypatch) -> None:  # noqa: ANN001
-    """监控被停止时应告知「中断」，而不是静默返回。"""
+    """后台循环里被停止时应告知「中断」，而不是静默返回。
+
+    只在 running_loop 为真时中断 —— 手动「立即检测」走同一条路径，
+    但监控线程通常没在跑，不区分会被自己的 stop 打断成假失败。
+    """
     from campusnet import monitor as monitor_mod
     from campusnet.portal import LoginResult
 
@@ -317,7 +323,99 @@ def test_stop_event_aborts_with_message(store, account: Account, monkeypatch) ->
     acc_id = store.add_account(acc)
     seen: list[dict] = []
     mon = Monitor(store, interval=10, on_progress=seen.append)
+    mon.running_loop = True  # 模拟由 _loop 驱动
     mon.check_account(store.get_account(acc_id))
 
     assert any(i["stage"] == "abort" for i in seen)
     assert len([i for i in seen if i["stage"] == "retry"]) == 1  # 停止后不再重试
+
+
+def test_manual_check_ignores_stop_event(store, account: Account, monkeypatch) -> None:  # noqa: ANN001
+    """手动检测时 stop 标志残留不该打断自己。
+
+    用户点「立即检测」时监控多半是停的，
+    若 stop 标志仍被检查，会得到 attempts=0 的假失败。
+    """
+    from campusnet import monitor as monitor_mod
+    from campusnet.portal import LoginResult
+
+    state = {"online": False}
+
+    def fake_probe(url: str, timeout: float = 5.0, insecure: bool = False):
+        return monitor_mod.probe_mod.ProbeResult(
+            state["online"], "online" if state["online"] else "redirected", "", url
+        )
+
+    monkeypatch.setattr(monitor_mod.probe_mod, "probe", fake_probe)
+
+    def fake_login(*_a, **_k):
+        state["online"] = True
+        return LoginResult("success", "登录成功")
+
+    monkeypatch.setattr(monitor_mod.portal, "login", fake_login)
+    monkeypatch.setattr("time.sleep", lambda *_a: None)
+
+    acc = account
+    acc.max_retries = 3
+    acc_id = store.add_account(acc)
+    seen: list[dict] = []
+    mon = Monitor(store, interval=10, on_progress=seen.append)
+
+    # 模拟用户先点了「停止监控」，再点「立即检测」
+    mon._stop.set()
+
+    outcome = mon.check_account(store.get_account(acc_id))
+
+    assert outcome.online is True
+    assert outcome.state == "logged_in"
+    assert outcome.attempts == 1
+    assert not any(i["stage"] == "abort" for i in seen)
+    assert any(i["stage"] == "done" for i in seen)
+
+
+def test_manual_check_after_stop_may_start_loop_again(store, account, online_probe) -> None:  # noqa: ANN001
+    """停止后重新启动循环，停止标志应被清掉。
+
+    这里只验标志复位，不叠加强调 check_all：
+    循环线程起来后会立刻跑一轮并持锁，
+    此时手动 check_all 拿不到锁会返回上一轮结果（本例为空），
+    那是并发保护的设计行为，不是本用例要测的东西。
+    """
+    store.add_account(account)
+    mon = Monitor(store, interval=10)
+
+    mon._stop.set()
+    assert mon.start() is True
+    try:
+        assert mon._stop.is_set() is False
+    finally:
+        mon.stop()
+
+
+def test_concurrent_check_returns_last_results(store, account, online_probe) -> None:  # noqa: ANN001
+    """循环持锁时手动检测应拿到上一轮结果，而不是空列表或抛异常。"""
+    acc_id = store.add_account(account)
+    mon = Monitor(store, interval=10)
+
+    # 先手工跑一轮，填充 last_results
+    assert len(mon.check_all()) == 1
+
+    # 假装有另一轮正在跑
+    assert mon._lock.acquire(blocking=False) is True
+    try:
+        got = mon.check_all()
+    finally:
+        mon._lock.release()
+
+    assert len(got) == 1
+    assert got[0]["account_id"] == acc_id
+
+
+def test_running_loop_flag_cleared_after_loop_exit(store, account, online_probe) -> None:  # noqa: ANN001
+    """循环退出后 running_loop 要复位，否则后续手动检测会误判为后台。"""
+    store.add_account(account)
+    mon = Monitor(store, interval=10)
+    mon.start()
+    time.sleep(0.2)
+    mon.stop()
+    assert mon.running_loop is False

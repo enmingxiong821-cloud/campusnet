@@ -107,6 +107,10 @@ class Monitor:
         self._prune_announced = False
         self.last_results: list[dict[str, Any]] = []
         self.running = False
+        # 只有后台循环里的检测才该被 stop() 打断。
+        # 手动「立即检测」走的是同一条路径，但监控线程通常没在跑，
+        # 若不分开会话，用户点一次检测就被自己的 stop 打断成假失败。
+        self.running_loop = False
 
     # ---------- 实时进度 ----------
     def emit_progress(self, account: Account, stage: str, message: str) -> None:
@@ -179,12 +183,16 @@ class Monitor:
 
     # ---------- 检查逻辑 ----------
     def _loop(self) -> None:
-        while not self._stop.is_set():
-            try:
-                self.check_all()
-            except Exception as exc:  # noqa: BLE001 - 循环线程不能因单次异常退出
-                self.store.add_event(f"监控循环异常: {exc}", level="error", stage="monitor")
-            self._stop.wait(self.interval)
+        self.running_loop = True
+        try:
+            while not self._stop.is_set():
+                try:
+                    self.check_all()
+                except Exception as exc:  # noqa: BLE001 - 循环线程不能因单次异常退出
+                    self.store.add_event(f"监控循环异常: {exc}", level="error", stage="monitor")
+                self._stop.wait(self.interval)
+        finally:
+            self.running_loop = False
 
     def check_account(self, account: Account) -> CheckOutcome:
         """探活一次；离线则按 max_retries 重试登录。
@@ -224,10 +232,16 @@ class Monitor:
 
         attempts = 0
         last = portal.LoginResult("failed", "未执行登录", "")
+        aborted = False
         for attempt in range(1, max(1, account.max_retries) + 1):
             if self._stop.is_set():
-                self.emit_progress(account, "abort", "收到停止指令，中断重连")
-                break
+                # 只在后台循环里才响应停止指令。
+                # 手动点「立即检测」时监控本来就没开，
+                # 若也在这里中断，用户会看到 attempts=0 的假失败。
+                if self.running_loop:
+                    self.emit_progress(account, "abort", "收到停止指令，中断重连")
+                    aborted = True
+                    break
             attempts = attempt
             total = max(1, account.max_retries)
             self.emit_progress(
