@@ -35,6 +35,12 @@ from campusnet.srun import (
 )
 
 
+# 假学号：这里曾经写真实学号。它是准标识符，与学校域名、内网门户地址、
+# IP 段一起出现就能定位到具体个人；而 release.yml 的分发校验会拦下
+# 10 位 20xx 号码，于是这份测试还会连带阻断发版。用 8 位假号绕开该规则。
+FAKE_STUDENT_NO = "20240001"
+
+
 # ---------- xxtea ----------
 
 
@@ -196,8 +202,9 @@ def test_encode_info_changes_with_every_input() -> None:
 
 def test_encode_info_contains_username_encrypted_not_plain() -> None:
     """用户名是加密进 info 的，密文里不该直接看得见。"""
-    info = encode_info("2024012146", "pw", "10.0.0.1", "1", "tok")
-    assert "2024012146" not in info
+    # 用假学号：真实学号是准标识符，且 release.yml 会拦下 10 位 20xx 号码。
+    info = encode_info(FAKE_STUDENT_NO, "pw", "10.0.0.1", "1", "tok")
+    assert FAKE_STUDENT_NO not in info
 
 
 def test_encode_info_handles_unicode() -> None:
@@ -248,11 +255,11 @@ def test_encode_info_decryptable_with_portal_key_for_any_token_length() -> None:
     """门户只用 key 的前 4 个 word（索引 p&3^e），所以任意长度 token 都必须可解。"""
     for token in ("a", "ab", "abcde", "shorttoken", "0123456789abcde",
                   "0123456789abcdef", "8ec3fc03010f1e9d1a4b0a3b7c2d5e6f"):
-        info = encode_info("2024012146", "pw", "10.0.0.1", "1", token)
+        info = encode_info(FAKE_STUDENT_NO, "pw", "10.0.0.1", "1", token)
         cipher = srun.srun_unb64(info[len("{SRBX1}"):])
         got = srun.xxtea_decrypt_text(cipher, srun._token_key_words(token))
         assert got is not None, f"token={token!r} 门户解不开"
-        assert json.loads(got)["username"] == "2024012146"
+        assert json.loads(got)["username"] == FAKE_STUDENT_NO
 
 
 # ---------- chksum ----------

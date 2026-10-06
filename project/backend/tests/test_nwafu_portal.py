@@ -393,7 +393,7 @@ def test_already_authenticated_returns_already_online(
         name="西农大",
         portal_url=NWAFU_LOGIN_URL,
         probe_url="http://127.0.0.1:9/probe",
-        username="2024012146",
+        username="20240001",
         password="secret",
         login_mode="browser",
     )
