@@ -187,7 +187,7 @@ def test_discover_endpoint_fills_account_fields(api: _Api, monkeypatch: pytest.M
         url="http://10.0.0.1/eportal/portal/login",
         status=200,
         title="Dr.COM",
-        vendor="Dr.COM / 深澜",
+        vendor="Dr.COM",
         username_field="DDDDD",
         password_field="upass",
         extra_fields={"0MKKey": ""},
@@ -206,7 +206,7 @@ def test_discover_endpoint_fills_account_fields(api: _Api, monkeypatch: pytest.M
 
     status, data = call(f"{api}/api/discover?seed=http://x/&scan=0")
     assert status == 200
-    assert data["best"]["vendor"] == "Dr.COM / 深澜"
+    assert data["best"]["vendor"] == "Dr.COM"
     assert data["account_fields"]["username_field"] == "DDDDD"
     assert data["account_fields"]["password_mode"] == "base64"
     assert data["account_fields"]["extra_fields"] == {"0MKKey": ""}

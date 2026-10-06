@@ -29,8 +29,8 @@
 ### Windows
 
 ```
-git clone https://github.com/enmingxiong821-cloud/campusnet-autoconnect.git
-cd campusnet-autoconnect
+git clone https://github.com/enmingxiong821-cloud/campusnet.git
+cd campusnet
 
 python -m pip install -r utils\requirements.txt
 python utils\run.py serve
@@ -41,8 +41,8 @@ python utils\run.py serve
 ### Linux / macOS
 
 ```
-git clone https://github.com/enmingxiong821-cloud/campusnet-autoconnect.git
-cd campusnet-autoconnect
+git clone https://github.com/enmingxiong821-cloud/campusnet.git
+cd campusnet
 
 python3 -m pip install -r utils/requirements.txt
 ./utils/start.sh

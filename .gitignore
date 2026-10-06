@@ -14,9 +14,10 @@ htmlcov/
 .pytest-workspace/
 
 # 数据库运行时文件与本地备份（schema.sql 需要入库）
-database/*.db
-database/*.db-shm
-database/*.db-wal
+# 规则要覆盖全仓，不能只限 database/ 下——临时目录里也跑得出 .db
+*.db
+*.db-shm
+*.db-wal
 database/backup/
 
 # 密码混淆密钥，绝不能入库
@@ -37,3 +38,11 @@ Thumbs.db
 # 临时目录
 tmp/
 *.tmp
+# 抓包/验证工作区。`tmp/` 管不到它——目录名差一个下划线。
+# 这里曾躺着明文真实学号与口令，以及从门户抓下来的第三方厂商 JS。
+_tmp/
+*_tmp/
+
+# 交付资料：含本机绝对路径与内部信息，按要求只留本地不入库。
+# 不删除，只是不让 git 看见——否则一次 git add -A 就全送出去了。
+交付文件/

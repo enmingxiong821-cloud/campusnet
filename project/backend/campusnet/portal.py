@@ -17,12 +17,15 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from http.cookiejar import CookieJar
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
 from . import charset as charset_mod
 from . import probe as probe_mod
 from .paths import DEFAULT_USER_AGENT
 from .storage import Account
+
+if TYPE_CHECKING:  # srun 只在函数内延迟导入，避免模块级循环依赖
+    from .srun import SrunConfig
 
 LOGIN_STATES = ("success", "already_online", "failed", "error", "unknown")
 
@@ -210,7 +213,7 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 class _NoProxy(urllib.request.ProxyHandler):
     """强制直连，不读 http_proxy 环境变量。
 
-    门户地址是内网 IP（西农大 172.26.8.11），系统代理根本到不了。
+    门户地址是内网 IP（实测西北农林科技大学门户在 172.26.0.0/16 段），系统代理根本到不了。
     同类项目的通行做法：guet-drcom 加 `--noproxy '*'`，
     zju-web-login 用 `session.trust_env = False`。
     """
@@ -692,6 +695,45 @@ def login(
     return http_login(account, on_progress=on_progress)
 
 
+def srun_config_for(
+    account: Account,
+    timeout: float = 10.0,
+    guess_ip: bool = False,
+) -> "SrunConfig":
+    """从账号构造 SRUN 配置。登录与门户会话复核共用这一份构造逻辑。
+
+    单独抽出来是因为两处要用的字段完全相同（base_url / 账号 / ip / ac_id），
+    各写一遍迟早会漂移：曾经 monitor 侧多传了 insecure、登录侧没传。
+
+    ip 只认附加字段里显式配的值（ip 或 user_ip），两个调用方的取舍不同：
+
+    - 登录（guess_ip=True）：SRUN 的 get_challenge 与 srun_portal 必须带同一个
+      ip，缺了直接 sign_error，所以没配时用 _local_ip_for_portal 猜一个。
+    - 会话复核（guess_ip=False）：rad_user_info 的参数表里根本没有 ip
+      （Portal.js 也只传 callback），为此再抓一次门户页面解析 CONFIG.ip
+      是纯多余的一次网络往返，留空即可。
+
+    insecure 跟随门户地址的协议：https 门户大多自签证书，
+    校验失败会连挑战都取不到。与 http_login / probe 的 https 处理保持一致。
+    """
+    from . import srun as srun_mod
+
+    base = (account.portal_url or "").strip()
+    ip = account.extra_fields.get("ip") or account.extra_fields.get("user_ip") or ""
+    if not ip and guess_ip:
+        ip = _local_ip_for_portal(base)
+
+    return srun_mod.SrunConfig(
+        base_url=base,
+        username=account.username,
+        password=account.password,
+        ip=ip,
+        ac_id=account.extra_fields.get("ac_id", srun_mod.DEFAULT_AC_ID),
+        timeout=timeout,
+        insecure=base.lower().startswith("https"),
+    )
+
+
 def srun_login(account: Account, on_progress: ProgressCallback | None = None) -> LoginResult:
     """深澜 SRUN 认证：challenge + HMAC-MD5 + xxtea。
 
@@ -715,14 +757,7 @@ def srun_login(account: Account, on_progress: ProgressCallback | None = None) ->
             "可在附加字段里手动填 {\"ip\": \"10.x.x.x\"}",
         )
 
-    config = srun_mod.SrunConfig(
-        base_url=base,
-        username=account.username,
-        password=account.password,
-        ip=ip,
-        ac_id=account.extra_fields.get("ac_id", srun_mod.DEFAULT_AC_ID),
-        timeout=10.0,
-    )
+    config = srun_config_for(account, timeout=10.0, guess_ip=True)
 
     try:
         ok, reason = srun_mod.srun_login(config, on_progress=on_progress)
@@ -741,11 +776,54 @@ def srun_login(account: Account, on_progress: ProgressCallback | None = None) ->
     return LoginResult("success", f"门户返回成功（{reason}），但复检未放行", check.detail)
 
 
+def _ip_from_portal_page(portal_url: str, timeout: float = 6.0) -> str:
+    """从门户页面注入的 CONFIG 里读本机 IP。
+
+    门户服务端会把自己的判定结果写进页面：
+        var CONFIG = { page:'account', ip:"10.110.3.4", ... };
+    这个值是权威的——SRUN 要求 get_challenge 与 srun_portal 两次请求
+    带同一个 ip，猜错就直接 auth_info_error。
+    """
+    import re
+    from urllib.parse import urlsplit
+
+    parts = urlsplit(portal_url)
+    if parts.scheme not in ("http", "https"):
+        return ""
+
+    opener = probe_mod._build_opener(insecure=parts.scheme == "https")
+    request = urllib.request.Request(portal_url, headers={"Cache-Control": "no-cache"})
+    try:
+        with opener.open(request, timeout=timeout) as resp:
+            body = probe_mod._decode_body(resp.read(200_000), resp.headers)
+    except Exception:  # noqa: BLE001 - 读不到就退回猜测，不能因此中断登录
+        return ""
+
+    match = re.search(r"CONFIG\s*=\s*\{.*?\bip\s*:\s*[\"']([\d.]+)[\"']", body, re.S)
+    if not match:
+        match = re.search(r"\bip\s*:\s*[\"']([\d.]+)[\"']", body)
+    return match.group(1) if match else ""
+
+
 def _local_ip_for_portal(portal_url: str) -> str:
+    """确定 SRUN 认证要用的本机 IPv4。
+
+    先读门户页面注入的 CONFIG.ip，那是服务端的权威判定；
+    读不到才退回 UDP connect 猜测——它取的是默认路由接口地址，
+    走 VPN 或虚拟网卡时会拿到非校园网地址。
+    """
+    ip = _ip_from_portal_page(portal_url)
+    if ip:
+        return ip
+    return _guess_ip_by_route(portal_url)
+
+
+def _guess_ip_by_route(portal_url: str) -> str:
     """用一次 UDP connect 猜本机出口 IP。
 
     不建立真实连接，不发包，只是让内核按路由表选源地址。
     目的地址用门户 IP，保证路由选择与实际访问门户一致。
+    只在前面的页面解析失败时兜底。
     """
     import socket
     from urllib.parse import urlsplit
