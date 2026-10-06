@@ -135,7 +135,7 @@ def test_is_url() -> None:
 @pytest.mark.parametrize(
     "html_text,url,expected",
     [
-        (DRCOM_HTML, "", "Dr.COM / 深澜"),
+        (DRCOM_HTML, "", "Dr.COM"),
         (HUAWEI_HTML, "", "华为"),
         (CAS_HTML, "", "水木 / 自建 CAS"),
         ("<html>普通页面</html>", "", "未知厂商"),
@@ -164,7 +164,7 @@ def test_needs_captcha() -> None:
 def test_analyze_drcom_portal() -> None:
     candidate = discovery.analyze_portal("http://10.0.0.1/eportal/portal/login", DRCOM_HTML)
 
-    assert candidate.vendor == "Dr.COM / 深澜"
+    assert candidate.vendor == "Dr.COM"
     assert candidate.title == "Dr.COM 认证系统"
     assert candidate.username_field == "DDDDD"
     assert candidate.password_field == "upass"
@@ -192,7 +192,7 @@ def test_analyze_output_is_serialisable() -> None:
     import json
 
     payload = discovery.analyze_portal("http://x/eportal/portal/login", DRCOM_HTML).as_dict()
-    assert json.loads(json.dumps(payload, ensure_ascii=False))["vendor"] == "Dr.COM / 深澜"
+    assert json.loads(json.dumps(payload, ensure_ascii=False))["vendor"] == "Dr.COM"
 
 
 def test_to_account_fields_shape() -> None:
@@ -219,7 +219,7 @@ def test_scan_urls_finds_portal(portal_server) -> None:  # noqa: ANN001
 
     candidates = discovery.scan_urls((f"{base}/eportal/portal/login", f"{base}/portal/login"))
     vendors = {c.vendor for c in candidates}
-    assert "Dr.COM / 深澜" in vendors and "华为" in vendors
+    assert "Dr.COM" in vendors and "华为" in vendors
 
 
 def test_scan_urls_skips_dead_address(portal_server) -> None:  # noqa: ANN001

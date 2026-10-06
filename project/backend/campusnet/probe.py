@@ -60,7 +60,7 @@ class _NoProxy(urllib.request.ProxyHandler):
 
     实测：设了 `http_proxy=http://127.0.0.1:9` 后，探活返回
     `unreachable`——请求被代理接管了。而门户地址是内网 IP
-    （西农大是 172.26.8.11），代理根本到不了，走代理必然失败。
+    （实测西北农林科技大学门户在 172.26.0.0/16 段），代理根本到不了，走代理必然失败。
 
     同类项目的通行做法：guet-drcom 每次请求都加 `--noproxy '*'`，
     zju-web-login 用 `session.trust_env = False`。

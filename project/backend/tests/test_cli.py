@@ -333,7 +333,7 @@ def test_discover_prints_candidate_and_command(
             "gateways": ["10.110.0.1"],
             "candidates": [
                 {
-                    "vendor": "Dr.COM / 深澜",
+                    "vendor": "Dr.COM",
                     "status": 200,
                     "url": "http://10.0.0.1/eportal/portal/login",
                     "title": "Dr.COM 认证系统",
@@ -352,7 +352,7 @@ def test_discover_prints_candidate_and_command(
     code = cli.main(["discover"])
     assert code == 0
     out = capsys.readouterr().out
-    assert "Dr.COM / 深澜" in out
+    assert "Dr.COM" in out
     assert "DDDDD" in out
     assert "upass" in out
     assert "0MKKey" in out

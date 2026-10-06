@@ -28,6 +28,10 @@ PRUNE_LOG_INTERVAL = 300.0
 # 裁剪统计存这张 settings 表的行键：单行覆盖，不增长、不参与 events 裁剪
 PRUNE_STATS_KEY = "prune_stats"
 
+# 门户会话查询的超时。比登录短：它只是给「探活失败」补一个判据，
+# 卡太久会拖住整轮检测。
+AUTH_STATE_TIMEOUT = 5.0
+
 
 @dataclass
 class ProgressItem:
@@ -194,6 +198,37 @@ class Monitor:
         finally:
             self.running_loop = False
 
+    def _portal_recheck(self, account: Account) -> tuple[bool | None, str]:
+        """向门户复核本机会话是否存在。
+
+        返回 (True, 说明) = 门户说在线；False = 门户说没会话；
+        None = 问不出来，调用方按探活结论处理。
+
+        非 SRUN 门户直接短路返回 None，不发任何请求 ——
+        Dr.COM 这类门户没有 /cgi-bin/rad_user_info，白打一次必然 404。
+        """
+        base = (account.portal_url or "").strip()
+        if not base:
+            return None, "未配置门户地址"
+        try:
+            from . import srun as srun_mod
+        except ImportError:  # pragma: no cover - 同包模块，正常不会缺
+            return None, "srun 模块不可用"
+        if not (account.login_mode == "srun" or srun_mod.is_srun_portal(base)):
+            return None, "非 SRUN 门户"
+
+        # stop() 只等 5 秒，这里最多再花 AUTH_STATE_TIMEOUT。
+        # 已被要求停止时不要再发起新请求，否则 stop() 会超时返回 False，
+        # 留下一个还在发包的僵尸线程。
+        if self._stop.is_set() and self.running_loop:
+            return None, "收到停止指令，跳过门户复核"
+
+        config = portal.srun_config_for(account, timeout=AUTH_STATE_TIMEOUT)
+        try:
+            return srun_mod.auth_state(config)
+        except Exception as exc:  # noqa: BLE001 - 判据查询失败绝不能打断检测
+            return None, f"{type(exc).__name__}: {exc}"
+
     def check_account(self, account: Account) -> CheckOutcome:
         """探活一次；离线则按 max_retries 重试登录。
 
@@ -226,6 +261,33 @@ class Monitor:
             state=STATE_OFFLINE,
             account_id=account.id,
         )
+
+        # 探活失败先别急着认定掉线。canary 地址在校园网里常年被墙、被 CDN 拦，
+        # 拿门户自己的会话表复核一次，能挡掉绝大多数假掉线 ——
+        # 否则一轮 60 秒的监控会对着根本没掉线的账号反复重登。
+        #
+        # 只在探活失败时查：在线时门户查询纯属多余的一次网络往返。
+        self.emit_progress(account, "verify", "探活未放行，正在向门户复核会话状态")
+        auth_ok, auth_detail = self._portal_recheck(account)
+        if auth_ok is True:
+            self.emit_progress(account, "done", f"门户确认在线（{auth_detail}）")
+            outcome = CheckOutcome(
+                account.id, account.name, True, STATE_ONLINE, auth_detail, check.detail
+            )
+            self.store.set_state(account.id, STATE_ONLINE)
+            self.store.add_event(
+                f"{account.name}: 探活失败但门户确认在线（{check.status}）— {auth_detail}",
+                level="info",
+                stage="portal_state",
+                state=STATE_ONLINE,
+                account_id=account.id,
+            )
+            return outcome
+        if auth_ok is False:
+            self.emit_progress(account, "offline", f"门户确认无会话（{auth_detail}）")
+        else:
+            self.emit_progress(account, "warn", f"门户状态问不出来（{auth_detail}），按探活结果处理")
+
         self.emit_progress(
             account, "offline", f"检测到掉线（{check.status}），准备登录重连"
         )
@@ -280,6 +342,32 @@ class Monitor:
             self.store.set_state(account.id, state)
             return CheckOutcome(
                 account.id, account.name, True, state, last.message, last.detail, attempts, elapsed
+            )
+
+        if aborted:
+            # 是我们自己叫停的，不是重连失败。
+            # 落到下面那条 error 分支会有两个后果：事件日志出现一条
+            # 「重连未成功 - 未执行登录」的假错误（根本没登录过），
+            # 而状态被置成 failed，前端把 offline/failed 一起算进「需要关注」，
+            # 于是用户主动停一次监控，账号就凭空多出一个红标。
+            # 状态保持 offline：探活确实没放行，这是事实，不该掩盖。
+            self.store.set_state(account.id, STATE_OFFLINE)
+            self.store.add_event(
+                f"{account.name}: 检测已中断（收到停止指令），未执行登录",
+                level="warning",
+                stage="login",
+                state=STATE_OFFLINE,
+                account_id=account.id,
+            )
+            return CheckOutcome(
+                account.id,
+                account.name,
+                False,
+                STATE_OFFLINE,
+                "检测已中断：收到停止指令",
+                last.detail,
+                attempts,
+                elapsed,
             )
 
         state = STATE_FAILED if last.state == "failed" else STATE_OFFLINE

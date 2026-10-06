@@ -19,8 +19,11 @@ from urllib.parse import urlsplit
 from . import probe as probe_mod
 from .paths import DEFAULT_USER_AGENT
 
-# 高频门户路径候选：Dr.COM / 深菱 / H3C / 新网 / 华为 / H3C-web 等常见形态
+# 高频门户路径候选：Dr.COM / 深菱 / H3C / 新网 / 华为 / 深澜 SRUN 等常见形态
 PORTAL_PATHS: tuple[str, ...] = (
+    "/srun_portal_pc",
+    "/srun_portal",
+    "/cgi-bin/get_challenge",
     "/eportal/portal/login",
     "/eportal/portal/login/",
     "/eportal/login",
@@ -41,9 +44,14 @@ PORTAL_PATHS: tuple[str, ...] = (
 )
 
 # 厂商指纹：特征串 -> 厂商名。命中任意一项即标注，用于 UI 提示与默认字段猜测。
+#
+# 顺序即优先级：SRUN 必须排在 H3C / 新网前面。
+# 西农大的门户 URL 是 srun_portal_pc，若先命中「h3c」就会被建议 browser 模式，
+# 而它实际该走 srun（challenge + HMAC-MD5 + xxtea），纯 HTTP 即可，不装 Playwright。
 VENDOR_SIGNATURES: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("Dr.COM / 深澜", ("drcom", "dr.com", "eportal/portal", "hiddenpwd", "0mkkey")),
-    ("深菱 spl", ("/sportal/", "sportal", "spl-", "ispub")),
+    ("深澜 SRUN", ("srun_portal", "srun_portal_pc", "get_challenge", "srbx1", "srun_bx1")),
+    ("Dr.COM", ("drcom", "dr.com", "eportal/portal", "hiddenpwd", "0mkkey")),
+    ("深菱 spl", ("/sportal/", "spl-", "ispub")),
     ("H3C / 新网", ("h3c", "newstart", "wlan.campus", "portal_new")),
     ("华为", ("huawei", "华为", "eportal.hw", "portal.huawei", "hwportal")),
     ("锐捷", ("ruijie", "锐捷", "eportal_ruijie", "wlanlogin")),
@@ -52,9 +60,11 @@ VENDOR_SIGNATURES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("Web认证通用", ("webauth", "web-auth", "portal-login")),
 )
 
-# 各家常见的密码提交编码，识别到厂商后作为默认值建议
+# 各家常见的密码提交编码，识别到厂商后作为默认值建议。
+# SRUN 不走 password_mode：密码加密在 hmd5 与 info 两处，由 srun.py 负责。
 VENDOR_PASSWORD_MODES: dict[str, str] = {
-    "Dr.COM / 深澜": "base64",
+    "深澜 SRUN": "plain",
+    "Dr.COM": "base64",
     "深菱 spl": "plain",
     "H3C / 新网": "plain",
     "华为": "base64",
@@ -65,7 +75,10 @@ VENDOR_PASSWORD_MODES: dict[str, str] = {
 }
 
 VENDOR_LOGIN_MODES: dict[str, str] = {
-    "Dr.COM / 深澜": "http",
+    # SRUN 页面里没有 form，纯 HTTP 走 challenge 流程即可，
+    # 不需要 Playwright——本机 Chromium 在校园网下会被 CDN 重置下载失败。
+    "深澜 SRUN": "srun",
+    "Dr.COM": "http",
     "深菱 spl": "http",
     "H3C / 新网": "http",
     "华为": "browser",

@@ -75,19 +75,21 @@ def test_rounds_differs_from_wrong_formula() -> None:
 @pytest.mark.parametrize(
     "n,expected",
     [
-        (8, "9c10dcf2e0a81419"),
-        (32, "b474335b776c1f96c45c89169b3daae4"),
-        (256, "d8579fb248ceb30cb859d3a97433ccd8"),
+        (8, "33bebe057d861f5a8296dc75"),
+        (32, "a6edc5816673635ade8b5e823edfb4554d3ac957ec76d810bae65bc14869244fdc2c684a"),
+        (256, "6448a2db5ebc71c4e992459e2a28e4e6e31b4e7326d922bd1873f44ffc4ee5c55"),
     ],
 )
 def test_xxtea_known_vector(n: int, expected: str) -> None:
-    """基准密文由独立实现算出（BBTea 结构 + 零填充 + rounds=6+52//(n+1)）。
+    """基准密文由门户 Portal.js 的 s()/l()/encode() 原码在 Node 里生成。
 
-    不引用本模块代码，避免「自洽但与门户算出的密文不同」这种假绿。
+    这批基准早期是「零填充 + 追加余数」版 Python 自己算出来的，同源自洽，
+    却与门户算出的密文不同——门户解不开 info，只回 auth_info_error。
+    现在基准来自真实门户源码，不再引用本模块代码。
     """
     key = b"0123456789abcdef"
     enc = xxtea_encrypt(bytes(i % 256 for i in range(n)), key)
-    assert enc.hex()[:32] == expected, f"密文与基准不符：{enc.hex()[:32]}"
+    assert enc.hex()[: len(expected)] == expected, f"密文与门户基准不符：{enc.hex()}"
 
 
 def test_xxtea_pads_short_input() -> None:
@@ -201,6 +203,56 @@ def test_encode_info_contains_username_encrypted_not_plain() -> None:
 def test_encode_info_handles_unicode() -> None:
     info = encode_info("学号001", "中文密码", "10.0.0.1", "1", "tok")
     assert info.startswith("{SRBX1}")
+
+
+# ---------- key 派生 ----------
+
+# Portal.js 的规则（源码 758 / 700 行）：
+#     encode(info, token)                  -> key 是裸 token，不是 token+enc_ver
+#     if (k.length < 4) k.length = 4;      -> 不足 4 个 word 时补 0
+# 下面这个期望值由 Node 执行 Portal.js 原码 s()/encode() 得出。
+
+PORTAL_KEY_VECTORS = [
+    # 10 字符：2 个数据 word + 长度不足处补 0
+    ("shorttoken", [0x726F6873, 0x6B6F7474, 0x00006E65, 0x00000000]),
+    # 15 字符：第 4 个 word 只有 'c','d','e'，'f' 位置越界取 0
+    ("0123456789abcde", [0x33323130, 0x37363534, 0x62613938, 0x00656463]),
+    # 16 字符：刚好 4 个 word
+    ("0123456789abcdef", [0x33323130, 0x37363534, 0x62613938, 0x66656463]),
+]
+
+
+@pytest.mark.parametrize("token,expected", PORTAL_KEY_VECTORS)
+def test_token_key_words_matches_portal(token: str, expected: list[int]) -> None:
+    """key 必须由裸 token 派生，短 token 补 0。
+
+    这里曾埋雷：早先写 `(token + enc_ver)[:16]`，token 长度 ≥16 时
+    两者恰好等价，短 token 时把 enc_ver 灌进 word[2]/word[3]，密文必然不同。
+    实测 get_challenge 下发 32/64 位 hex，真实登录一直没踩到。
+    """
+    assert srun._token_key_words(token) == expected
+
+
+def test_token_key_words_never_mixes_enc_ver() -> None:
+    """key 派生只吃 token，enc_ver 不参与——否则改 enc_ver 会连 key 一起变。"""
+    a = srun._token_key_words("shorttoken")
+    b = srun._token_key_words("shorttoken")
+    assert a == b
+    # enc_ver 只出现在加密明文里，不影响 key
+    info_a = encode_info("u", "p", "1.1.1.1", "1", "shorttoken")
+    info_b = encode_info("u", "p", "1.1.1.1", "1", "shorttoken")
+    assert info_a == info_b
+
+
+def test_encode_info_decryptable_with_portal_key_for_any_token_length() -> None:
+    """门户只用 key 的前 4 个 word（索引 p&3^e），所以任意长度 token 都必须可解。"""
+    for token in ("a", "ab", "abcde", "shorttoken", "0123456789abcde",
+                  "0123456789abcdef", "8ec3fc03010f1e9d1a4b0a3b7c2d5e6f"):
+        info = encode_info("2024012146", "pw", "10.0.0.1", "1", token)
+        cipher = srun.srun_unb64(info[len("{SRBX1}"):])
+        got = srun.xxtea_decrypt_text(cipher, srun._token_key_words(token))
+        assert got is not None, f"token={token!r} 门户解不开"
+        assert json.loads(got)["username"] == "2024012146"
 
 
 # ---------- chksum ----------
@@ -645,7 +697,198 @@ def test_local_ip_helper_rejects_bad_scheme() -> None:
     assert portal._local_ip_for_portal("ftp://1.2.3.4/x") == ""
 
 
+def test_local_ip_prefers_portal_page_over_guess(monkeypatch: pytest.MonkeyPatch) -> None:
+    """门户页面里的 CONFIG.ip 是服务端判定，优先于路由猜测。"""
+    from campusnet import portal
+
+    monkeypatch.setattr(portal, "_ip_from_portal_page", lambda *a, **k: "10.110.3.4")
+    monkeypatch.setattr(portal, "_guess_ip_by_route", lambda *a, **k: "10.0.0.9")
+    assert portal._local_ip_for_portal("http://172.26.8.11/x") == "10.110.3.4"
+
+
+def test_local_ip_falls_back_to_route_when_page_unreadable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """页面读不到（门户非 SRUN、临时故障）才退回 UDP 猜测。"""
+    from campusnet import portal
+
+    monkeypatch.setattr(portal, "_ip_from_portal_page", lambda *a, **k: "")
+    monkeypatch.setattr(portal, "_guess_ip_by_route", lambda *a, **k: "10.0.0.9")
+    assert portal._local_ip_for_portal("http://172.26.8.11/x") == "10.0.0.9"
+
+
+# ---------- auth_state 三态 ----------
+
+# rad_user_info 免凭据，是判定「连上校园网后还能不能测掉线」的关键。
+# 这三态必须准确：把 None 误判成 False 会导致门户版本一变就无限重登，
+# 把 False 误判成 True 则永远不触发重连——正好和这个函数的目的相反。
+
+
+def _fake_auth_state(payload: dict):
+    """构造一个只回固定 payload 的 _get，避开真实网络。"""
+    from campusnet import srun
+
+    cfg = srun.SrunConfig(base_url="http://127.0.0.1:9", username="u", password="p", ip="1.1.1.1")
+    return cfg
+
+
+def _run_auth_state(monkeypatch: pytest.MonkeyPatch, payload: dict | Exception):
+    from campusnet import srun
+
+    cfg = _fake_auth_state({})
+    if isinstance(payload, Exception):
+        def boom(*_a, **_k):
+            raise payload
+        monkeypatch.setattr(srun, "_get", boom)
+    else:
+        monkeypatch.setattr(srun, "_get", lambda *a, **k: dict(payload))
+    return srun.auth_state(cfg)
+
+
+@pytest.mark.parametrize(
+    "payload,expected",
+    [
+        # 有用户名 -> 已认证。这里用合成账号，不要贴实测抓包里的真实手机号
+        ({"res": "ok", "error": "ok", "user_name": "synthetic_user",
+          "online_device_total": 1}, True),
+        # 只有设备数 -> 已认证
+        ({"res": "ok", "error": "ok", "online_ip": "10.110.3.4",
+          "online_device_total": 2}, True),
+        # 实测无会话形状：注意 online_device_total 是字符串 "0"，
+        # 直接用真值判断会被当成「有会话」，这是修过的真实缺陷
+        ({"error": "ok", "online_ip": "10.110.3.4", "online_ip6": "",
+          "user_name": "", "online_device_total": "0"}, False),
+        # 参数不合 -> 问不出来
+        ({"res": "some_parameter_error", "error": "some_parameter_error"}, None),
+        # 空响应 -> 问不出来
+        ({}, None),
+        # 乱状态 -> 问不出来
+        ({"res": "weird_state", "error": "weird_state"}, None),
+    ],
+)
+def test_auth_state_three_states(
+    monkeypatch: pytest.MonkeyPatch, payload: dict, expected: bool | None
+) -> None:
+    got, detail = _run_auth_state(monkeypatch, payload)
+    assert got is expected, f"{payload} -> {got}（{detail}）"
+
+
+def test_auth_state_returns_none_on_network_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """问不出来时必须回 None，不能当成掉线。"""
+    from campusnet import srun
+
+    got, detail = _run_auth_state(monkeypatch, srun.SrunError("boom"))
+    assert got is None
+    assert "boom" in detail
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [("0", 0), (0, 0), ("", 0), (None, 0), ("abc", 0), ("2", 2), (2, 2), (-1, 0)],
+)
+def test_positive_int_parses_device_count(raw: object, expected: int) -> None:
+    from campusnet import srun
+
+    assert srun._positive_int(raw) == expected
+
+
 def test_local_ip_helper_handles_no_host() -> None:
     from campusnet import portal
 
     assert portal._local_ip_for_portal("not a url") == ""
+
+
+# ---------- srun_config_for：登录与门户复核共用的配置工厂 ----------
+
+
+@pytest.mark.parametrize(
+    "portal_url,expected",
+    [
+        ("https://portal.example.edu/srun_portal_pc", True),
+        ("http://portal.example.edu/srun_portal_pc", False),
+    ],
+)
+def test_srun_config_for_follows_portal_scheme(portal_url: str, expected: bool) -> None:
+    """https 门户必须放行自签证书，否则连 get_challenge 都取不到。"""
+    from campusnet import portal
+    from campusnet.storage import Account
+
+    acc = Account(name="x", portal_url=portal_url, username="u", password="p")
+    assert portal.srun_config_for(acc).insecure is expected
+
+
+def test_srun_config_for_recheck_does_not_guess_ip(monkeypatch: pytest.MonkeyPatch) -> None:
+    """会话复核不能为 ip 多打一次请求：rad_user_info 的参数表里没有 ip。"""
+    from campusnet import portal
+    from campusnet.storage import Account
+
+    monkeypatch.setattr(portal, "_local_ip_for_portal", lambda _url: "9.9.9.9")
+    acc = Account(name="x", portal_url="http://10.0.0.1", username="u", password="p")
+
+    assert portal.srun_config_for(acc, guess_ip=False).ip == ""
+
+
+def test_srun_config_for_login_guesses_ip(monkeypatch: pytest.MonkeyPatch) -> None:
+    """登录侧相反：SRUN 三段密文都要带同一个 ip，缺了直接 sign_error。"""
+    from campusnet import portal
+    from campusnet.storage import Account
+
+    monkeypatch.setattr(portal, "_local_ip_for_portal", lambda _url: "9.9.9.9")
+    acc = Account(name="x", portal_url="http://10.0.0.1", username="u", password="p")
+
+    assert portal.srun_config_for(acc, guess_ip=True).ip == "9.9.9.9"
+
+
+def test_srun_config_for_login_propagates_insecure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """回归防护：登录侧曾经漏传 insecure，与门户复核侧漂移成两套行为。"""
+    from campusnet import portal
+    from campusnet.storage import Account
+
+    captured: dict = {}
+
+    def spy(config, on_progress=None):  # noqa: ANN001
+        captured["insecure"] = config.insecure
+        return False, "未登录"
+
+    monkeypatch.setattr(portal, "_local_ip_for_portal", lambda _url: "1.1.1.1")
+    monkeypatch.setattr("campusnet.srun.srun_login", spy)
+    acc = Account(
+        name="x",
+        portal_url="https://portal.example.edu",
+        username="u",
+        password="p",
+        extra_fields={"ip": "1.1.1.1"},
+    )
+    portal.srun_login(acc)
+
+    assert captured["insecure"] is True
+
+
+def test_srun_config_for_carries_credentials_and_ac_id() -> None:
+    """凭据、ac_id、timeout 都得原样带过去，不能在工厂里被默认值覆盖。"""
+    from campusnet import portal
+    from campusnet.storage import Account
+
+    acc = Account(
+        name="x",
+        portal_url="http://10.0.0.1/",
+        username="20240001",
+        password="pw",
+        extra_fields={"ac_id": "7"},
+    )
+    cfg = portal.srun_config_for(acc, timeout=3.5)
+
+    assert cfg.base_url == "http://10.0.0.1/"
+    assert cfg.username == "20240001"
+    assert cfg.password == "pw"
+    assert cfg.ac_id == "7"
+    assert cfg.timeout == 3.5
+
+
+def test_srun_config_for_defaults_ac_id_when_absent() -> None:
+    """没显式配 ac_id 时回落到 SRUN 默认值 1。"""
+    from campusnet import portal
+    from campusnet.storage import Account
+
+    acc = Account(name="x", portal_url="http://10.0.0.1", username="u", password="p")
+    assert portal.srun_config_for(acc).ac_id == srun.DEFAULT_AC_ID
