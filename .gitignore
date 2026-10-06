@@ -25,7 +25,9 @@ database/backup/
 .campusnet_obf.key
 
 # 本地工具配置与日志（MCP 配置、临时输出）
-config.json
+# 锚定到仓库根：无锚定的 config.json 会连带忽略任意子目录下的同名文件，
+# 将来前端或子包要提交自己的配置就会被静默吞掉。
+/config.json
 *.log
 nul
 
