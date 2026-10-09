@@ -528,6 +528,49 @@ def test_manual_check_survives_stale_stop_flag(store, srun_account, monkeypatch)
     assert result.attempts == 1
 
 
+def _bare_monitor(**kwargs) -> Monitor:  # noqa: ANN003
+    """只装 _next_delay 用得到的字段，不连库不建线程。"""
+    mon = Monitor.__new__(Monitor)
+    mon.warmup_seconds = kwargs.get("warmup", 180.0)
+    mon.warmup_interval = kwargs.get("warmup_gap", 15)
+    mon.retry_interval = kwargs.get("retry_gap", 60)
+    mon.interval = kwargs.get("interval", 300)
+    return mon
+
+
+def test_next_delay_all_four_combinations() -> None:
+    """热身窗口内失败走密集重试，成功立刻退回常规；窗口外失败走快速重试。"""
+    mon = _bare_monitor()
+    hot = time.monotonic() - 5      # 刚启动
+    cold = time.monotonic() - 9999  # 早已过窗口
+
+    assert mon._next_delay(hot, False) == 15.0
+    assert mon._next_delay(hot, True) == 300.0
+    assert mon._next_delay(cold, False) == 60.0
+    assert mon._next_delay(cold, True) == 300.0
+
+
+def test_loop_reads_the_key_as_dict_actually_emits() -> None:
+    """_loop 必须读 online，不能读不存在的 ok。
+
+    这个键名错配过一次：all(r.get("ok")) 在真实 as_dict() 上恒为 False，
+    于是「一轮成功即转常规」永远不成立——interval 配 300 秒也只能每
+    15 秒跑一轮，而且 30 条 monitor 用例没一条能抓到它。
+    """
+    online = CheckOutcome(1, "x", True, STATE_ONLINE, "放行", "d", 0, 0.1).as_dict()
+    offline = CheckOutcome(2, "y", False, STATE_OFFLINE, "掉线", "d", 1, 0.2).as_dict()
+
+    assert "ok" not in online, "as_dict 若真产出 ok，此用例需同步改断言"
+    assert online["online"] is True
+    assert offline["online"] is False
+
+    mon = _bare_monitor()
+    hot = time.monotonic() - 5
+    # 用 as_dict 的真实键走一遍 loop 的判断表达式
+    assert mon._next_delay(hot, all(r.get("online") for r in [online])) == 300.0
+    assert mon._next_delay(hot, all(r.get("online") for r in [online, offline])) == 15.0
+
+
 def test_monitor_thread_is_named(store) -> None:  # noqa: ANN001
     mon = Monitor(store, interval=10)
     mon.start()

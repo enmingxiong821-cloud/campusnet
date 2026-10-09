@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import re
 import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from . import portal, probe as probe_mod
+from . import portal, probe as probe_mod, wifi as wifi_mod
 from .storage import (
     STATE_FAILED,
     STATE_LOGGED_IN,
@@ -31,6 +32,17 @@ PRUNE_STATS_KEY = "prune_stats"
 # 门户会话查询的超时。比登录短：它只是给「探活失败」补一个判据，
 # 卡太久会拖住整轮检测。
 AUTH_STATE_TIMEOUT = 5.0
+
+# 开机热身窗口：守护进程启动后的这段时间内按 warmup_interval 密集重试。
+#
+# 为什么需要：开机那一刻无线驱动、WlanSvc、SSID 广播往往还没就绪，
+# 第一轮必然失败。早先固定按 interval（默认 60 秒）等，失败一次就干等一整轮，
+# 而错过的窗口往往只有十几秒。开机自连的用户体感就是「开机后要等很久才联网」。
+DEFAULT_WARMUP_SECONDS = 180
+DEFAULT_WARMUP_INTERVAL = 15
+# 常规期某轮失败后的快速重试间隔，不等满整个 interval。
+# 掉线是分钟级事件，按 60 秒一轮去等，用户感知到的「恢复速度」被拉长了。
+DEFAULT_RETRY_INTERVAL = 60
 
 
 @dataclass
@@ -91,9 +103,19 @@ class Monitor:
         on_progress: Callable[[dict[str, Any]], None] | None = None,
         progress_cap: int = DEFAULT_PROGRESS_CAP,
         prune_log_interval: float = PRUNE_LOG_INTERVAL,
+        warmup_seconds: float = DEFAULT_WARMUP_SECONDS,
+        warmup_interval: int = DEFAULT_WARMUP_INTERVAL,
+        retry_interval: int = DEFAULT_RETRY_INTERVAL,
     ) -> None:
         self.store = store
         self.interval = self._clamp(interval)
+        # 热身间隔不套 _clamp：它要的是「短」，而 _clamp 的下界是
+        # MIN_INTERVAL=10，套上去会把 15 秒抬到 15（恰好相同）但也会
+        # 把用户想要的 5 秒抬成 10，违背「密集重试」的意图。
+        # 这里只兜一个下限 1 秒，防止 0 或负数把守护进程变成忙等。
+        self.warmup_seconds = max(0.0, float(warmup_seconds))
+        self.warmup_interval = max(1, int(warmup_interval))
+        self.retry_interval = max(1, int(retry_interval))
         self.headless = headless
         self.on_event = on_event
         self.on_progress = on_progress
@@ -187,16 +209,91 @@ class Monitor:
 
     # ---------- 检查逻辑 ----------
     def _loop(self) -> None:
+        """两阶段调度循环。
+
+        借鉴 demo133/campusnet 对「开机连不上」的两个失败模型：
+
+        1. 连得太早 —— 开机瞬间无线驱动 / WlanSvc / SSID 广播还没就绪，
+           第一轮必然失败。所以启动后先走热身窗口（默认 180 秒内每
+           warmup_interval 秒一轮），一轮成功就立刻转常规节奏，
+           不把用户按在「开机后等很久才联网」的状态里。
+        2. 掉线了干等 —— 常规期某轮失败后不该等满整个 interval，
+           掉线是分钟级事件，用户要的是尽快重连，所以下一轮提前到
+           retry_interval。
+
+        节奏只由 _next_delay 决定，_stop.wait 保证 stop() 仍能立刻
+        打断——这是守护进程唯一的中断路径，不能被 sleep 占住。
+        """
         self.running_loop = True
+        started_at = time.monotonic()
         try:
             while not self._stop.is_set():
+                ok = True
                 try:
-                    self.check_all()
+                    results = self.check_all()
+                    # 任一账号还没放行就继续留在热身窗口里密集重试。
+                    # 键名必须是 online —— CheckOutcome.as_dict() 出的就是它。
+                    # 这里曾写成 r.get("ok")，而 as_dict 里根本没有 ok 这个键，
+                    # 于是 all() 恒为 False，热身窗口永远退不出去：
+                    # interval 配 300 秒也只能每 15 秒跑一轮，
+                    # 「一轮成功即转常规」这个核心承诺整个落空。
+                    ok = all(r.get("online") for r in results) if results else False
                 except Exception as exc:  # noqa: BLE001 - 循环线程不能因单次异常退出
                     self.store.add_event(f"监控循环异常: {exc}", level="error", stage="monitor")
-                self._stop.wait(self.interval)
+                    ok = False
+                self._stop.wait(self._next_delay(started_at, ok))
         finally:
             self.running_loop = False
+
+    def _next_delay(self, started_at: float, all_ok: bool) -> float:
+        """下一轮前的等待秒数。
+
+        热身窗口内一律用 warmup_interval，不管上一轮成不成功——
+        此刻网络还没稳，失败的唯一合理解释就是「太早了」，加密重试才对。
+        窗口内一旦全部放行就退回 interval。
+        """
+        in_warmup = (time.monotonic() - started_at) < self.warmup_seconds
+        if in_warmup and not all_ok:
+            return float(self.warmup_interval)
+        if not all_ok:
+            return float(self.retry_interval)
+        return float(self.interval)
+
+    def _check_network_identity(self, account: Account) -> None:
+        """SSID 身份检查，结果只记事件，不阻断流程。
+
+        不阻断是刻意的：热点下认证必然失败，但失败原因该由门户报，
+        这里提前抛异常只会把真因盖掉。检查的价值在于事后能解释
+        「为什么程序一直没登录」——那正是这个失败模型最难查的地方。
+
+        配置项放在 extra_fields 里而不是新增字段：Account 的 schema
+        已经定型，加字段要动建表与迁移，而 wifi_ssid 天然属于
+        「按学校各自不同的零散配置」。
+        """
+        patterns = account.extra_fields.get("wifi_ssid") or ""
+        wanted = [p for p in re.split(r"[,\s]+", patterns) if p]
+        if not wanted:
+            return
+        try:
+            check = wifi_mod.ensure_campus_wifi(wanted)
+        except Exception as exc:  # noqa: BLE001 - 身份检查失败绝不能打断检测
+            self.store.add_event(
+                f"{account.name}: 网络身份检查异常 - {type(exc).__name__}: {exc}",
+                level="warning",
+                stage="wifi",
+                account_id=account.id,
+            )
+            return
+        if check.ok:
+            self.emit_progress(account, "wifi", check.detail)
+            return
+        self.emit_progress(account, "warn", check.detail)
+        self.store.add_event(
+            f"{account.name}: {check.detail}",
+            level="warning",
+            stage="wifi",
+            account_id=account.id,
+        )
 
     def _portal_recheck(self, account: Account) -> tuple[bool | None, str]:
         """向门户复核本机会话是否存在。
@@ -236,6 +333,13 @@ class Monitor:
         """
         started = time.perf_counter()
         self.emit_progress(account, "start", f"开始检测 {account.name}")
+
+        # 先问「连的是不是校园网」，再问「有没有网」。
+        # 顺序反了会在热点上误判：手机热点同样放行 canary，
+        # probe 会一路绿灯，程序从此认定已联网、再也不碰认证接口。
+        # 配了 wifi_ssid 才查；没配就是零成本的有线/多网卡零影响。
+        self._check_network_identity(account)
+
         self.emit_progress(account, "probe", f"正在探测 {account.probe_url}")
         check = probe_mod.probe(account.probe_url)
         if check.online:

@@ -12,6 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable
 
 from . import __version__, discovery, portal, ports, probe as probe_mod
+from .auth import ApiAuth
 from .monitor import MonitorManager
 from .paths import API_HOST, API_PORT, FRONTEND_DIR, stdout_ready
 from .storage import Account, Store
@@ -73,6 +74,8 @@ class ApiHandler(BaseHTTPRequestHandler):
     store: Store
     manager: MonitorManager
     routes: dict[tuple[str, str], Handler]
+    auth: ApiAuth | None
+    auth_required: bool
 
     # ---------- 基础工具 ----------
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A002, D102
@@ -91,7 +94,13 @@ class ApiHandler(BaseHTTPRequestHandler):
             raise ApiError(HTTPStatus.BAD_REQUEST, "请求体必须是 JSON 对象")
         return data
 
-    def _send(self, status: int, payload: Any, content_type: str = "application/json; charset=utf-8") -> None:
+    def _send(
+        self,
+        status: int,
+        payload: Any,
+        content_type: str = "application/json; charset=utf-8",
+        extra_headers: dict[str, str] | None = None,
+    ) -> None:
         if content_type.startswith("application/json"):
             body = json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
         else:
@@ -100,6 +109,10 @@ class ApiHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        for key, value in (extra_headers or {}).items():
+            self.send_header(key, value)
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(body)
@@ -389,7 +402,52 @@ def routes_system(store: Store) -> dict[tuple[str, str], Handler]:
     }
 
 
-def build_handler(store: Store, manager: MonitorManager) -> type[ApiHandler]:
+def routes_auth(auth: ApiAuth | None) -> dict[tuple[str, str], Handler]:
+    """认证入口公开，业务 API 由分发层统一保护。"""
+
+    def status(_: dict[str, Any], h: ApiHandler) -> None:
+        required = bool(getattr(h, "auth_required", False))
+        authenticated = bool(auth and auth.authenticated(h.headers)) if required else True
+        h._send(HTTPStatus.OK, {"ok": True, "required": required, "authenticated": authenticated})
+
+    def login(_: dict[str, Any], h: ApiHandler) -> None:
+        if auth is None:
+            h._send(HTTPStatus.OK, {"ok": True, "required": False, "authenticated": True})
+            return
+        payload = h._read_body()
+        token = str(payload.get("token", ""))
+        session = auth.login(token)
+        if session is None:
+            h._send(
+                HTTPStatus.UNAUTHORIZED,
+                {"ok": False, "error": "控制台令牌不正确"},
+                extra_headers={"WWW-Authenticate": "Bearer"},
+            )
+            return
+        h._send(
+            HTTPStatus.OK,
+            {"ok": True, "required": True, "authenticated": True},
+            extra_headers={"Set-Cookie": auth.set_cookie(session)},
+        )
+
+    def logout(_: dict[str, Any], h: ApiHandler) -> None:
+        if auth is not None:
+            auth.logout(h.headers)
+        h._send(HTTPStatus.OK, {"ok": True}, extra_headers={"Set-Cookie": ApiAuth.clear_cookie()})
+
+    return {
+        ("GET", "/api/auth/status"): status,
+        ("POST", "/api/auth/login"): login,
+        ("POST", "/api/auth/logout"): logout,
+    }
+
+
+def build_handler(
+    store: Store,
+    manager: MonitorManager,
+    auth: ApiAuth | None = None,
+    auth_required: bool = False,
+) -> type[ApiHandler]:
     routes: dict[tuple[str, str], Handler] = {}
     for group in (
         routes_accounts(store),
@@ -397,13 +455,20 @@ def build_handler(store: Store, manager: MonitorManager) -> type[ApiHandler]:
         routes_monitor(store, manager),
         routes_events(store),
         routes_system(store),
+        routes_auth(auth),
     ):
         routes.update(group)
 
     handler_cls = type(
         "BoundApiHandler",
         (ApiHandler,),
-        {"store": store, "manager": manager, "routes": routes},
+        {
+            "store": store,
+            "manager": manager,
+            "routes": routes,
+            "auth": auth,
+            "auth_required": auth_required,
+        },
     )
     return handler_cls
 
@@ -434,6 +499,14 @@ def _match_route(handler: type[ApiHandler], method: str, path: str) -> tuple[Han
 
 
 def _install_dispatch(handler: type[ApiHandler]) -> None:
+    public_api = {
+        ("GET", "/healthz"),
+        ("GET", "/api/health"),
+        ("GET", "/api/auth/status"),
+        ("POST", "/api/auth/login"),
+        ("POST", "/api/auth/logout"),
+    }
+
     def _dispatch(self: ApiHandler, method: str) -> None:
         parsed = urllib.parse.urlsplit(self.path)
         path = parsed.path.rstrip("/") or "/"
@@ -448,6 +521,18 @@ def _install_dispatch(handler: type[ApiHandler]) -> None:
                 )
             else:
                 self._serve_static(path)
+            return
+        if (
+            getattr(handler, "auth_required", False)
+            and path.startswith("/api/")
+            and (method, path) not in public_api
+            and (self.auth is None or not self.auth.authenticated(self.headers))
+        ):
+            self._send(
+                HTTPStatus.UNAUTHORIZED,
+                {"ok": False, "error": "需要先登录控制台"},
+                extra_headers={"WWW-Authenticate": "Bearer"},
+            )
             return
         try:
             fn({"query": query, "path": path, "params": params}, self)
@@ -465,6 +550,18 @@ def _install_dispatch(handler: type[ApiHandler]) -> None:
     handler.do_PUT = lambda self: _dispatch(self, "PUT")  # type: ignore[method-assign]
     handler.do_DELETE = lambda self: _dispatch(self, "DELETE")  # type: ignore[method-assign]
 
+    def _options(self: ApiHandler) -> None:
+        """处理浏览器或代理发出的预检，避免 BaseHTTPRequestHandler 返回 501。"""
+        self.send_response(HTTPStatus.NO_CONTENT)
+        self.send_header("Content-Length", "0")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Allow", "GET, POST, PUT, DELETE, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-CampusNet-Token")
+        self.end_headers()
+
+    handler.do_OPTIONS = _options  # type: ignore[method-assign]
+
 
 def serve(
     store: Store | None = None,
@@ -473,6 +570,7 @@ def serve(
     autostart: bool = True,
     blocking: bool = True,
     auto_shift: bool = False,
+    auth_required: bool | None = None,
 ) -> ThreadingHTTPServer:
     """启动 API + 前端静态服务。
 
@@ -483,7 +581,10 @@ def serve(
     stdout_ready()
     store = store or Store()
     manager = MonitorManager()
-    handler_cls = build_handler(store, manager)
+    if auth_required is None:
+        auth_required = host not in ("127.0.0.1", "localhost", "::1")
+    auth = ApiAuth() if auth_required else None
+    handler_cls = build_handler(store, manager, auth=auth, auth_required=bool(auth_required))
     _install_dispatch(handler_cls)
 
     try:
@@ -521,6 +622,8 @@ def serve(
         return httpd
 
     print(f"校园网自连服务已启动： http://{host}:{port}  （Ctrl+C 停止）")
+    if auth is not None:
+        print("局域网控制台已启用令牌保护。令牌可用 `python utils/run.py token` 查看。")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

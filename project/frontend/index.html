@@ -114,6 +114,16 @@
   .hint{font-size:12px;color:var(--txt-mute);margin-top:4px}
   .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
   .flex-end{justify-content:flex-end}
+  .auth-bg{
+    position:fixed;inset:0;background:rgba(6,8,12,.82);backdrop-filter:blur(8px);z-index:100;
+    display:none;align-items:center;justify-content:center;padding:20px;
+  }
+  .auth-bg.open{display:flex}
+  .auth-card{width:min(430px,100%);background:var(--card);border:1px solid var(--line);
+    border-radius:var(--radius);box-shadow:var(--shadow);padding:24px;animation:pop .18s ease}
+  .auth-card h2{font-size:18px;margin-bottom:8px}
+  .auth-card p{color:var(--txt-dim);font-size:13px;margin-bottom:18px}
+  .auth-card .hint{min-height:20px;color:var(--err);margin:8px 0 0}
 
   /* 实时进度面板 */
   #progressPanel{
@@ -158,6 +168,9 @@
   .pg-item.done .msg{color:var(--ok)}
   .pg-item.fail .msg,.pg-item.warn .msg{color:var(--warn)}
   .pg-item.offline .msg{color:var(--err)}
+  /* 身份检查是确认性辅助步骤：成功不该占用绿色（那是登录成功的语义），
+     灰色表示「已确认无异常」，与真正的进展区分开。 */
+  .pg-item.wifi .msg{color:var(--txt-mute)}
 
   @media(max-width:640px){
     main{padding:14px} header{padding:12px 14px;gap:10px}
@@ -169,6 +182,15 @@
 </style>
 </head>
 <body>
+<div class="auth-bg" id="authBg">
+  <form class="auth-card" id="authForm">
+    <h2>控制台需要令牌</h2>
+    <p>首次使用局域网访问时，在电脑上执行 <code>python utils/run.py token</code> 获取令牌。</p>
+    <label><span class="lbl">访问令牌</span><input id="authToken" type="password" autocomplete="off" spellcheck="false" required></label>
+    <div class="row flex-end"><button type="submit" class="ok">登录控制台</button></div>
+    <div class="hint" id="authHint"></div>
+  </form>
+</div>
 <header>
   <div class="brand">
     <div class="dot" id="statusDot"></div>
@@ -306,17 +328,49 @@ const STATE_TEXT = {
 const STAGE_TEXT = {
   start:'开始', probe:'探活', offline:'掉线', retry:'重试', connect:'连接门户',
   parse:'识别表单', submit:'提交登录', verify:'复检网络', done:'完成',
-  fail:'失败', warn:'注意', abort:'已中断', wait:'等待', browser:'启动浏览器'
+  fail:'失败', warn:'注意', abort:'已中断', wait:'等待', browser:'启动浏览器',
+  wifi:'网络身份'
 };
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {
     headers: { 'Content-Type': 'application/json' },
+    credentials: 'same-origin',
     ...opts,
     body: opts.body ? JSON.stringify(opts.body) : undefined,
   });
   const data = await res.json().catch(() => ({ ok:false, error:'响应不是 JSON' }));
+  if (res.status === 401 && authRequired && !path.startsWith('/api/auth/')) {
+    showAuth('会话已失效，请重新输入控制台令牌');
+  }
   if (!res.ok || data.ok === false) throw new Error(data.error || `HTTP ${res.status}`);
+  return data;
+}
+
+let authRequired = false;
+let authReady = false;
+let authPending = false;
+
+function showAuth(message = '') {
+  authPending = true;
+  $('authHint').textContent = message;
+  $('authBg').classList.add('open');
+  $('authToken').focus();
+}
+
+function hideAuth() {
+  authPending = false;
+  $('authBg').classList.remove('open');
+  $('authToken').value = '';
+  $('authHint').textContent = '';
+}
+
+async function initAuth() {
+  const res = await fetch('/api/auth/status', { credentials:'same-origin' });
+  const data = await res.json().catch(() => ({ required:false, authenticated:true }));
+  authRequired = Boolean(data.required);
+  authReady = true;
+  if (authRequired && !data.authenticated) showAuth();
   return data;
 }
 
@@ -676,7 +730,23 @@ $('btnDetectPortal').onclick = async () => {
 
 document.addEventListener('keydown', e => { if (e.key === 'Escape') $('modalBg').classList.remove('open'); });
 
-refresh();
+$('authForm').onsubmit = async e => {
+  e.preventDefault();
+  const token = $('authToken').value.trim();
+  if (!token) return;
+  $('authHint').textContent = '验证中…';
+  try {
+    await api('/api/auth/login', { method:'POST', body:{ token } });
+    hideAuth();
+    await refresh();
+  } catch (err) {
+    $('authHint').textContent = err.message || '令牌不正确';
+  }
+};
+
+initAuth().then(data => {
+  if (!authRequired || data.authenticated) refresh();
+}).catch(err => showAuth('无法连接服务：' + err.message));
 // 常态轮询：10 秒刷一次账号与状态，同时低频拉进度，
 // 这样后台监控触发重连时页面也会自动显示阶段，不必手动点。
 state.timer = setInterval(() => { refresh(); pollProgress(); }, 10000);

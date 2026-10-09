@@ -10,7 +10,6 @@ from . import __version__
 from . import discovery as discovery_mod
 from .monitor import MonitorManager
 from .paths import API_HOST, API_PORT, stdout_ready
-from .portal import login
 from .storage import Account, Store
 
 
@@ -32,6 +31,35 @@ def cmd_serve(args: argparse.Namespace) -> int:
 
 def cmd_add(args: argparse.Namespace) -> int:
     stdout_ready()
+
+    # --show-ssid 必须早于 Store()：Store 构造会 mkdir 并建表，
+    # 而这是个纯诊断开关，用户在「还没决定配不配 SSID」时就想看一眼当前
+    # 连的是什么网，不该为此先在磁盘上落一个数据库文件。
+    if getattr(args, "show_ssid", False):
+        from . import wifi as wifi_mod
+
+        print(f"当前 Wi-Fi：{wifi_mod.current_ssid() or '(未连接无线网)'}")
+        return 0
+
+    # 补回 argparse 层撤掉的必填校验。SystemExit(2) 与 argparse 自身的
+    # 参数错误保持同一个退出码，脚本里的 set -e 判断才不会失效。
+    missing = [
+        flag
+        for flag, value in (
+            ("--name", args.name),
+            ("--portal", args.portal),
+            ("--username", args.username),
+            ("--password", args.password),
+        )
+        if not value
+    ]
+    if missing:
+        print(
+            f"campusnet add: error: the following arguments are required: {', '.join(missing)}",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+
     store = Store()
     extra: dict[str, str] = {}
     if args.extra:
@@ -40,6 +68,13 @@ def cmd_add(args: argparse.Namespace) -> int:
         except json.JSONDecodeError as exc:
             print(f"--extra 不是合法 JSON: {exc}", file=sys.stderr)
             return 2
+
+    # wifi_ssid 走 extra_fields 而不是 Account 新字段：
+    # schema 已定型，加字段要动建表与迁移，而 SSID 本就是零散配置。
+    # 显式 --extra 优先，留给需要同时改多个键的场景。
+    if args.wifi_ssid:
+        extra.setdefault("wifi_ssid", args.wifi_ssid)
+
     account = Account(
         name=args.name,
         portal_url=args.portal,
@@ -78,25 +113,31 @@ def cmd_list(_: argparse.Namespace) -> int:
 def cmd_check(args: argparse.Namespace) -> int:
     stdout_ready()
     store = Store()
+    manager = MonitorManager()
+    monitor = manager.ensure(store)
+    monitor.headless = not args.headful
+
     if args.account:
         account = store.get_account(args.account)
         if account is None:
             print(f"账号 #{args.account} 不存在", file=sys.stderr)
             return 2
-        result = login(account, headless=not args.headful)
+        # 必须走 monitor.check_account，不能直接调 login()。
+        # 直接调会绕过网络身份检查（SSID 是不是校园网）与门户会话复核：
+        # 用户按 README 走单账号排障时，正在热点上这类问题一个都看不到，
+        # 而全量 check 能看到——同一个账号两条路给出不同结论。
+        result = monitor.check_account(account)
         store.add_event(
             f"CLI 检测 {account.name}: {result.state} - {result.message}",
-            level="info" if result.ok else "warning",
+            level="info" if result.online else "warning",
             stage="cli",
             state=result.state,
             account_id=account.id,
         )
-        print(f"{account.name}: {result.state} - {result.message}")
-        return 0 if result.ok else 1
+        mark = "OK " if result.online else "FAIL"
+        print(f"[{mark}] {result.account_name}: {result.state} - {result.message} ({result.elapsed}s)")
+        return 0 if result.online else 1
 
-    manager = MonitorManager()
-    monitor = manager.ensure(store)
-    monitor.headless = not args.headful
     results = monitor.check_all()
     if not results:
         print("没有启用中的账号。")
@@ -114,6 +155,15 @@ def cmd_events(args: argparse.Namespace) -> int:
     store = Store()
     for event in store.list_events(limit=args.limit):
         print(f"{event['ts']} [{event['level']:<7}] {event['stage']:<12} {event['message']}")
+    return 0
+
+
+def cmd_token(_: argparse.Namespace) -> int:
+    """打印局域网控制台令牌，不把令牌放进 URL 或数据库。"""
+    stdout_ready()
+    from .auth import ApiAuth
+
+    print(ApiAuth().token)
     return 0
 
 
@@ -191,10 +241,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_serve.set_defaults(func=cmd_serve)
 
     p_add = sub.add_parser("add", help="添加一个校园网账号")
-    p_add.add_argument("--name", required=True, help="账号备注名")
-    p_add.add_argument("--portal", required=True, help="认证门户地址")
-    p_add.add_argument("--username", required=True, help="认证账号")
-    p_add.add_argument("--password", required=True, help="认证密码")
+    # 这四项不在 argparse 层设 required=True：--show-ssid 是个纯诊断开关，
+    # 用户只想看一眼当前连的是什么网，不该被逼着提供账号密码。
+    # 必填校验下移到 cmd_add，仍走 parser.error()，退出码保持 2 不变。
+    p_add.add_argument("--name", default="", help="账号备注名")
+    p_add.add_argument("--portal", default="", help="认证门户地址")
+    p_add.add_argument("--username", default="", help="认证账号")
+    p_add.add_argument("--password", default="", help="认证密码")
     p_add.add_argument("--probe", default="http://www.msftconnecttest.com/connecttest.txt")
     p_add.add_argument("--username-field", default="", help="门户表单里的账号字段名（留空自动识别）")
     p_add.add_argument("--password-field", default="", help="门户表单里的密码字段名（留空自动识别）")
@@ -211,6 +264,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="http=表单登录；browser=真浏览器；srun=深澜challenge 加密；manual=只检测不登录",
     )
     p_add.add_argument("--extra", default="", help='附加字段 JSON，如 \'{"upass":"1"}\'')
+    p_add.add_argument(
+        "--wifi-ssid",
+        default="",
+        help=(
+            "校园网 Wi-Fi 名，多个用逗号分隔。不配则跳过网络身份检查；"
+            "配了以后连错网（如手机热点）会被识别出来并告警——"
+            "热点同样放行探活地址，不检查的话程序会误以为已联网"
+        ),
+    )
+    p_add.add_argument(
+        "--show-ssid",
+        action="store_true",
+        help="打印当前连接的无线路由名，便于照着填 --wifi-ssid",
+    )
     p_add.add_argument("--max-retries", type=int, default=3)
     p_add.add_argument("--disabled", action="store_true")
     p_add.set_defaults(func=cmd_add)
@@ -232,6 +299,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_events = sub.add_parser("events", help="查看最近事件日志")
     p_events.add_argument("--limit", type=int, default=50)
     p_events.set_defaults(func=cmd_events)
+
+    p_token = sub.add_parser("token", help="查看局域网 Web 控制台令牌")
+    p_token.set_defaults(func=cmd_token)
 
     return parser
 
