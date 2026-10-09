@@ -1,6 +1,7 @@
-"""密码编码与本地混淆存储。
+"""密码编码与本地凭据封装。
 
-混淆仅用于避免明文直接躺在磁盘上，不是加密。
+Windows 优先使用当前用户 DPAPI；其他平台和 DPAPI 不可用时使用带完整性
+校验的本机密钥封装。旧版 v1 token 继续可读，避免升级时丢失已有账号。
 """
 
 from __future__ import annotations
@@ -52,19 +53,53 @@ def decode_password(value: str, mode: str) -> str:
 
 
 def obfuscate(password: str) -> str:
-    """本地落盘混淆：随机密钥 + HMAC 派生流密码。
+    """封装密码，优先使用 Windows 当前用户 DPAPI。"""
+    if os.name == "nt":
+        token = _dpapi_protect(password.encode("utf-8"))
+        if token:
+            return f"v3.dpapi.{base64.urlsafe_b64encode(token).decode('ascii')}"
 
-    能挡住明文肉眼检索，挡不住本机 root；够用即可。
-    """
     key = _local_key()
     raw = password.encode("utf-8")
-    stream = _keystream(key, len(raw))
+    nonce = secrets.token_bytes(16)
+    stream = _keystream(key + nonce, len(raw))
     mixed = bytes(b ^ k for b, k in zip(raw, stream))
-    blob = base64.urlsafe_b64encode(mixed).decode("ascii")
-    return f"v1.{base64.urlsafe_b64encode(key).decode('ascii')}.{blob}"
+    payload = nonce + mixed
+    mac = hmac.new(key, payload, hashlib.sha256).digest()
+    return (
+        "v2."
+        f"{base64.urlsafe_b64encode(payload).decode('ascii')}."
+        f"{base64.urlsafe_b64encode(mac).decode('ascii')}"
+    )
 
 
 def deobfuscate(token: str) -> str:
+    if token.startswith("v3.dpapi."):
+        try:
+            raw = base64.urlsafe_b64decode(token.split(".", 2)[2].encode("ascii"))
+        except Exception:
+            return ""
+        plain = _dpapi_unprotect(raw) if os.name == "nt" else None
+        return plain.decode("utf-8", errors="replace") if plain is not None else ""
+
+    if token.startswith("v2."):
+        try:
+            _, payload_b64, mac_b64 = token.split(".", 2)
+            payload = base64.urlsafe_b64decode(payload_b64.encode("ascii"))
+            expected = base64.urlsafe_b64decode(mac_b64.encode("ascii"))
+            if len(payload) < 16:
+                return ""
+            key = _local_key()
+            actual = hmac.new(key, payload, hashlib.sha256).digest()
+            if not hmac.compare_digest(actual, expected):
+                return ""
+            nonce, mixed = payload[:16], payload[16:]
+            raw = bytes(b ^ k for b, k in zip(mixed, _keystream(key + nonce, len(mixed))))
+            return raw.decode("utf-8", errors="replace")
+        except Exception:
+            return ""
+
+    # v1 compatibility: the old token carried its stream key in the value.
     try:
         version, key_b64, blob = token.split(".", 2)
         if version != "v1":
@@ -75,6 +110,56 @@ def deobfuscate(token: str) -> str:
         return ""
     stream = _keystream(key, len(raw))
     return bytes(b ^ k for b, k in zip(raw, stream)).decode("utf-8", errors="replace")
+
+
+def _dpapi_protect(raw: bytes) -> bytes | None:
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+
+        class Blob(ctypes.Structure):
+            _fields_ = [("cbData", ctypes.c_uint32), ("pbData", ctypes.POINTER(ctypes.c_ubyte))]
+
+        crypt32 = ctypes.WinDLL("crypt32", use_last_error=True)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        source = (ctypes.c_ubyte * len(raw)).from_buffer_copy(raw)
+        inp = Blob(len(raw), source)
+        out = Blob()
+        flags = 0x01  # CRYPTPROTECT_UI_FORBIDDEN
+        if not crypt32.CryptProtectData(ctypes.byref(inp), None, None, None, None, flags, ctypes.byref(out)):
+            return None
+        try:
+            return ctypes.string_at(out.pbData, out.cbData)
+        finally:
+            kernel32.LocalFree(out.pbData)
+    except Exception:
+        return None
+
+
+def _dpapi_unprotect(raw: bytes) -> bytes | None:
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+
+        class Blob(ctypes.Structure):
+            _fields_ = [("cbData", ctypes.c_uint32), ("pbData", ctypes.POINTER(ctypes.c_ubyte))]
+
+        crypt32 = ctypes.WinDLL("crypt32", use_last_error=True)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        source = (ctypes.c_ubyte * len(raw)).from_buffer_copy(raw)
+        inp = Blob(len(raw), source)
+        out = Blob()
+        flags = 0x01
+        if not crypt32.CryptUnprotectData(ctypes.byref(inp), None, None, None, None, flags, ctypes.byref(out)):
+            return None
+        try:
+            return ctypes.string_at(out.pbData, out.cbData)
+        finally:
+            kernel32.LocalFree(out.pbData)
+    except Exception:
+        return None
 
 
 def _local_key() -> bytes:

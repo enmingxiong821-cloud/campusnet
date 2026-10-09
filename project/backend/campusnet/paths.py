@@ -30,6 +30,12 @@ def db_path() -> Path:
     return DATABASE_DIR / "campusnet.db"
 
 
+def api_token_path() -> Path:
+    """局域网控制台令牌路径；与数据库同目录，便于备份与权限管理。"""
+    override = os.environ.get("CAMPUSNET_API_TOKEN_FILE")
+    return Path(override).expanduser() if override else db_path().with_suffix(".api-token")
+
+
 # 兼容旧引用：导入时的快照，仅供不便改动调用方时使用。
 # 新代码请调 db_path()，否则环境变量改不动。
 DB_PATH = db_path()

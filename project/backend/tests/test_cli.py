@@ -56,6 +56,7 @@ def test_parser_exposes_all_commands() -> None:
         "list",
         "check",
         "events",
+        "token",
     }
 
 
@@ -71,8 +72,22 @@ def test_unknown_command_exits() -> None:
 
 
 def test_add_requires_mandatory_flags() -> None:
-    with pytest.raises(SystemExit):
+    """缺参必须退 2，和 argparse 自身的参数错误一致。
+
+    必须断言 code 而不是只断言 SystemExit：必填校验被从 argparse 层
+    下移到 cmd_add（为了让 --show-ssid 不用先凑齐账号密码），这条
+    契约就只剩测试守着。写成 SystemExit(1) 测试照样绿，脚本里的
+    set -e 却会把「参数写错」当成「执行失败」——两种错误的处置方式
+    完全不同，不能混。
+    """
+    with pytest.raises(SystemExit) as excinfo:
         cli.main(["add", "--name", "x"])
+    assert excinfo.value.code == 2
+
+
+def test_add_show_ssid_needs_no_mandatory_flags() -> None:
+    """--show-ssid 是纯诊断开关，不该逼用户先填账号密码。"""
+    assert cli.main(["add", "--show-ssid"]) == 0
 
 
 def test_password_mode_choices_are_enforced() -> None:
@@ -214,6 +229,34 @@ def test_check_all_offline_returns_one(
     code = cli.main(["check"])
     assert code == 1
     assert "[FAIL]" in capsys.readouterr().out
+
+
+def test_check_all_runs_exactly_one_round(
+    isolated_store, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:  # noqa: ANN001
+    """全量 check 只能跑一轮检测。
+
+    这里曾连续调两次 monitor.check_all()：check_all 的锁在 finally 里释放，
+    所以第二次不是命中重入保护返回缓存，而是真的再跑一遍探活+复核+登录。
+    单账号默认 max_retries=3，于是登录尝试翻成 6 次，事件表重复写入，
+    而用户看到的输出还是 1 行——副作用发生了却没留痕迹。
+
+    上面两条用例只断言输出文本，抓不到这个：第二轮结果被覆盖后
+    输出长得一模一样。所以必须直接数调用次数。
+    """
+    from campusnet.monitor import Monitor
+
+    calls: list[int] = []
+    original = Monitor.check_all
+
+    def counting(self) -> list:  # noqa: ANN001, ANN202
+        calls.append(1)
+        return original(self)
+
+    monkeypatch.setattr(Monitor, "check_all", counting)
+    _patch_online(monkeypatch)
+    assert cli.main(["check"]) == 0
+    assert len(calls) == 1, f"check_all 被调 {len(calls)} 次，应为 1"
 
 
 def test_check_specific_account(isolated_store, monkeypatch: pytest.MonkeyPatch, capsys) -> None:  # noqa: ANN001
@@ -489,7 +532,9 @@ def _patch_online(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         monitor_mod.portal, "login", lambda *a, **k: LoginResult("success", "登录成功")
     )
-    monkeypatch.setattr(cli, "login", lambda *a, **k: LoginResult("success", "登录成功"))
+    # 不再 patch cli.login：cmd_check --account 已改走 Monitor.check_account，
+    # cli 不再是登录的调用方。原先这里 patch 的是一层中转，真实调用点在
+    # monitor.portal.login（上面已 patch），这份重复只是让它看起来有两处入口。
 
 
 def _patch_offline(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -507,5 +552,4 @@ def _patch_offline(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         monitor_mod.portal, "login", lambda *a, **k: LoginResult("failed", "密码错误")
     )
-    monkeypatch.setattr(cli, "login", lambda *a, **k: LoginResult("failed", "密码错误"))
     monkeypatch.setattr("time.sleep", lambda *_a: None)

@@ -23,6 +23,7 @@ database/backup/
 # 密码混淆密钥，绝不能入库
 *.key
 .campusnet_obf.key
+*.api-token
 
 # 本地工具配置与日志（MCP 配置、临时输出）
 # 锚定到仓库根：无锚定的 config.json 会连带忽略任意子目录下的同名文件，

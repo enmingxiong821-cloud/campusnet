@@ -80,6 +80,9 @@ python utils/run.py add \
   --password 你的密码 \
   --password-mode base64
 
+# 先看当前连的是不是校园网（不建账号）
+python utils/run.py add --show-ssid
+
 # 立即检测（掉线会自动登录）
 python utils/run.py check
 
@@ -160,21 +163,47 @@ python utils/run.py serve
 | 字段 | 说明 |
 |---|---|
 | 门户地址 | 浏览器打开认证页后的地址 |
-| 登录方式 | `http` / `browser` / `manual` |
+| 登录方式 | `srun` / `http` / `browser` / `manual` |
 
 **字段名留空会自动识别**，识别错了再手工指定。
+
+#### 网络身份检查（防手机热点）
+
+开机自连有个隐蔽的坑：手机热点也有「自动连接」。开机瞬间程序切到热点并连上，此时探测一路绿灯，程序认为「已联网、无需认证」，于是永远不去碰认证接口——你在热点上却以为自己在校园网内。
+
+配了 `wifi_ssid` 后，每次检测会先确认连的是不是校园网，不匹配就记一条警告事件。
+
+```bash
+# 先看清当前连的是什么网（不建账号、不碰数据库）
+python -m campusnet add --show-ssid
+# 当前 Wi-Fi：NWAFU
+
+# 建号时直接带上规则
+python -m campusnet add --name 宿舍 --portal http://10.0.0.1/eportal/portal/login \
+  --username 20240001 --password '******' --wifi-ssid NWAFU
+```
+
+- 多个 SSID 用逗号分隔，按「或」关系匹配；大小写不敏感，按包含匹配（`NWAFU` 能匹配 `NWAFU-5G`）
+- 也可在 Web 控制台的「附加字段 JSON」里填 `{"wifi_ssid": "NWAFU"}`
+- **留空即关闭，一个 netsh 都不会发**，有线用户与多网卡环境零影响
+- 有线连接读不到 SSID 时直接放行，不会误判成「不在校园网」
+- **不匹配只告警、不阻断**。热点下认证必然失败，但失败原因该由门户来报；程序提前抛一个含糊的异常只会把真因盖掉。它解决的是「看得见病」——事后能解释为什么程序一直没登录
 
 ### 各厂商参考
 
 | 厂商 | 登录方式 | 密码编码 | 备注 |
 |---|---|---|---|
-| Dr.COM / 深澜 | http | base64 | 隐藏域 `0MKKey` `user_ip` `user_mac` 必须带 |
+| 深澜 SRUN | srun | plain | 页面里没有表单，走 challenge + HMAC-MD5 + xxtea。**不需要装 Playwright**，纯 HTTP 即可 |
+| Dr.COM | http | base64 | 隐藏域 `0MKKey` `user_ip` `user_mac` 必须带 |
 | 深菱 spl | http | plain | 路径含 `/sportal/` |
 | H3C / 新网 | http | plain | |
 | 华为 | browser | base64 | 多有验证码 |
 | 锐捷 | http | plain | |
 | 斐讯 Pholus | browser | base64 | 多有验证码 |
 | CAS 单点登录 | browser | plain | 需真浏览器执行 JS |
+
+> `srun` 与 `http` 都是纯 HTTP 实现，只有 `browser` 才需要 Playwright。
+> 门户 URL 里含 `srun_portal_pc` 的会自动识别成 `srun`。
 
 ---
 
