@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hmac
+import os
 import secrets
 import threading
 import time
@@ -39,6 +40,7 @@ class ApiAuth:
         try:
             value = self.token_file.read_text(encoding="utf-8").strip()
             if len(value) >= 32:
+                self._restrict_permissions()
                 return value
         except (OSError, UnicodeError):
             pass
@@ -47,22 +49,26 @@ class ApiAuth:
         self.token_file.parent.mkdir(parents=True, exist_ok=True)
         temp = self.token_file.with_name(f".{self.token_file.name}.{secrets.token_hex(6)}.tmp")
         try:
-            temp.write_text(value + "\n", encoding="utf-8")
-            try:
-                temp.chmod(0o600)
-            except OSError:
-                pass
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            with os.fdopen(os.open(temp, flags, 0o600), "w", encoding="utf-8") as stream:
+                stream.write(value + "\n")
             temp.replace(self.token_file)
-            try:
-                self.token_file.chmod(0o600)
-            except OSError:
-                pass
+            self._restrict_permissions()
         finally:
             try:
                 temp.unlink()
             except OSError:
                 pass
         return value
+
+    def _restrict_permissions(self) -> None:
+        """POSIX 上必须收紧已有令牌；Windows 文件权限由 ACL 管理。"""
+        if os.name != "posix":
+            return
+        try:
+            self.token_file.chmod(0o600)
+        except OSError as exc:
+            raise RuntimeError("API 令牌文件权限无法收紧") from exc
 
     def check_token(self, candidate: str) -> bool:
         return bool(candidate) and hmac.compare_digest(candidate, self._token)

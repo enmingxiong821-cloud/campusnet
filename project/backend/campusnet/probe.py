@@ -38,6 +38,12 @@ PORTAL_BODY_MARKERS = (
     "网络认证",
 )
 
+# 跟随跳转的最大层数。
+#
+# 相对跳转可形成环；没有深度限制时，每轮探活都可能反复请求同一地址。
+# 限制单次探活的请求次数，避免把监控循环变成门户的压力源。
+MAX_REDIRECTS = 5
+
 
 @dataclass
 class ProbeResult:
@@ -112,7 +118,13 @@ def looks_like_portal_body(text: str) -> bool:
     return any(marker in low for marker in PORTAL_BODY_MARKERS)
 
 
-def probe(url: str, timeout: float = 5.0, insecure: bool = False) -> ProbeResult:
+def probe(
+    url: str,
+    timeout: float = 5.0,
+    insecure: bool = False,
+    _depth: int = 0,
+    _opener: urllib.request.OpenerDirector | None = None,
+) -> ProbeResult:
     """请求一个明文探测地址；被劫持到门户页才视为未认证。
 
     判定依据来自 RFC 8952 与 Firefox 的 CaptiveDetect.sys.mjs：
@@ -124,7 +136,11 @@ def probe(url: str, timeout: float = 5.0, insecure: bool = False) -> ProbeResult
     """
     if not url:
         url = DEFAULT_PROBES[0]
-    opener = _build_opener(insecure)
+    if _depth >= MAX_REDIRECTS:
+        return ProbeResult(False, "redirect_loop", f"跳转超过 {MAX_REDIRECTS} 层，判定为跳转环", url)
+    # 同一次探活只建一个 opener：每层重建一次，Cookie 与处理器状态
+    # 都丢在重来里，跟跳转深度叠加后纯属白烧。
+    opener = _opener if _opener is not None else _build_opener(insecure)
     request = urllib.request.Request(url, headers={"Cache-Control": "no-cache"})
     try:
         with opener.open(request, timeout=timeout) as resp:
@@ -144,7 +160,7 @@ def probe(url: str, timeout: float = 5.0, insecure: bool = False) -> ProbeResult
             if is_portal_url(location):
                 return ProbeResult(False, "redirected", f"HTTP {exc.code} -> {location}", location)
             try:
-                followed = probe(location, timeout=timeout, insecure=insecure)
+                followed = probe(location, timeout=timeout, insecure=insecure, _depth=_depth + 1, _opener=opener)
             except Exception:  # noqa: BLE001
                 followed = ProbeResult(False, "redirected", f"HTTP {exc.code} -> {location}", location)
             if followed.online:

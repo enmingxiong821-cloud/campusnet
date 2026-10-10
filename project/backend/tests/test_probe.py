@@ -12,6 +12,7 @@ from campusnet import probe as probe_mod
 
 class _Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
+    loop_requests = 0
 
     def log_message(self, format: str, *args: object) -> None:  # noqa: A002
         return
@@ -43,6 +44,17 @@ class _Handler(BaseHTTPRequestHandler):
             }
             self.send_response(302)
             self.send_header("Location", targets[path])
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+        elif path == "/loop":
+            type(self).loop_requests += 1
+            self.send_response(302)
+            self.send_header("Location", "/loop")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+        elif path in ("/short-chain", "/short-last"):
+            self.send_response(302)
+            self.send_header("Location", "/short-last" if path == "/short-chain" else "/online")
             self.send_header("Content-Length", "0")
             self.end_headers()
         elif path == "/gzip":
@@ -110,6 +122,37 @@ def test_normal_relative_redirect_is_followed(server: str) -> None:
 def test_probe_gzip_body_decoded(server: str) -> None:
     result = probe_mod.probe(f"{server}/gzip")
     assert result.online and "OK" in result.detail
+
+
+def test_probe_redirect_loop_is_bounded(server: str) -> None:
+    """自跳转最多发送 MAX_REDIRECTS 次 HTTP 请求。"""
+    _Handler.loop_requests = 0
+    result = probe_mod.probe(f"{server}/loop")
+    assert not result.online
+    assert result.status == "redirect_loop"
+    assert str(probe_mod.MAX_REDIRECTS) in result.detail
+    assert _Handler.loop_requests == probe_mod.MAX_REDIRECTS
+
+
+def test_probe_redirect_loop_request_count_is_capped(server: str, monkeypatch) -> None:
+    calls = []
+    original = probe_mod._build_opener
+
+    def counting(insecure: bool = False):
+        calls.append(1)
+        return original(insecure)
+
+    monkeypatch.setattr(probe_mod, "_build_opener", counting)
+    probe_mod.probe(f"{server}/loop")
+    # opener 只建一次，且层数不超过上限
+    assert len(calls) == 1
+
+
+def test_probe_short_redirect_chain_still_follows(server: str) -> None:
+    """正常的短链必须跟到在线页，不能被深度限制误伤。"""
+    result = probe_mod.probe(f"{server}/short-chain")
+    assert result.online
+    assert result.status == "redirected_ok"
 
 
 def test_probe_http_error(server: str) -> None:
