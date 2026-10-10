@@ -117,3 +117,6 @@ jobs:
             exit 1
           fi
           echo "历史中未发现敏感文件"
+
+      - name: 扫描拟分发源码中的敏感内容
+        run: python utils/check_distribution.py --repo .
