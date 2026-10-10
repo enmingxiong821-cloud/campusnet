@@ -43,8 +43,11 @@ def mock_net():
     probe = ThreadingHTTPServer(("127.0.0.1", probe_port), mock_portal.ProbeHandler)
     for server in (portal, probe):
         server.daemon_threads = True
+    threads = []
     for server in (portal, probe):
-        threading.Thread(target=server.serve_forever, daemon=True).start()
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        threads.append(thread)
 
     yield (
         f"http://127.0.0.1:{portal_port}/eportal/portal/login",
@@ -55,6 +58,9 @@ def mock_net():
     probe.shutdown()
     portal.server_close()
     probe.server_close()
+    for thread in threads:
+        thread.join(timeout=5)
+        assert not thread.is_alive()
 
 
 def _account(portal: str, probe_url: str, password: str) -> Account:
