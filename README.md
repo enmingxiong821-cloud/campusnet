@@ -32,7 +32,6 @@
 git clone https://github.com/enmingxiong821-cloud/campusnet.git
 cd campusnet
 
-python -m pip install -r utils\requirements.txt
 python utils\run.py serve
 ```
 
@@ -44,7 +43,6 @@ python utils\run.py serve
 git clone https://github.com/enmingxiong821-cloud/campusnet.git
 cd campusnet
 
-python3 -m pip install -r utils/requirements.txt
 ./utils/start.sh
 ```
 
@@ -288,6 +286,12 @@ python -m pip install playwright
 python -m playwright install chromium
 ```
 
+开发或运行完整测试时安装：
+
+```
+python -m pip install -r utils/requirements-dev.txt
+```
+
 插件基于 Manifest V3，用 `chrome.alarms` 周期探活。掉线与恢复两个时刻会弹通知。
 
 ---
@@ -347,6 +351,7 @@ python -m playwright install chromium
 
 ```
 # 全部测试
+python -m pip install -r utils/requirements-dev.txt
 python -m pytest project/backend/tests -q
 
 # 扩展测试（改了 background.js 后必跑，MV3 无法在 Node 直接跑）
