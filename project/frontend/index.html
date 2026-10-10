@@ -266,6 +266,20 @@
         <label style="margin-top:18px"><span class="lbl">用于检测门户地址的探测网址</span>
           <input id="setDetectUrl" value="http://www.msftconnecttest.com/connecttest.txt">
         </label>
+
+        <hr style="margin:22px 0;border:none;border-top:1px solid var(--line)">
+        <div class="row" style="align-items:center">
+          <span class="lbl" style="min-width:96px">开机自启动</span>
+          <span class="badge" id="bootBadge">读取中…</span>
+          <button id="btnBootInstall">开启</button>
+          <button class="ghost" id="btnBootUninstall">关闭</button>
+          <span class="hint" id="bootHint"></span>
+        </div>
+        <p class="hint" style="margin-top:8px">
+          开启后服务随登录自动拉起，认证与重连在后台运行。
+          Windows 写入当前用户启动文件夹，Linux 走 systemd 用户单元（无则退化为 XDG autostart），macOS 走 LaunchAgent；
+          启动项写入当前用户目录，是否允许注册取决于系统策略。
+        </p>
       </div>
     </section>
   </div>
@@ -321,7 +335,7 @@ const $ = id => document.getElementById(id);
 const state = { accounts: [], monitor: { alive:false, interval:60, checking:false }, editingId: null, timer: null };
 
 const STATE_TEXT = {
-  online:'在线', logged_in:'已登录', offline:'掉线', failed:'登录失败', unknown:'未检测'
+  online:'在线', logged_in:'已登录', offline:'掉线', failed:'登录失败', unknown:'在线未确认'
 };
 
 /* 进度阶段 → 中文标签。后端只给英文 stage，中文映射留在前端。 */
@@ -495,7 +509,9 @@ function renderCards() {
   $('cOnline').textContent = online.length;
   $('cOnlineSub').textContent = list.length ? Math.round(online.length / list.length * 100) + '% 可用' : '—';
   $('cOffline').textContent = offline.length;
-  $('cOfflineSub').textContent = offline.length ? '需要关注' : '一切正常';
+  const unknown = list.filter(a => a.last_state === 'unknown' && a.last_checked_at).length;
+  const unchecked = list.filter(a => a.last_state === 'unknown' && !a.last_checked_at).length;
+  $('cOfflineSub').textContent = offline.length ? '需要关注' : unknown ? `${unknown} 个在线未确认` : unchecked ? `${unchecked} 个未检测` : '一切正常';
   const last = (state.monitor.last_results || [])[0];
   $('cLastRun').textContent = last ? '上次检测 ' + last.elapsed + 's' : '尚未运行';
 }
@@ -509,7 +525,7 @@ function renderAccounts() {
   const rows = state.accounts.map(a => `
     <tr>
       <td><strong>${esc(a.name)}</strong><div class="hint mono">${esc(a.username)}</div></td>
-      <td><span class="badge s-${a.last_state}">${STATE_TEXT[a.last_state] || a.last_state}</span></td>
+      <td><span class="badge s-${a.last_state}">${a.last_state === 'unknown' && !a.last_checked_at ? '未检测' : STATE_TEXT[a.last_state] || a.last_state}</span></td>
       <td class="mono" style="color:var(--txt-dim)">${esc(a.login_mode)} / ${esc(a.password_mode)}</td>
       <td class="mono" style="color:var(--txt-mute);max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(a.portal_url)}</td>
       <td>
@@ -657,8 +673,12 @@ async function probeNow() {
   const watcher = setInterval(pollProgress, 900);
   try {
     const r = await api('/api/check', { method:'POST', body:{} });
-    const bad = r.results.filter(x => !x.online);
-    toast(bad.length ? `${r.results.length} 个账号，${bad.length} 个掉线` : '全部在线', bad.length ? 'err' : 'ok');
+    const bad = r.results.filter(x => ['offline', 'failed'].includes(x.state));
+    const unconfirmed = r.results.filter(x => !x.online && !['offline', 'failed'].includes(x.state));
+    const summary = [`${r.results.length} 个账号`];
+    if (bad.length) summary.push(`${bad.length} 个掉线`);
+    if (unconfirmed.length) summary.push(`${unconfirmed.length} 个在线未确认`);
+    toast(bad.length || unconfirmed.length ? summary.join('，') : r.results.length ? '全部在线' : '没有可检测账号', bad.length ? 'err' : unconfirmed.length ? '' : 'ok');
     await pollProgress();        // 收尾再拉一次，拿到最后几条
     refresh();
     if (!$('tab-events').hidden) loadEvents();
@@ -694,6 +714,54 @@ async function saveSettings() {
   } catch (e) { toast('保存失败: ' + e.message, 'err'); }
 }
 
+// 复用账号状态的徽标配色：已开启用 s-online（绿），未开启用 s-unknown（灰）。
+// 样式表里没有 ok/off 这两个类，自造类名会得到一个没有底色的裸块。
+function renderBootstart(data) {
+  const badge = $('bootBadge');
+  if (!data.supported) {
+    badge.textContent = '本系统不支持';
+    badge.className = 'badge s-unknown';
+    $('bootHint').textContent = data.detail || '';
+    $('btnBootInstall').disabled = true;
+    $('btnBootUninstall').disabled = true;
+    return;
+  }
+  badge.textContent = data.installed ? '已开启' : '未开启';
+  badge.className = 'badge ' + (data.installed ? 's-online' : 's-unknown');
+  $('btnBootInstall').disabled = data.installed;
+  $('btnBootUninstall').disabled = !data.installed;
+}
+
+async function loadBootstart() {
+  try {
+    const data = await api('/api/bootstart');
+    renderBootstart(data);
+    $('bootHint').textContent = [data.detail, data.path].filter(Boolean).join(' · ');
+  } catch (e) {
+    $('bootBadge').textContent = '读取失败';
+    $('bootBadge').className = 'badge s-failed';
+    $('bootHint').textContent = e.message;
+  }
+}
+
+async function setBootstart(action) {
+  const btn = action === 'install' ? $('btnBootInstall') : $('btnBootUninstall');
+  btn.disabled = true;
+  $('bootHint').textContent = action === 'install' ? '注册中…' : '移除中…';
+  try {
+    const data = await api('/api/bootstart/' + action, { method:'POST', body:{} });
+    renderBootstart(data);
+    $('bootHint').textContent = data.detail || '';
+    toast(action === 'install'
+      ? (data.installed ? '开机自启动已开启' : '未能生效：' + data.detail)
+      : '开机自启动已关闭', data.installed === false && action === 'install' ? 'err' : 'ok');
+  } catch (e) {
+    toast('操作失败: ' + e.message, 'err');
+    await loadBootstart();
+    $('bootHint').textContent = '操作失败: ' + e.message;
+  }
+}
+
 document.querySelectorAll('.tab').forEach(t => t.onclick = () => {
   document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
   t.classList.add('active');
@@ -701,7 +769,7 @@ document.querySelectorAll('.tab').forEach(t => t.onclick = () => {
     $('tab-' + k).hidden = k !== t.dataset.tab;
   });
   if (t.dataset.tab === 'events') loadEvents();
-  if (t.dataset.tab === 'settings') loadSettings();
+  if (t.dataset.tab === 'settings') { loadSettings(); loadBootstart(); }
 });
 
 $('btnAdd').onclick = () => openModal(null);
@@ -718,6 +786,8 @@ $('btnClearEvents').onclick = async () => {
   loadEvents();
 };
 $('btnSaveSettings').onclick = saveSettings;
+$('btnBootInstall').onclick = () => setBootstart('install');
+$('btnBootUninstall').onclick = () => setBootstart('uninstall');
 $('btnDetectPortal').onclick = async () => {
   const url = $('setDetectUrl').value.trim();
   $('detectResult').textContent = '检测中…';

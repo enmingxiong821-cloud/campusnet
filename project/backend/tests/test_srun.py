@@ -690,6 +690,55 @@ def test_portal_srun_login_wraps_error() -> None:
     assert seen and seen[-1][0] == "fail"
 
 
+def test_route_probe_targets_portal_and_closes_socket(monkeypatch) -> None:
+    import socket
+    from campusnet import portal
+
+    targets = []
+    closed = []
+
+    class FakeSocket:
+        def settimeout(self, value):
+            pass
+
+        def connect(self, target):
+            targets.append(target)
+
+        def getsockname(self):
+            return ("10.20.30.40", 12345)
+
+        def close(self):
+            closed.append(True)
+
+    monkeypatch.setattr(socket, "socket", lambda *args: FakeSocket())
+    assert portal._guess_ip_by_route("http://172.26.8.11/index_1.html") == "10.20.30.40"
+    assert targets == [("172.26.8.11", 1)]
+    assert closed == [True]
+
+
+def test_srun_login_resolves_ip_once(monkeypatch) -> None:
+    from campusnet import portal, srun
+    from campusnet.storage import Account
+
+    calls = []
+    captured = []
+
+    def resolve(url):
+        calls.append(url)
+        return "10.20.30.40" if len(calls) == 1 else "10.20.30.41"
+
+    def login(config, on_progress=None):
+        captured.append(config.ip)
+        return False, "模拟拒绝"
+
+    monkeypatch.setattr(portal, "_local_ip_for_portal", resolve)
+    monkeypatch.setattr(srun, "srun_login", login)
+    result = portal.srun_login(Account(portal_url="http://172.26.8.11", username="test", password="test"))
+    assert len(calls) == 1
+    assert captured == ["10.20.30.40"]
+    assert result.detail == "ip=10.20.30.40"
+
+
 def test_local_ip_helper_uses_route() -> None:
     from campusnet import portal
 

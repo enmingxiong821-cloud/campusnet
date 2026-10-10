@@ -97,7 +97,8 @@ def test_portal_ok_but_probe_still_blocked_retries(store, account, monkeypatch) 
     result = Monitor(store, interval=10).check_account(store.get_account(acc_id))
 
     assert result.attempts == account.max_retries
-    assert result.state == STATE_LOGGED_IN
+    assert result.state == STATE_OFFLINE
+    assert result.online is False
 
 
 def test_offline_login_failure_marks_failed(store, account, offline_probe, monkeypatch) -> None:  # noqa: ANN001
@@ -132,8 +133,10 @@ def test_success_confirmed_by_probe(store, account, offline_probe, monkeypatch) 
     monkeypatch.setattr(time, "sleep", lambda *_a: None)
 
     result = Monitor(store, interval=10).check_account(store.get_account(acc_id))
-    assert result.state == STATE_LOGGED_IN  # 门户确认成功即记为已登录
-    assert result.online is True
+    assert result.state == STATE_OFFLINE
+    assert result.online is False
+    assert "复检仍未放行" in result.message
+    assert store.get_account(acc_id).last_state == STATE_OFFLINE
 
 
 def test_check_all_only_enabled_accounts(store, account, online_probe) -> None:  # noqa: ANN001
@@ -378,11 +381,25 @@ def test_probe_offline_but_portal_online_skips_login(store, srun_account, monkey
 
     result = Monitor(store, interval=10).check_account(store.get_account(acc_id))
 
-    assert result.online is True
-    assert result.state == STATE_ONLINE
+    assert result.online is False
+    assert result.state == monitor_mod.STATE_UNKNOWN
     assert result.attempts == 0
     assert login_calls["n"] == 0
-    assert store.get_account(acc_id).last_state == STATE_ONLINE
+    assert store.get_account(acc_id).last_state == monitor_mod.STATE_UNKNOWN
+
+
+def test_unknown_session_uses_regular_interval(store, monkeypatch):
+    mon = Monitor(store, interval=300)
+    monkeypatch.setattr(mon, "check_all", lambda: [{"online": False, "state": monitor_mod.STATE_UNKNOWN}])
+    delays = []
+
+    def wait(delay):
+        delays.append(delay)
+        mon._stop.set()
+
+    monkeypatch.setattr(mon._stop, "wait", wait)
+    mon._loop()
+    assert delays == [300.0]
 
 
 def test_probe_offline_and_portal_offline_logs_in(store, srun_account, monkeypatch) -> None:  # noqa: ANN001

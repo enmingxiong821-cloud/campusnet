@@ -11,7 +11,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable
 
-from . import __version__, discovery, portal, ports, probe as probe_mod
+from . import __version__, bootstart, discovery, portal, ports, probe as probe_mod
 from .auth import ApiAuth
 from .monitor import MonitorManager
 from .paths import API_HOST, API_PORT, FRONTEND_DIR, stdout_ready
@@ -394,11 +394,61 @@ def routes_system(store: Store) -> dict[tuple[str, str], Handler]:
     def settings_get(_: dict[str, Any], h: ApiHandler) -> None:
         h._send(HTTPStatus.OK, {"ok": True, "settings": store.all_settings()})
 
+    def bootstart_status(_: dict[str, Any], h: ApiHandler) -> None:
+        h._send(HTTPStatus.OK, {"ok": True, **bootstart.status().as_dict()})
+
+    def validate_bootstart_request(h: ApiHandler) -> None:
+        # Rejected requests may have unread bodies; do not reuse that connection.
+        if h.headers.get("Content-Type", "").split(";", 1)[0].strip().lower() != "application/json":
+            h.close_connection = True
+            raise ApiError(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, "自启动操作要求 application/json")
+
+    def bootstart_install(ctx: dict[str, Any], h: ApiHandler) -> None:
+        validate_bootstart_request(h)
+        payload = h._read_body()
+        address = h.server.server_address
+        if not isinstance(address, tuple):
+            raise ApiError(HTTPStatus.INTERNAL_SERVER_ERROR, "服务监听地址不是 TCP 地址")
+        host = payload.get("host", address[0])
+        raw_port = payload.get("port", address[1])
+        try:
+            if not isinstance(host, str) or isinstance(raw_port, bool) or not isinstance(raw_port, (int, str)):
+                raise ValueError("host 必须为字符串，port 必须为整数")
+            port = int(raw_port)
+            bootstart.launch_args(host, port)
+        except (ValueError, TypeError) as exc:
+            raise ApiError(HTTPStatus.BAD_REQUEST, f"启动参数无效：{exc}") from exc
+        result = bootstart.install(host=host, port=port)
+        store.add_event(
+            f"开机自启动安装请求 -> {'成功' if result.installed else '未生效'}：{result.detail}",
+            level="info" if result.installed else "warning",
+            stage="server",
+        )
+        h._send(HTTPStatus.OK if result.success else HTTPStatus.INTERNAL_SERVER_ERROR,
+                {"ok": result.success, "error": "" if result.success else result.detail,
+                 **result.as_dict()})
+
+    def bootstart_uninstall(_: dict[str, Any], h: ApiHandler) -> None:
+        validate_bootstart_request(h)
+        h._read_body()
+        result = bootstart.uninstall()
+        store.add_event(
+            f"开机自启动卸载请求：{result.detail}",
+            level="info" if result.success else "warning",
+            stage="server",
+        )
+        h._send(HTTPStatus.OK if result.success else HTTPStatus.INTERNAL_SERVER_ERROR,
+                {"ok": result.success, "error": "" if result.success else result.detail,
+                 **result.as_dict()})
+
     return {
         ("GET", "/api/health"): health,
         ("GET", "/healthz"): healthz,
         ("GET", "/api/settings"): settings_get,
         ("PUT", "/api/settings"): settings_update,
+        ("GET", "/api/bootstart"): bootstart_status,
+        ("POST", "/api/bootstart/install"): bootstart_install,
+        ("POST", "/api/bootstart/uninstall"): bootstart_uninstall,
     }
 
 
@@ -498,6 +548,27 @@ def _match_route(handler: type[ApiHandler], method: str, path: str) -> tuple[Han
     return None, {}
 
 
+def require_same_origin(h: ApiHandler) -> None:
+    """校验浏览器写请求；允许无 Origin 的本地 CLI 客户端。"""
+    origin = h.headers.get("Origin")
+    valid = True
+    if origin is not None:
+        try:
+            parsed = urllib.parse.urlsplit(origin)
+            valid = (
+                parsed.scheme in ("http", "https")
+                and bool(parsed.netloc)
+                and parsed.netloc.lower() == h.headers.get("Host", "").lower()
+                and parsed.username is None
+                and not parsed.path and not parsed.query and not parsed.fragment
+            )
+        except ValueError:
+            valid = False
+    if not valid or h.headers.get("Sec-Fetch-Site") == "cross-site":
+        h.close_connection = True
+        raise ApiError(HTTPStatus.FORBIDDEN, "写操作不接受跨来源请求")
+
+
 def _install_dispatch(handler: type[ApiHandler]) -> None:
     public_api = {
         ("GET", "/healthz"),
@@ -535,6 +606,8 @@ def _install_dispatch(handler: type[ApiHandler]) -> None:
             )
             return
         try:
+            if method in ("POST", "PUT", "DELETE", "PATCH"):
+                require_same_origin(self)
             fn({"query": query, "path": path, "params": params}, self)
         except ApiError as exc:
             self._send(exc.status, {"ok": False, "error": exc.message})

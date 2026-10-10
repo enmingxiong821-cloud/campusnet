@@ -156,6 +156,34 @@ python utils/run.py check
 python utils/run.py serve
 ```
 
+### 步骤五：开机自启动（可选）
+
+```
+# 查看当前状态
+python utils/run.py bootstart status
+
+# 注册：登录后自动拉起服务与监控
+python utils/run.py bootstart install
+
+# 移除
+python utils/run.py bootstart uninstall
+```
+
+Web 控制台的「设置」页也有对应开关。三种系统的落地载体：
+
+| 系统 | 载体 | 说明 |
+|---|---|---|
+| Windows | 启动文件夹里的 `campusnet-autostart.cmd` | 优先 `pythonw.exe`，开机不弹黑窗口 |
+| Linux | systemd 用户单元 | 无 systemd 时退化为 XDG autostart |
+| macOS | LaunchAgent plist | `RunAtLoad`，不设 `KeepAlive` |
+
+启动项写入用户级位置；是否允许注册取决于系统策略。这里实现的是**用户登录自启动**，
+不是三平台统一的无需登录开机服务。Linux 用户会话自启动不要求 linger；
+需要无需登录运行时可另行配置 `loginctl enable-linger $USER`，权限取决于系统策略。
+
+手机和平板访问 PC 托管的控制台，不等于手机和平板已有原生后台自连服务。
+实际跨设备访问、系统重启启动及真实校园网掉线重连仍待实测。
+
 ### 手动配置
 
 若 `discover` 没识别出来，通常只需要填两个值：
@@ -342,6 +370,7 @@ project/backend/campusnet/
   discovery.py      厂商无关的门户自动发现
   server.py         HTTP API + 静态托管
   lockfile.py       单实例互斥
+  bootstart.py      开机自启动（Windows/Linux/macOS 三平台载体）
   cli.py            命令行入口
 project/frontend/
   index.html        Web 控制台

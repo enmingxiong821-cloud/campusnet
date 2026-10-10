@@ -167,6 +167,36 @@ def cmd_token(_: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_bootstart(args: argparse.Namespace) -> int:
+    """开机自启动的查看 / 安装 / 卸载。
+
+    安装或卸载操作失败返回 1；未安装时卸载为幂等成功，返回 0。
+    状态查询只展示当前结果，不触发系统安装或卸载操作。
+    """
+    stdout_ready()
+    from . import bootstart as bootstart_mod
+
+    if args.bootstart_action == "status":
+        result = bootstart_mod.status()
+        print(bootstart_mod.activate(result))
+        if result.path:
+            print(f"启动项位置: {result.path}")
+        return 0
+
+    if args.bootstart_action == "install":
+        result = bootstart_mod.install(host=args.host, port=args.port)
+        print(bootstart_mod.activate(result))
+        if not result.installed:
+            return 1
+        if bootstart_mod.platform_name() == "linux" and result.path and result.path.suffix == ".service":
+            print("提示：默认随用户会话启动；无需登录运行需另行配置 linger，并确认系统授权策略。")
+        return 0
+
+    result = bootstart_mod.uninstall()
+    print(bootstart_mod.activate(result))
+    return 0 if result.success else 1
+
+
 def cmd_discover(args: argparse.Namespace) -> int:
     stdout_ready()
     report = discovery_mod.discover(
@@ -302,6 +332,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_token = sub.add_parser("token", help="查看局域网 Web 控制台令牌")
     p_token.set_defaults(func=cmd_token)
+
+    p_boot = sub.add_parser("bootstart", help="查看 / 安装 / 卸载开机自启动")
+    boot_sub = p_boot.add_subparsers(dest="bootstart_action", required=True)
+    p_boot_status = boot_sub.add_parser("status", help="查看当前是否已注册开机自启动")
+    p_boot_status.set_defaults(func=cmd_bootstart)
+    p_boot_install = boot_sub.add_parser("install", help="注册开机自启动")
+    p_boot_install.add_argument("--host", default=API_HOST)
+    p_boot_install.add_argument("--port", type=int, default=API_PORT)
+    p_boot_install.set_defaults(func=cmd_bootstart)
+    p_boot_uninstall = boot_sub.add_parser("uninstall", help="移除开机自启动")
+    p_boot_uninstall.set_defaults(func=cmd_bootstart)
 
     return parser
 
