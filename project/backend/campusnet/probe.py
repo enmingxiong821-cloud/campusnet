@@ -11,7 +11,7 @@ import urllib.request
 import zlib
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 from . import charset as charset_mod
 from .paths import DEFAULT_USER_AGENT
@@ -139,6 +139,7 @@ def probe(url: str, timeout: float = 5.0, insecure: bool = False) -> ProbeResult
     except urllib.error.HTTPError as exc:
         location = exc.headers.get("Location", "") if exc.headers else ""
         if exc.code in (301, 302, 303, 307, 308) and location:
+            location = urljoin(exc.geturl() or url, location)
             # 跳到门户才是掉线；跳到同站 https 属正常跳转
             if is_portal_url(location):
                 return ProbeResult(False, "redirected", f"HTTP {exc.code} -> {location}", location)
@@ -192,8 +193,10 @@ def detect_portal_url(start_url: str, timeout: float = 5.0) -> str | None:
             return resp.geturl() if is_portal_url(resp.geturl()) else None
     except urllib.error.HTTPError as exc:
         location = exc.headers.get("Location", "") if exc.headers else ""
-        if location and is_portal_url(location):
-            return location
+        if exc.code in (301, 302, 303, 307, 308) and location:
+            location = urljoin(exc.geturl() or start_url, location)
+            if urlsplit(location).scheme in ("http", "https") and is_portal_url(location):
+                return location
         return None
     except Exception:  # noqa: BLE001
         return None
