@@ -35,6 +35,29 @@ jobs:
           PYTHONIOENCODING: utf-8
         run: python -m pytest project/backend/tests -q
 
+  console-browser:
+    name: 控制台浏览器交互
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安装浏览器测试依赖
+        run: python -m pip install pytest playwright
+
+      - name: 安装 Chromium 与系统依赖
+        run: python -m playwright install --with-deps chromium
+
+      - name: 验证桌面与移动宽度交互
+        env:
+          CAMPUSNET_BROWSER_CHANNEL: chromium
+          PYTHONIOENCODING: utf-8
+        run: python -m pytest project/backend/tests/test_console_browser.py -q
+
   extension:
     name: 浏览器扩展逻辑
     runs-on: ubuntu-latest

@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import sqlite3
+
+import pytest
+
 from campusnet.storage import (
     STATE_FAILED,
     STATE_ONLINE,
@@ -134,3 +138,56 @@ def test_failed_state_roundtrip(store: Store, account: Account) -> None:
     store.set_state(new_id, STATE_FAILED)
     loaded = store.get_account(new_id)
     assert loaded is not None and loaded.last_state == STATE_FAILED
+
+
+def test_connection_commits_and_closes(store: Store) -> None:
+    with store._connection() as conn:
+        conn.execute("INSERT INTO settings (key, value) VALUES (?, ?)", ("commit_test", "42"))
+    with pytest.raises(sqlite3.ProgrammingError):
+        conn.execute("SELECT 1")
+    assert store.get_setting("commit_test") == 42
+
+
+def test_connection_rolls_back_and_closes(store: Store) -> None:
+    conn: sqlite3.Connection | None = None
+    with pytest.raises(RuntimeError, match="abort transaction"):
+        with store._connection() as current:
+            conn = current
+            conn.execute("INSERT INTO settings (key, value) VALUES (?, ?)", ("rollback_test", "42"))
+            raise RuntimeError("abort transaction")
+    assert conn is not None
+    with pytest.raises(sqlite3.ProgrammingError):
+        conn.execute("SELECT 1")
+    assert store.get_setting("rollback_test") is None
+
+
+def test_store_operations_close_connections(store: Store, account: Account, monkeypatch) -> None:
+    opened = []
+    original = store.connect
+
+    def tracked_connect():
+        conn = original()
+        opened.append(conn)
+        return conn
+
+    monkeypatch.setattr(store, "connect", tracked_connect)
+    store.init_db()
+    account_id = store.add_account(account)
+    store.list_accounts()
+    store.get_account(account_id)
+    store.update_account(account_id, account)
+    store.set_state(account_id, STATE_ONLINE)
+    event_id = store.add_event("connection test", account_id=account_id)
+    store.list_events()
+    store.event_count()
+    store.event_exists(event_id)
+    store.prune_events()
+    store.clear_events()
+    store.set_setting("connection_test", True)
+    store.get_setting("connection_test")
+    store.all_settings()
+    store.delete_account(account_id)
+    assert opened
+    for conn in opened:
+        with pytest.raises(sqlite3.ProgrammingError):
+            conn.execute("SELECT 1")

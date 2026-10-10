@@ -56,6 +56,28 @@ def call(url: str, method: str = "GET", body: dict | None = None) -> tuple[int, 
             return exc.code, {"raw": raw}
 
 
+@pytest.mark.parametrize("method,path", [
+    ("POST", "/api/check"), ("POST", "/api/monitor/start"),
+    ("POST", "/api/events/clear"), ("POST", "/api/accounts"),
+    ("PUT", "/api/accounts/1"), ("DELETE", "/api/accounts/1"),
+])
+def test_write_routes_reject_foreign_origin(api, method, path):
+    request = urllib.request.Request(str(api) + path, data=b"{}", method=method,
+        headers={"Content-Type": "application/json", "Origin": "https://foreign.invalid"})
+    with pytest.raises(urllib.error.HTTPError) as error:
+        urllib.request.urlopen(request, timeout=5)
+    assert error.value.code == 403
+    error.value.close()
+
+
+@pytest.mark.parametrize("origin", ["https://console.example", "http://console.example"])
+def test_write_origin_supports_proxy_scheme(api, origin):
+    request = urllib.request.Request(str(api) + "/api/settings", data=b"{}", method="PUT",
+        headers={"Content-Type": "application/json", "Host": "console.example", "Origin": origin})
+    with urllib.request.urlopen(request, timeout=5) as response:
+        assert response.status == 200
+
+
 def test_health(api: _Api) -> None:
     status, data = call(f"{api}/api/health")
     assert status == 200 and data["ok"] is True
@@ -65,6 +87,74 @@ def test_health(api: _Api) -> None:
 def test_healthz(api: _Api) -> None:
     status, data = call(f"{api}/healthz")
     assert status == 200 and data["ok"] is True
+
+
+@pytest.mark.parametrize("action", ["install", "uninstall"])
+def test_bootstart_failure_is_http_error(api, monkeypatch, action):
+    result = server_mod.bootstart.BootStatus(True, False, None, "simulated failure", False)
+    monkeypatch.setattr(server_mod.bootstart, action, lambda **kwargs: result)
+    status, data = call(f"{api}/api/bootstart/{action}", "POST", {})
+    assert status == 500
+    assert data["ok"] is False
+    assert data["success"] is False
+    assert data["error"] == "simulated failure"
+
+
+@pytest.mark.parametrize("payload", [{"port": "abc"}, {"port": 0}, {"port": True}, {"port": 1.5}, {"host": "bad host"}])
+def test_bootstart_invalid_parameters(api, monkeypatch, payload):
+    def unexpected(**kwargs):
+        pytest.fail("invalid parameters must not install startup entry")
+    monkeypatch.setattr(server_mod.bootstart, "install", unexpected)
+    status, data = call(f"{api}/api/bootstart/install", "POST", payload)
+    assert status == 400
+    assert not data["ok"]
+
+
+def test_bootstart_defaults_to_listener(api, monkeypatch):
+    captured = {}
+    def install(**kwargs):
+        captured.update(kwargs)
+        return server_mod.bootstart.BootStatus(True, True, None, "ok")
+    monkeypatch.setattr(server_mod.bootstart, "install", install)
+    assert call(f"{api}/api/bootstart/install", "POST", {})[0] == 200
+    assert captured == {"host": "127.0.0.1", "port": int(api.rsplit(":", 1)[1])}
+
+
+def test_uninstall_consumes_body_on_persistent_connection(api, monkeypatch):
+    import http.client
+    result = server_mod.bootstart.BootStatus(True, True, None, "permission denied", False)
+    monkeypatch.setattr(server_mod.bootstart, "uninstall", lambda: result)
+    monkeypatch.setattr(server_mod.bootstart, "status", lambda: result)
+    conn = http.client.HTTPConnection("127.0.0.1", int(api.rsplit(":", 1)[1]), timeout=5)
+    try:
+        conn.request("POST", "/api/bootstart/uninstall", "{}", {"Content-Type": "application/json"})
+        response = conn.getresponse()
+        assert response.status == 500
+        response.read()
+        conn.request("GET", "/api/bootstart")
+        response = conn.getresponse()
+        assert response.status == 200
+        assert json.loads(response.read())["installed"] is True
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("action", ["install", "uninstall"])
+@pytest.mark.parametrize("headers,expected", [
+    ({"Content-Type": "text/plain"}, 415),
+    ({"Content-Type": "application/json", "Origin": "http://evil.example"}, 403),
+    ({"Content-Type": "application/json", "Origin": "null"}, 403),
+    ({"Content-Type": "application/json", "Sec-Fetch-Site": "cross-site"}, 403),
+])
+def test_bootstart_rejects_cross_site(api, monkeypatch, action, headers, expected):
+    calls = []
+    monkeypatch.setattr(server_mod.bootstart, action, lambda **kwargs: calls.append(kwargs))
+    request = urllib.request.Request(f"{api}/api/bootstart/{action}", data=b"{}", headers=headers)
+    with pytest.raises(urllib.error.HTTPError) as error:
+        urllib.request.urlopen(request, timeout=5)
+    assert error.value.code == expected
+    error.value.close()
+    assert calls == []
 
 
 def test_account_crud_flow(api: _Api) -> None:

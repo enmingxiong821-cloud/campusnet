@@ -237,7 +237,9 @@ class Monitor:
                     # 于是 all() 恒为 False，热身窗口永远退不出去：
                     # interval 配 300 秒也只能每 15 秒跑一轮，
                     # 「一轮成功即转常规」这个核心承诺整个落空。
-                    ok = all(r.get("online") for r in results) if results else False
+                    # 已有门户会话但连通未确认时不重复认证，按常规间隔复核，
+                    # 避免密集空转；这不代表 online=True，CLI 仍返回失败码。
+                    ok = all(r.get("online") or r.get("state") == STATE_UNKNOWN for r in results) if results else False
                 except Exception as exc:  # noqa: BLE001 - 循环线程不能因单次异常退出
                     self.store.add_event(f"监控循环异常: {exc}", level="error", stage="monitor")
                     ok = False
@@ -374,16 +376,17 @@ class Monitor:
         self.emit_progress(account, "verify", "探活未放行，正在向门户复核会话状态")
         auth_ok, auth_detail = self._portal_recheck(account)
         if auth_ok is True:
-            self.emit_progress(account, "done", f"门户确认在线（{auth_detail}）")
+            self.emit_progress(account, "warn", f"门户会话存在，但网络探活失败（{auth_detail}）")
             outcome = CheckOutcome(
-                account.id, account.name, True, STATE_ONLINE, auth_detail, check.detail
+                account.id, account.name, False, STATE_UNKNOWN,
+                f"门户会话存在，但网络连通未确认：{auth_detail}", check.detail
             )
-            self.store.set_state(account.id, STATE_ONLINE)
+            self.store.set_state(account.id, STATE_UNKNOWN)
             self.store.add_event(
-                f"{account.name}: 探活失败但门户确认在线（{check.status}）— {auth_detail}",
-                level="info",
+                f"{account.name}: 门户会话存在，跳过重复登录；探活失败（{check.status}）— {auth_detail}",
+                level="warning",
                 stage="portal_state",
-                state=STATE_ONLINE,
+                state=STATE_UNKNOWN,
                 account_id=account.id,
             )
             return outcome
@@ -397,6 +400,7 @@ class Monitor:
         )
 
         attempts = 0
+        network_confirmed = False
         last = portal.LoginResult("failed", "未执行登录", "")
         aborted = False
         for attempt in range(1, max(1, account.max_retries) + 1):
@@ -429,6 +433,7 @@ class Monitor:
                 self.emit_progress(account, "verify", "门户已受理，复检网络状态")
                 confirm = probe_mod.probe(account.probe_url)
                 if confirm.online:
+                    network_confirmed = True
                     self.emit_progress(account, "done", f"重连成功（{last.message}）")
                     break
                 self.emit_progress(account, "warn", "门户说成功，但复检仍未放行")
@@ -442,10 +447,12 @@ class Monitor:
 
         elapsed = time.perf_counter() - started
         if last.ok:
-            state = STATE_LOGGED_IN
+            state = STATE_LOGGED_IN if network_confirmed else STATE_OFFLINE
             self.store.set_state(account.id, state)
             return CheckOutcome(
-                account.id, account.name, True, state, last.message, last.detail, attempts, elapsed
+                account.id, account.name, network_confirmed, state,
+                last.message if network_confirmed else "门户已受理，但网络复检仍未放行",
+                last.detail, attempts, elapsed
             )
 
         if aborted:

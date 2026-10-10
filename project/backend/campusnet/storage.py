@@ -5,9 +5,10 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Iterator
 
 from . import crypto
 from .paths import SCHEMA_PATH, db_path as db_path_default
@@ -99,13 +100,27 @@ class Store:
 
     def connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, timeout=10)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA foreign_keys = ON")
+        try:
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA foreign_keys = ON")
+        except BaseException:
+            conn.close()
+            raise
         return conn
+
+    @contextmanager
+    def _connection(self) -> Iterator[sqlite3.Connection]:
+        """提交或回滚事务后立即关闭连接，不依赖垃圾回收。"""
+        conn = self.connect()
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
 
     def init_db(self) -> None:
         schema = SCHEMA_PATH.read_text(encoding="utf-8")
-        with _WRITE_LOCK, self.connect() as conn:
+        with _WRITE_LOCK, self._connection() as conn:
             conn.executescript(schema)
 
     # ---------- accounts ----------
@@ -114,16 +129,16 @@ class Store:
         if enabled_only:
             sql += " WHERE enabled = 1"
         sql += " ORDER BY id"
-        with self.connect() as conn:
+        with self._connection() as conn:
             return [Account.from_row(r) for r in conn.execute(sql)]
 
     def get_account(self, account_id: int) -> Account | None:
-        with self.connect() as conn:
+        with self._connection() as conn:
             row = conn.execute("SELECT * FROM accounts WHERE id = ?", (account_id,)).fetchone()
         return Account.from_row(row) if row else None
 
     def add_account(self, account: Account) -> int:
-        with _WRITE_LOCK, self.connect() as conn:
+        with _WRITE_LOCK, self._connection() as conn:
             cur = conn.execute(
                 """
                 INSERT INTO accounts (name, portal_url, probe_url, username, password_obf,
@@ -151,7 +166,7 @@ class Store:
             return int(rowid) if rowid is not None else 0
 
     def update_account(self, account_id: int, account: Account) -> bool:
-        with _WRITE_LOCK, self.connect() as conn:
+        with _WRITE_LOCK, self._connection() as conn:
             cur = conn.execute(
                 """
                 UPDATE accounts SET name = ?, portal_url = ?, probe_url = ?, username = ?,
@@ -181,12 +196,12 @@ class Store:
             return cur.rowcount > 0
 
     def delete_account(self, account_id: int) -> bool:
-        with _WRITE_LOCK, self.connect() as conn:
+        with _WRITE_LOCK, self._connection() as conn:
             cur = conn.execute("DELETE FROM accounts WHERE id = ?", (account_id,))
             return cur.rowcount > 0
 
     def set_state(self, account_id: int, state: str) -> None:
-        with _WRITE_LOCK, self.connect() as conn:
+        with _WRITE_LOCK, self._connection() as conn:
             conn.execute(
                 """
                 UPDATE accounts SET last_state = ?, last_checked_at = datetime('now','localtime')
@@ -204,7 +219,7 @@ class Store:
         state: str = "",
         account_id: int | None = None,
     ) -> int:
-        with _WRITE_LOCK, self.connect() as conn:
+        with _WRITE_LOCK, self._connection() as conn:
             cur = conn.execute(
                 """
                 INSERT INTO events (account_id, level, stage, state, message)
@@ -223,12 +238,12 @@ class Store:
             params.append(account_id)
         sql += " ORDER BY id DESC LIMIT ?"
         params.append(max(1, min(limit, 2000)))
-        with self.connect() as conn:
+        with self._connection() as conn:
             rows = conn.execute(sql, params).fetchall()
         return [dict(r) for r in rows]
 
     def clear_events(self) -> None:
-        with _WRITE_LOCK, self.connect() as conn:
+        with _WRITE_LOCK, self._connection() as conn:
             conn.execute("DELETE FROM events")
 
     def prune_events(self, keep: int = 2000) -> int:
@@ -237,7 +252,7 @@ class Store:
         监控默认 60 秒一轮，每轮至少写一条事件，一年下来就是几十万行。
         """
         keep = max(1, int(keep))
-        with _WRITE_LOCK, self.connect() as conn:
+        with _WRITE_LOCK, self._connection() as conn:
             cur = conn.execute(
                 "DELETE FROM events WHERE id NOT IN "
                 "(SELECT id FROM events ORDER BY id DESC LIMIT ?)",
@@ -246,7 +261,7 @@ class Store:
             return max(0, cur.rowcount or 0)
 
     def event_count(self) -> int:
-        with self.connect() as conn:
+        with self._connection() as conn:
             row = conn.execute("SELECT COUNT(*) AS n FROM events").fetchone()
         return int(row["n"]) if row else 0
 
@@ -256,14 +271,14 @@ class Store:
         裁剪限频要用它兜底：记过一次公告后，后续轮次的裁剪会把那条
         公告本身删掉，若只看时间戳就永远不会补记。
         """
-        with self.connect() as conn:
+        with self._connection() as conn:
             row = conn.execute("SELECT 1 FROM events WHERE id = ? LIMIT 1", (event_id,)).fetchone()
         return row is not None
 
     # ---------- settings ----------
     def set_setting(self, key: str, value: Any) -> None:
         blob = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
-        with _WRITE_LOCK, self.connect() as conn:
+        with _WRITE_LOCK, self._connection() as conn:
             conn.execute(
                 "INSERT INTO settings (key, value) VALUES (?, ?) "
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -271,7 +286,7 @@ class Store:
             )
 
     def get_setting(self, key: str, default: Any = None) -> Any:
-        with self.connect() as conn:
+        with self._connection() as conn:
             row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
         if not row:
             return default
@@ -281,7 +296,7 @@ class Store:
             return row["value"]
 
     def all_settings(self) -> dict[str, Any]:
-        with self.connect() as conn:
+        with self._connection() as conn:
             rows = conn.execute("SELECT key, value FROM settings").fetchall()
         out: dict[str, Any] = {}
         for row in rows:

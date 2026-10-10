@@ -747,17 +747,14 @@ def srun_login(account: Account, on_progress: ProgressCallback | None = None) ->
     if not base:
         return LoginResult("error", "未配置门户地址", "")
 
-    ip = account.extra_fields.get("ip") or account.extra_fields.get("user_ip") or ""
-    if not ip:
-        ip = _local_ip_for_portal(base)
+    config = srun_config_for(account, timeout=10.0, guess_ip=True)
+    ip = config.ip
     if not ip:
         return LoginResult(
             "error",
             "无法确定本机 IPv4，SRUN 认证必须带上 ip 参数",
             "可在附加字段里手动填 {\"ip\": \"10.x.x.x\"}",
         )
-
-    config = srun_config_for(account, timeout=10.0, guess_ip=True)
 
     try:
         ok, reason = srun_mod.srun_login(config, on_progress=on_progress)
@@ -835,11 +832,10 @@ def _guess_ip_by_route(portal_url: str) -> str:
     if parts.scheme not in ("http", "https"):
         return ""
 
-    probe_host = "10.255.255.255" if host.count(".") == 3 else "8.8.8.8"
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         sock.settimeout(0.5)
-        sock.connect((probe_host, 1))
+        sock.connect((host, 1))
         return sock.getsockname()[0]
     except OSError:
         return ""

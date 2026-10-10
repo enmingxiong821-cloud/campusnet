@@ -57,6 +57,7 @@ def test_parser_exposes_all_commands() -> None:
         "check",
         "events",
         "token",
+        "bootstart",
     }
 
 
