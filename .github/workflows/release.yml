@@ -115,6 +115,9 @@ jobs:
           [ "$fail" -eq 0 ] || exit 1
           echo "包内未发现凭据"
 
+      - name: 复用分发源码扫描器
+        run: python utils/check_distribution.py --root "dist/${NAME}"
+
       - name: 打包
         run: |
           set -e
