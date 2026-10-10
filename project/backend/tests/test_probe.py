@@ -34,6 +34,17 @@ class _Handler(BaseHTTPRequestHandler):
             self.send_header("Location", "http://10.0.0.1/eportal/portal/login")
             self.send_header("Content-Length", "0")
             self.end_headers()
+        elif path in ("/relative", "/nested/relative", "/scheme-relative", "/normal-relative"):
+            targets = {
+                "/relative": "/srun_portal_pc?ac_id=1&theme=pro",
+                "/nested/relative": "../srun_portal_pc?ac_id=1&theme=pro",
+                "/scheme-relative": f"//{self.headers['Host']}/srun_portal_pc?ac_id=1&theme=pro",
+                "/normal-relative": "/online",
+            }
+            self.send_response(302)
+            self.send_header("Location", targets[path])
+            self.send_header("Content-Length", "0")
+            self.end_headers()
         elif path == "/gzip":
             import gzip
 
@@ -78,6 +89,22 @@ def test_probe_redirect_to_portal_is_offline(server: str) -> None:
     assert not result.online
     assert result.status == "redirected"
     assert "eportal" in result.detail
+
+
+@pytest.mark.parametrize("path", ["/relative", "/nested/relative", "/scheme-relative"])
+def test_relative_portal_redirect_is_absolute(server: str, path: str) -> None:
+    expected = f"{server}/srun_portal_pc?ac_id=1&theme=pro"
+    result = probe_mod.probe(server + path)
+    assert not result.online
+    assert result.status == "redirected"
+    assert result.final_url == expected
+    assert probe_mod.detect_portal_url(server + path) == expected
+
+
+def test_normal_relative_redirect_is_followed(server: str) -> None:
+    result = probe_mod.probe(server + "/normal-relative")
+    assert result.online
+    assert result.status == "redirected_ok"
 
 
 def test_probe_gzip_body_decoded(server: str) -> None:
