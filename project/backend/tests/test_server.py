@@ -32,6 +32,7 @@ def api(store: Store):  # noqa: ANN001
     from http.server import ThreadingHTTPServer
 
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    httpd.daemon_threads = True
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
     out = _Api(f"http://127.0.0.1:{httpd.server_address[1]}")
@@ -39,6 +40,8 @@ def api(store: Store):  # noqa: ANN001
     yield out
     httpd.shutdown()
     httpd.server_close()
+    thread.join(timeout=5)
+    assert not thread.is_alive()
 
 
 def call(url: str, method: str = "GET", body: dict | None = None) -> tuple[int, dict]:  # noqa: ANN001

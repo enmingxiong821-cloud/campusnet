@@ -71,12 +71,15 @@ class _Handler(BaseHTTPRequestHandler):
 def portal_server():
     handler = type("H", (_Handler,), {"pages": {}})
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    httpd.daemon_threads = True
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
     host, port = httpd.server_address[0], httpd.server_address[1]
     yield f"http://{host}:{port}", handler
     httpd.shutdown()
     httpd.server_close()
+    thread.join(timeout=5)
+    assert not thread.is_alive()
 
 
 # ---------- 网关推导 ----------

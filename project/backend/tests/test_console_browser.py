@@ -46,6 +46,7 @@ def test_bootstart_interaction(store, monkeypatch, width):
     handler = server.build_handler(store, MonitorManager())
     server._install_dispatch(handler)
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    httpd.daemon_threads = True
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
     try:

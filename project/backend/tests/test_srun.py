@@ -488,10 +488,14 @@ class _SrunHandler(BaseHTTPRequestHandler):
 def srun_server():
     handler = type("H", (_SrunHandler,), {"force_result": None, "seen": {}})
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
-    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    httpd.daemon_threads = True
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
     yield f"http://127.0.0.1:{httpd.server_address[1]}", handler
     httpd.shutdown()
     httpd.server_close()
+    thread.join(timeout=5)
+    assert not thread.is_alive()
 
 
 def test_srun_login_success(srun_server) -> None:  # noqa: ANN001
