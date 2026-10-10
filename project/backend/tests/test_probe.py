@@ -79,11 +79,14 @@ class _Handler(BaseHTTPRequestHandler):
 @pytest.fixture(scope="module")
 def server():
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    httpd.daemon_threads = True
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
     yield f"http://127.0.0.1:{httpd.server_address[1]}"
     httpd.shutdown()
     httpd.server_close()
+    thread.join(timeout=5)
+    assert not thread.is_alive()
 
 
 def test_probe_online(server: str) -> None:
