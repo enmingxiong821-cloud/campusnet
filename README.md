@@ -1,4 +1,5 @@
 # 校园网自连
+![CI](https://github.com/enmingxiong821-cloud/campusnet/actions/workflows/ci.yml/badge.svg?branch=main)
 
 校园网掉线自动重连。探活发现断网后，自动登录认证门户把网络接回来。
 
