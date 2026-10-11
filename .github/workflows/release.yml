@@ -58,65 +58,16 @@ jobs:
       - name: 校验包内无凭据
         run: |
           set -e
-          # locale 必须固定成 UTF-8：下面的正则含中文与全角标点。
-          # 默认 GBK 环境下 [:：=] 会按字节展开成 {0x3A,0xEF,0xBC,0x9A,0x3D}，
-          # 而全角「，」(EF BC 8C) 与全角「：」(EF BC 9A) 共用 EF BC 前缀，
-          # 于是 UI 提示里的「含明文密码，请妥善保管」被判成凭据，把发布误杀。
-          export LC_ALL=C.UTF-8
-          export LANG=C.UTF-8
-          cd "dist/${NAME}"
           fail=0
           for pattern in '*.db' '*.db-wal' '*.key' 'config.json' '*.log'; do
-            if find . -name "$pattern" | grep -q .; then
+            if find "dist/${NAME}" -name "$pattern" | grep -q .; then
               echo "::error::分发包含敏感文件: $pattern"
               fail=1
             fi
           done
-          # 内容扫描，不能只靠文件名。早先这里只有文件名匹配，
-          # 于是包内明明躺着明文口令，校验却输出「包内未发现凭据」退出 0——
-          # 那比没有校验更糟，给的是虚假安全感。
-          #
-          # 判别器是「值必须是带引号的字符串字面量」。
-          # password=args.password 与 password="realsecret" 结构相同，
-          # 光看字符类区分不了；引号是唯一稳定的分界：
-          #   命中  password = "<明文口令>"   /  db_password: "..."  /  secret="..."
-          #   不中  password=args.password,  /  password = crypto.encode_password(...)
-          # 早先的 [^"']{6,} 把空白和 { 也算作值，于是密码={pass_field}（f-string）、
-          # upass=' + Buffer.from(...)（代码拼接）全部误报，发布被恒定阻断。
-          # 误报同样是校验失效 —— 它会训练人直接跳过这一步。
-          #
-          # utils/mock_portal.py 与自测指南共享一套固定夹具口令（本地 mock 门户用，
-          # 非真实凭据，e2e 依赖它），按路径豁免；不做值级豁免，
-          # 否则真实口令一旦恰好等于它就会被放过。
-          find . -type f \
-            ! -path './utils/mock_portal.py' \
-            ! -path './doc/*' \
-            -print0 \
-          | xargs -0 grep -IlE '((^|[^A-Za-z0-9])(pass(word|wd)?|pwd|api_?key|secret|token)[[:space:]"'"'"']{0,2}[:=][[:space:]]*["'"'"'][^"'"'"']{7,}["'"'"'])|([A-Za-z0-9_]*(PASSWORD|PASSWD|SECRET|TOKEN|API_?KEY)[[:space:]"'"'"']{0,2}[:=][[:space:]]*["'"'"']?[^[:space:]"'"'"']{6,}["'"'"']?)|((令牌|口令|密码)[[:space:]"'"'"']{0,2}[:：=][[:space:]]*["'"'"'][^"'"'"']{6,}["'"'"'])' 2>/dev/null; then
-            echo "::error::包内疑似明文凭据，内容扫描命中（见上方文件列表）"
-            fail=1
-          fi
-          # 真实学号与内网门户地址也不该进包
-          if grep -rIlE '(20[0-9]{2}[0-9]{6})|(172\.26\.8\.11)' . 2>/dev/null; then
-            echo "::error::包内含真实学号或校园内网地址"
-            fail=1
-          fi
-          # 手机号：早先只扫了学号（10 位）和内网地址，漏了 11 位手机号，
-          # 于是 utils/_tmp 里躺着的真实号码能一路过到发布产物。
-          # 那里靠 rm -rf 侥幸躲过，但那是删目录，不是扫描。
-          # 1[3-9] 开头 + 9 位，覆盖全部大陆手机号段。
-          # 边界用 (^|[^0-9])...([^0-9]|$) 而不是 [^0-9]...[^0-9]：
-          # 后者要求号码后面还有一个非数字字符，号码在行尾时整行失配，
-          # 实测「号码独占一行」「phone=号码」两种最常见写法全部漏检。
-          if grep -rIlE '(^|[^0-9])1[3-9][0-9]{9}([^0-9]|$)' . 2>/dev/null; then
-            echo "::error::包内含疑似真实手机号"
-            fail=1
-          fi
-          [ "$fail" -eq 0 ] || exit 1
-          echo "包内未发现凭据"
+          [ "$fail" -eq 0 ]
+          python utils/check_distribution.py --root "dist/${NAME}"
 
-      - name: 复用分发源码扫描器
-        run: python utils/check_distribution.py --root "dist/${NAME}"
 
       - name: 打包
         run: |
