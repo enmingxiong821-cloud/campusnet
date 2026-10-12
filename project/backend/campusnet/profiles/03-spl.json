@@ -1,0 +1,13 @@
+{
+  "id": "spl",
+  "name": "深菱 spl",
+  "match_url": ["/sportal/", "spl-", "ispub"],
+  "match_body": [],
+  "login_mode": "http",
+  "password_mode": "plain",
+  "username_fields": ["username", "account"],
+  "password_fields": ["password", "pwd"],
+  "success_markers": ["登录成功"],
+  "failure_markers": ["密码错误"],
+  "note": "路径里通常带 /sportal/"
+}

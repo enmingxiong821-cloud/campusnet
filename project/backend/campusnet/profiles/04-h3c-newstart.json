@@ -1,0 +1,13 @@
+{
+  "id": "h3c-newstart",
+  "name": "H3C / 新网",
+  "match_url": ["newstart", "wlan.campus", "portal_new"],
+  "match_body": ["h3c"],
+  "login_mode": "http",
+  "password_mode": "plain",
+  "username_fields": ["username", "userName", "user"],
+  "password_fields": ["password", "pwd"],
+  "success_markers": ["登录成功"],
+  "failure_markers": ["密码错误"],
+  "note": "优先级要排在 SRUN 之后：有些学校用 H3C 页面 + SRUN 后端"
+}

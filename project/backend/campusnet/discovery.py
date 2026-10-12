@@ -17,6 +17,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from . import probe as probe_mod
+from . import profiles as profiles_mod
 from .paths import DEFAULT_USER_AGENT
 
 # 高频门户路径候选：Dr.COM / 深菱 / H3C / 新网 / 华为 / 深澜 SRUN 等常见形态
@@ -43,49 +44,24 @@ PORTAL_PATHS: tuple[str, ...] = (
     "/cgi-bin/login.cgi",
 )
 
-# 厂商指纹：特征串 -> 厂商名。命中任意一项即标注，用于 UI 提示与默认字段猜测。
+# 厂商指纹与默认模式现在都由规则文件派生（profiles/ 目录，一个厂商一个 JSON）：
+# 新增一所学校 = 加一条数据，不用改这里的代码。
 #
-# 顺序即优先级：SRUN 必须排在 H3C / 新网前面。
-# 西农大的门户 URL 是 srun_portal_pc，若先命中「h3c」就会被建议 browser 模式，
-# 而它实际该走 srun（challenge + HMAC-MD5 + xxtea），纯 HTTP 即可，不装 Playwright。
-VENDOR_SIGNATURES: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("深澜 SRUN", ("srun_portal", "srun_portal_pc", "get_challenge", "srbx1", "srun_bx1")),
-    ("Dr.COM", ("drcom", "dr.com", "eportal/portal", "hiddenpwd", "0mkkey")),
-    ("深菱 spl", ("/sportal/", "spl-", "ispub")),
-    ("H3C / 新网", ("h3c", "newstart", "wlan.campus", "portal_new")),
-    ("华为", ("huawei", "华为", "eportal.hw", "portal.huawei", "hwportal")),
-    ("锐捷", ("ruijie", "锐捷", "eportal_ruijie", "wlanlogin")),
-    ("斐讯 Pholus", ("pholus", "斐讯", "ph-cloud", "fonline")),
-    ("水木 / 自建 CAS", ("cas/login", "j_cas", "cas ", "sso/cas")),
-    ("Web认证通用", ("webauth", "web-auth", "portal-login")),
+# 下面三张表保留为只读视图，避免调用方与既有测试大改。顺序即优先级，由文件名
+# 前缀决定：01-srun 必须排在 04-h3c-newstart 前面——有些学校的门户 URL 是
+# srun_portal_pc，先命中「h3c」就会被建议 browser 模式，而它实际该走 srun。
+_PORTAL_PROFILES = profiles_mod.load_profiles()
+
+VENDOR_SIGNATURES: tuple[tuple[str, tuple[str, ...]], ...] = tuple(
+    (item.name, item.all_tokens) for item in _PORTAL_PROFILES
 )
 
-# 各家常见的密码提交编码，识别到厂商后作为默认值建议。
-# SRUN 不走 password_mode：密码加密在 hmd5 与 info 两处，由 srun.py 负责。
 VENDOR_PASSWORD_MODES: dict[str, str] = {
-    "深澜 SRUN": "plain",
-    "Dr.COM": "base64",
-    "深菱 spl": "plain",
-    "H3C / 新网": "plain",
-    "华为": "base64",
-    "锐捷": "plain",
-    "斐讯 Pholus": "base64",
-    "水木 / 自建 CAS": "plain",
-    "Web认证通用": "plain",
+    item.name: item.password_mode for item in _PORTAL_PROFILES
 }
 
 VENDOR_LOGIN_MODES: dict[str, str] = {
-    # SRUN 页面里没有 form，纯 HTTP 走 challenge 流程即可，
-    # 不需要 Playwright——本机 Chromium 在校园网下会被 CDN 重置下载失败。
-    "深澜 SRUN": "srun",
-    "Dr.COM": "http",
-    "深菱 spl": "http",
-    "H3C / 新网": "http",
-    "华为": "browser",
-    "锐捷": "http",
-    "斐讯 Pholus": "browser",
-    "水木 / 自建 CAS": "browser",
-    "Web认证通用": "browser",
+    item.name: item.login_mode for item in _PORTAL_PROFILES
 }
 
 # 探测地址池：按顺序尝试，任一放行即视为在线
@@ -222,11 +198,9 @@ def guess_gateways() -> list[str]:
 
 def identify_vendor(html_text: str, url: str = "") -> tuple[str, str]:
     """返回 (厂商, 命中的特征串)；未命中则厂商为 '未知厂商'。"""
-    haystack = f"{url}\n{html_text}".lower()
-    for vendor, tokens in VENDOR_SIGNATURES:
-        for token in tokens:
-            if token in haystack:
-                return vendor, token
+    profile, token = profiles_mod.identify(html_text, url, _PORTAL_PROFILES)
+    if profile is not None:
+        return profile.name, token
     return "未知厂商", ""
 
 

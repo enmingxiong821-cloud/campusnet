@@ -463,6 +463,32 @@ def cmd_setup(args: argparse.Namespace) -> int:
     return 0 if report.ok else 1
 
 
+def cmd_profiles(args: argparse.Namespace) -> int:
+    """查看 / 校验门户适配规则（新增一所学校 = 加一条数据）。"""
+    stdout_ready()
+    from pathlib import Path
+
+    from . import profiles as profiles_mod
+
+    directory = Path(args.dir).expanduser() if args.dir else None
+    items, errors = profiles_mod.validate_all(directory)
+    if args.validate:
+        for item in items:
+            print(f"[OK  ] {item.id:<16} {item.name}（{item.source}）")
+        for problem in errors:
+            print(f"[FAIL] {problem}", file=sys.stderr)
+        return 1 if errors else 0
+    for item in items:
+        tokens = ", ".join(item.tokens[:4]) or "（无特征）"
+        print(
+            f"{item.id:<16}{item.name:<14}{item.login_mode:<8}"
+            f"{item.password_mode:<10}{tokens}"
+        )
+    for problem in errors:
+        print(f"[WARN] {problem}", file=sys.stderr)
+    return 0
+
+
 def cmd_menu(_: argparse.Namespace) -> int:
     """交互式主菜单：桌面快捷方式指向这里。"""
     stdout_ready()
@@ -653,6 +679,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_menu = sub.add_parser("menu", help="交互式主菜单（桌面快捷方式指向它）")
     p_menu.set_defaults(func=cmd_menu)
+
+    p_profiles = sub.add_parser("profiles", help="查看 / 校验门户适配规则")
+    p_profiles.add_argument(
+        "--dir",
+        default="",
+        help="只看某个规则目录（默认内置目录 + CAMPUSNET_PROFILES_DIR）",
+    )
+    p_profiles.add_argument("--validate", action="store_true", help="逐条校验规则文件")
+    p_profiles.set_defaults(func=cmd_profiles)
 
     return parser
 

@@ -1,0 +1,13 @@
+{
+  "id": "srun",
+  "name": "深澜 SRUN",
+  "match_url": ["srun_portal", "srun_portal_pc", "get_challenge"],
+  "match_body": ["srbx1", "srun_bx1"],
+  "login_mode": "srun",
+  "password_mode": "plain",
+  "username_fields": ["DDDDD", "username", "user"],
+  "password_fields": ["upass", "password"],
+  "success_markers": ["login_ok", "e0000"],
+  "failure_markers": ["sign_error", "password_error", "user_not_found"],
+  "note": "页面里没有表单：challenge + HMAC-MD5 + xxtea，纯 HTTP 即可，不需要浏览器"
+}

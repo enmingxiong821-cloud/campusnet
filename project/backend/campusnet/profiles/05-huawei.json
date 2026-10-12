@@ -1,0 +1,13 @@
+{
+  "id": "huawei",
+  "name": "华为",
+  "match_url": ["eportal.hw", "portal.huawei", "hwportal", "huawei"],
+  "match_body": ["华为"],
+  "login_mode": "browser",
+  "password_mode": "base64",
+  "username_fields": ["username", "user"],
+  "password_fields": ["password"],
+  "success_markers": ["登录成功"],
+  "failure_markers": ["验证码"],
+  "note": "多有验证码，纯 HTTP 常常过不去，默认走浏览器"
+}

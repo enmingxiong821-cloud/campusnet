@@ -68,6 +68,7 @@ def test_parser_exposes_all_commands() -> None:
         "shortcut",
         "setup",
         "menu",
+        "profiles",
     }
 
 

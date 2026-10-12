@@ -281,6 +281,13 @@ python -m campusnet add --name 宿舍 --portal http://10.0.0.1/eportal/portal/lo
 
 ### 各厂商参考
 
+**新增一所学校不用改代码**：门户适配规则放在 `project/backend/campusnet/profiles/`，
+一个厂商/学校一个 JSON（匹配特征、建议的登录模式、密码编码、表单字段候选、成功与失败标志）。
+加一所学校 = 加一条数据；也可以把自己的规则放到别处，用环境变量
+`CAMPUSNET_PROFILES_DIR` 指向它来覆盖内置规则。`python utils/run.py profiles`
+列出全部规则，`profiles --validate` 逐条校验。**规则只允许声明式数据、不含代码**——
+否则「从远端更新规则」就等于任意代码执行。
+
 | 厂商 | 登录方式 | 密码编码 | 备注 |
 |---|---|---|---|
 | 深澜 SRUN | srun | plain | 页面里没有表单，走 challenge + HMAC-MD5 + xxtea。**不需要装 Playwright**，纯 HTTP 即可 |

@@ -1,0 +1,13 @@
+{
+  "id": "pholus",
+  "name": "斐讯 Pholus",
+  "match_url": ["pholus", "ph-cloud", "fonline"],
+  "match_body": ["斐讯"],
+  "login_mode": "browser",
+  "password_mode": "base64",
+  "username_fields": ["username", "user"],
+  "password_fields": ["password"],
+  "success_markers": ["登录成功"],
+  "failure_markers": ["验证码"],
+  "note": "多用图片验证码，默认走浏览器"
+}

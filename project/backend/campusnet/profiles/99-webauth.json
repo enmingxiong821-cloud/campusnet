@@ -1,0 +1,13 @@
+{
+  "id": "webauth",
+  "name": "Web 认证通用",
+  "match_url": ["webauth", "web-auth", "portal-login"],
+  "match_body": [],
+  "login_mode": "browser",
+  "password_mode": "plain",
+  "username_fields": ["username", "user", "account"],
+  "password_fields": ["password", "pwd"],
+  "success_markers": ["登录成功"],
+  "failure_markers": [],
+  "note": "兜底规则：认不出厂商时的通用 Web 认证形态，最后才匹配"
+}

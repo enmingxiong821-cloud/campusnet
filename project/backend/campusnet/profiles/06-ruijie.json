@@ -1,0 +1,13 @@
+{
+  "id": "ruijie",
+  "name": "锐捷",
+  "match_url": ["eportal_ruijie", "wlanlogin", "ruijie"],
+  "match_body": ["锐捷"],
+  "login_mode": "http",
+  "password_mode": "plain",
+  "username_fields": ["username", "user"],
+  "password_fields": ["password", "pwd"],
+  "success_markers": ["登录成功"],
+  "failure_markers": ["密码错误"],
+  "note": "部分学校的无线认证走 802.1X，不在本工具范围内"
+}

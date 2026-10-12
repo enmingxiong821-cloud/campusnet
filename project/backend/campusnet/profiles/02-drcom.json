@@ -1,0 +1,13 @@
+{
+  "id": "drcom",
+  "name": "Dr.COM",
+  "match_url": ["eportal/portal", "drcom", "dr.com"],
+  "match_body": ["hiddenpwd", "0mkkey", "drcom"],
+  "login_mode": "http",
+  "password_mode": "base64",
+  "username_fields": ["DDDDD", "username"],
+  "password_fields": ["upass", "password"],
+  "success_markers": ["登录成功", "认证成功"],
+  "failure_markers": ["密码错误", "用户名不存在"],
+  "note": "隐藏域 0MKKey / user_ip / user_mac 必须带上"
+}

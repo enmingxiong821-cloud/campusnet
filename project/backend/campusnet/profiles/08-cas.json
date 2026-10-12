@@ -1,0 +1,13 @@
+{
+  "id": "cas",
+  "name": "水木 / 自建 CAS",
+  "match_url": ["cas/login", "sso/cas", "j_cas"],
+  "match_body": ["cas "],
+  "login_mode": "browser",
+  "password_mode": "plain",
+  "username_fields": ["username", "uname", "user"],
+  "password_fields": ["password", "passwd"],
+  "success_markers": ["登录成功"],
+  "failure_markers": ["用户名或密码错误"],
+  "note": "单点登录必须执行 JS，只能走浏览器"
+}
