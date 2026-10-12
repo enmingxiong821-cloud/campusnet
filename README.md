@@ -288,6 +288,17 @@ python -m campusnet add --name 宿舍 --portal http://10.0.0.1/eportal/portal/lo
 列出全部规则，`profiles --validate` 逐条校验。**规则只允许声明式数据、不含代码**——
 否则「从远端更新规则」就等于任意代码执行。
 
+**遇到没适配的学校**：在未认证状态下跑
+
+```
+python utils/run.py portal-report --url http://<门户地址>/eportal/portal/login
+```
+
+它会导出一份**已脱敏**的门户页 fixture（删掉输入值、脚本正文、注释、URL 查询串、
+学号、手机号、内网地址与长令牌），并当场打印识别结果。把这份文件贴到 issue / PR 里，
+就能帮你补一条规则。已有 fixture 用 `portal-report --replay <文件>` 可以离线查看
+识别结果（不联网）；`--from-file` 则用于处理你手工保存下来的 HTML。
+
 | 厂商 | 登录方式 | 密码编码 | 备注 |
 |---|---|---|---|
 | 深澜 SRUN | srun | plain | 页面里没有表单，走 challenge + HMAC-MD5 + xxtea。**不需要装 Playwright**，纯 HTTP 即可 |

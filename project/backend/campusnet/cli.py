@@ -489,6 +489,54 @@ def cmd_profiles(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_portal_report(args: argparse.Namespace) -> int:
+    """导出一份已脱敏的门户 fixture，或对已有 fixture 做离线回放。"""
+    stdout_ready()
+    from pathlib import Path
+
+    from . import fixtures as fixtures_mod
+
+    if args.replay:
+        info = fixtures_mod.replay(args.replay)
+        for key, value in info.items():
+            print(f"{key}: {value}")
+        return 0
+
+    if args.from_file:
+        source = Path(args.from_file)
+        try:
+            html = source.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            print(f"读不到 {source}：{exc}", file=sys.stderr)
+            return 2
+        url = args.url
+    elif args.url:
+        url = args.url
+        try:
+            html = fixtures_mod.fetch_page(url)
+        except Exception as exc:  # noqa: BLE001 - 抓不到就如实报，不吞异常
+            print(f"抓取门户失败：{type(exc).__name__}: {exc}", file=sys.stderr)
+            return 2
+    else:
+        print("请给出 --url（未认证状态下抓取）或 --from-file（本地保存的 HTML）", file=sys.stderr)
+        return 2
+
+    clean = fixtures_mod.sanitize_html(html)
+    target = Path(args.out) if args.out else Path("_tmp") / "portal-report.html"
+    fixtures_mod.write_fixture(
+        fixtures_mod.Fixture(html=clean, url=url), target
+    )
+    print(f"已写出脱敏 fixture：{target}")
+    print("（已删除输入值、脚本正文、注释、URL 查询串、学号、手机号、内网地址与长令牌）")
+    info = fixtures_mod.replay(target)
+    print(f"识别结果：厂商={info['vendor']} 账号框={info['username_field'] or '（未识别）'}"
+          f" 密码框={info['password_field'] or '（未识别）'}"
+          f" 登录方式建议={info['suggested_login_mode']}"
+          f" 验证码={'有' if info['needs_captcha'] else '无'}")
+    print("这份文件可以直接贴到 issue / PR，用来补一条学校规则。")
+    return 0
+
+
 def cmd_menu(_: argparse.Namespace) -> int:
     """交互式主菜单：桌面快捷方式指向这里。"""
     stdout_ready()
@@ -688,6 +736,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_profiles.add_argument("--validate", action="store_true", help="逐条校验规则文件")
     p_profiles.set_defaults(func=cmd_profiles)
+
+    p_report = sub.add_parser(
+        "portal-report", help="导出门户 fixture（已脱敏）或离线回放"
+    )
+    p_report.add_argument("--url", default="", help="门户地址（未认证状态下抓取）")
+    p_report.add_argument(
+        "--from-file", default="", help="从本地保存的 HTML 生成 fixture（不联网）"
+    )
+    p_report.add_argument(
+        "--out", default="", help="输出路径（默认 _tmp/portal-report.html）"
+    )
+    p_report.add_argument("--replay", default="", help="回放已有 fixture，不抓取也不写文件")
+    p_report.set_defaults(func=cmd_portal_report)
 
     return parser
 

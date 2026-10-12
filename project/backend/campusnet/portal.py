@@ -275,6 +275,19 @@ def classify_response(body: str, status: int, final_url: str) -> LoginResult:
     text = html.unescape(body or "")
     low = text.lower()
 
+    # 先看规则层：命中的规则可以带 success_markers / failure_markers，
+    # 这样「新增一所学校」只要加一条数据，不必再改这里的判定顺序。
+    from . import profiles as profiles_mod
+
+    profile, _ = profiles_mod.identify(text, final_url)
+    if profile is not None:
+        for marker in profile.success_markers:
+            if marker.lower() in low:
+                return LoginResult("success", "门户返回成功", marker)
+        for marker in profile.failure_markers:
+            if marker.lower() in low:
+                return LoginResult("failed", "门户返回登录失败", marker)
+
     # result 必须带边界匹配。
     # 简单 `"result":1` in body 会把 result:10 / result:12 当成功——
     # guet-drcom 的注释明确提到这点，它的做法是要求 1 后面不是数字。
