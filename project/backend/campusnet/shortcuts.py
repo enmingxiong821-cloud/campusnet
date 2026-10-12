@@ -15,7 +15,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from .bootstart import platform_name, python_executable
+from .bootstart import launch_command_line, platform_name, python_executable
 from .paths import ROOT
 
 
@@ -111,9 +111,7 @@ def create_windows(shortcuts: tuple[Shortcut, ...], directory: Path) -> tuple[bo
         "New-Item -ItemType Directory -Force -Path $dir | Out-Null;",
     ]
     for item in shortcuts:
-        command = subprocess.list2cmdline(
-            [python, str(run_script()), *item.args]
-        )
+        command = launch_command_line(item.args)
         script.append(
             "$s = $W.CreateShortcut([IO.Path]::Combine($dir, "
             + _ps_quote(item.name + ".lnk")
@@ -140,7 +138,6 @@ def create_windows_elevated(
     shortcuts: tuple[Shortcut, ...], directory: Path
 ) -> tuple[bool, str]:
     """生成会自我提权的快捷方式（双击弹 UAC），用于必须管理员权限的动作。"""
-    python = str(python_executable())
     script = [
         "$ErrorActionPreference = 'Stop';",
         "$W = New-Object -ComObject WScript.Shell;",
@@ -148,7 +145,7 @@ def create_windows_elevated(
         "New-Item -ItemType Directory -Force -Path $dir | Out-Null;",
     ]
     for item in shortcuts:
-        command = subprocess.list2cmdline([python, str(run_script()), *item.args])
+        command = launch_command_line(item.args)
         inner = (
             "Start-Process -Verb RunAs -FilePath 'cmd.exe' -ArgumentList "
             + _ps_quote("/k " + command)

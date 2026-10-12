@@ -17,9 +17,9 @@ import sys
 import xml.sax.saxutils as saxutils
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
-from .paths import API_HOST, API_PORT, ROOT
+from .paths import API_HOST, API_PORT, ROOT, frozen_prefix
 
 TASK_NAME = "campusnet"
 LAUNCH_AGENT_LABEL = "com.campusnet.autostart"
@@ -111,6 +111,11 @@ def verify_launch() -> tuple[bool, str]:
     只做导入、不启动服务：路径写错、虚拟环境被删、依赖缺失这类
     「重启后才发现」的问题，都能在这里提前暴露。
     """
+    frozen = frozen_prefix()
+    if frozen is not None:
+        ok, message = _run_quiet([frozen[0], "--version"])
+        return (True, "") if ok else (False, message or "可执行文件无法运行")
+
     backend = ROOT / "project" / "backend"
     script = (
         "import sys;"
@@ -126,6 +131,9 @@ def verify_launch() -> tuple[bool, str]:
 
 def task_action(host: str = API_HOST, port: int = API_PORT) -> tuple[str, str]:
     """计划任务要执行的可执行文件与参数（分开给，PowerShell 需要两段）。"""
+    frozen = frozen_prefix()
+    if frozen is not None:
+        return frozen[0], subprocess.list2cmdline(launch_args(host, port))
     exe = str(python_executable())
     args = subprocess.list2cmdline([str(run_script()), *launch_args(host, port)])
     return exe, args
@@ -280,7 +288,20 @@ def launch_args(host: str = API_HOST, port: int = API_PORT) -> list[str]:
 
 
 def launch_command(host: str = API_HOST, port: int = API_PORT) -> list[str]:
+    frozen = frozen_prefix()
+    if frozen is not None:
+        # 冻结成单文件后没有 utils/run.py，让 exe 自己 serve。
+        return [*frozen, *launch_args(host, port)]
     return [str(python_executable()), str(run_script()), *launch_args(host, port)]
+
+
+def launch_command_line(args: Sequence[str]) -> str:
+    """把一段子命令拼成命令行（自启动脚本与桌面快捷方式共用）。"""
+    frozen = frozen_prefix()
+    prefix = (
+        frozen if frozen is not None else [str(python_executable()), str(run_script())]
+    )
+    return subprocess.list2cmdline([*prefix, *args])
 
 
 def log_path() -> Path:
@@ -345,14 +366,16 @@ def windows_launcher_text(host: str = API_HOST, port: int = API_PORT) -> str:
     cd 到仓库根再跑，和用户手动执行 utils\\start.bat 的行为保持一致；
     run.py 自己处理 sys.path，所以这里不需要再设 PYTHONPATH。
     """
-    python = python_executable()
+    command = " ".join(
+        f'"{item}"' if " " in item else item for item in launch_command(host, port)
+    )
     return (
         "@echo off\r\n"
         "chcp 65001 >nul\r\n"
         f'cd /d "{ROOT}"\r\n'
         "set PYTHONIOENCODING=utf-8\r\n"
         "set PYTHONUTF8=1\r\n"
-        f'start "" "{python}" "{run_script()}" {" ".join(launch_args(host, port))}'
+        f'start "" {command}'
         f' >> "{log_path()}" 2>&1\r\n'
     )
 

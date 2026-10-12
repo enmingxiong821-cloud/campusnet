@@ -12,9 +12,6 @@ import subprocess
 from dataclasses import dataclass
 from typing import Callable
 
-from .bootstart import python_executable
-from .paths import ROOT
-
 Ask = Callable[[str], str]
 Out = Callable[[str], None]
 
@@ -33,9 +30,9 @@ def _relaunch_elevated(args: list[str]) -> int:
     exe = shutil.which("powershell") or shutil.which("pwsh")
     if not exe:
         return 1
-    inner = subprocess.list2cmdline(
-        [str(python_executable()), str(ROOT / "utils" / "run.py"), *args]
-    )
+    from .bootstart import launch_command_line
+
+    inner = launch_command_line(args)
     quoted_inner = "'" + inner.replace("'", "''") + "'"
     script = (
         "Start-Process -Verb RunAs -FilePath 'cmd.exe' -ArgumentList "

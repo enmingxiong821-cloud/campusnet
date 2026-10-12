@@ -12,11 +12,43 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parents[3]
 
 
-ROOT = _repo_root()
-BACKEND_DIR = ROOT / "project" / "backend"
-FRONTEND_DIR = ROOT / "project" / "frontend"
-UTILS_DIR = ROOT / "utils"
-DOC_DIR = ROOT / "doc"
+def data_home(home: Path) -> Path:
+    """冻结运行时的数据目录（数据库、日志、密钥都落这里）。
+
+    开发时不需要它：仓库目录本身就是可写的。之所以单独一份逻辑，是因为
+    PyInstaller 单文件运行时资源在临时解包目录里——把数据库写在那儿，
+    每次运行都会丢配置。
+    """
+    override = os.environ.get("CAMPUSNET_HOME", "").strip()
+    if override:
+        return Path(override).expanduser()
+    if os.name == "nt":
+        base = os.environ.get("LOCALAPPDATA", "").strip()
+        return (Path(base) if base else home / "AppData" / "Local") / "campusnet"
+    if sys.platform == "darwin":
+        return home / "Library" / "Application Support" / "campusnet"
+    return home / ".local" / "share" / "campusnet"
+
+
+def resolve_roots(
+    *, frozen: bool, bundle: Path, source: Path, home: Path | None = None
+) -> tuple[Path, Path]:
+    """返回 (资源根, 数据根)，抽成纯函数便于直接测冻结模式。"""
+    if not frozen:
+        return source, source
+    return bundle, data_home(home or Path.home())
+
+
+IS_FROZEN = bool(getattr(sys, "frozen", False))
+RESOURCE_ROOT, ROOT = resolve_roots(
+    frozen=IS_FROZEN,
+    bundle=Path(getattr(sys, "_MEIPASS", _repo_root())),
+    source=_repo_root(),
+)
+BACKEND_DIR = RESOURCE_ROOT / "project" / "backend"
+FRONTEND_DIR = RESOURCE_ROOT / "project" / "frontend"
+UTILS_DIR = RESOURCE_ROOT / "utils"
+DOC_DIR = RESOURCE_ROOT / "doc"
 DATABASE_DIR = ROOT / "database"
 def db_path() -> Path:
     """解析数据库路径。
@@ -45,7 +77,8 @@ def instance_lock_path() -> Path:
 # 兼容旧引用：导入时的快照，仅供不便改动调用方时使用。
 # 新代码请调 db_path()，否则环境变量改不动。
 DB_PATH = db_path()
-SCHEMA_PATH = DATABASE_DIR / "schema.sql"
+# 建表脚本是只读资源：冻结后它在解包目录里，而数据库在数据目录里。
+SCHEMA_PATH = RESOURCE_ROOT / "database" / "schema.sql"
 
 # 后端 API 端口（2001-3000），前端静态端口（1001-2000）
 API_PORT = int(os.environ.get("CAMPUSNET_API_PORT", "2268"))
@@ -60,9 +93,15 @@ DEFAULT_USER_AGENT = (
 
 
 def ensure_dirs() -> None:
-    for path in (DOC_DIR, FRONTEND_DIR, BACKEND_DIR, DATABASE_DIR, UTILS_DIR):
+    # 只保证「要写的地方」存在：资源目录在冻结运行时是解包出来的，不该也不需要在里面建目录。
+    for path in (DATABASE_DIR, DATABASE_DIR / "logs"):
         path.mkdir(parents=True, exist_ok=True)
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+
+def frozen_prefix() -> list[str] | None:
+    """冻结运行时返回 [exe]；开发环境返回 None（调用方回落到解释器 + run.py）。"""
+    return [sys.executable] if IS_FROZEN else None
 
 
 def stdout_ready() -> None:

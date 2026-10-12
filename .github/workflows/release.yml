@@ -88,9 +88,42 @@ jobs:
             dist/*.zip.sha256
           retention-days: 30
 
+  build-exe:
+    name: 单文件 EXE（Windows）
+    needs: verify
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安装 PyInstaller
+        run: python -m pip install pyinstaller
+
+      - name: 构建单文件 exe
+        run: python -m PyInstaller packaging/campusnet.spec --noconfirm
+
+      - name: 冒烟验证（版本 + 自检）
+        env:
+          PYTHONIOENCODING: utf-8
+        run: |
+          dist\campusnet.exe --version
+          dist\campusnet.exe profiles --validate
+          dist\campusnet.exe doctor --no-probe
+
+      - name: 上传 exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: campusnet-exe
+          path: dist/campusnet.exe
+          retention-days: 30
+
   release:
     name: 创建 Release
-    needs: verify
+    needs: [verify, build-exe]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     steps:
@@ -101,14 +134,21 @@ jobs:
           name: campusnet-release
           path: dist
 
+      - uses: actions/download-artifact@v4
+        with:
+          name: campusnet-exe
+          path: dist/exe
+
       - name: 发布
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -e
           VERSION="${GITHUB_REF_NAME#v}"
+          mv dist/exe/campusnet.exe "dist/campusnet-${VERSION}-windows-x64.exe"
           gh release create "$GITHUB_REF_NAME" \
             "dist/campusnet-${VERSION}.zip" \
             "dist/campusnet-${VERSION}.zip.sha256" \
+            "dist/campusnet-${VERSION}-windows-x64.exe" \
             --title "校园网自连 v${VERSION}" \
             --generate-notes

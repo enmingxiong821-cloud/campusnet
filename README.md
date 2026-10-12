@@ -47,6 +47,19 @@
 
 ### 方式二：手动
 
+### 方式三：单文件 EXE（Windows，免装 Python）
+
+到 [Releases](https://github.com/enmingxiong821-cloud/campusnet/releases/latest) 下载
+`campusnet-<版本>-windows-x64.exe`，放进一个固定目录后直接运行。它是同一个程序的
+单文件打包：
+
+- **不需要装 Python**；数据库、日志、控制台令牌都落在 `%LOCALAPPDATA%\campusnet`
+  （不会写进临时解包目录，重启配置不丢）；
+- 用法与命令行版一致：`campusnet.exe setup` 生成桌面快捷方式、`campusnet.exe serve`
+  起服务、`campusnet.exe doctor` 自检；
+- 自己构建：`python -m pip install pyinstaller` 然后
+  `python -m PyInstaller packaging/campusnet.spec --noconfirm`。
+
 #### Windows
 
 ```

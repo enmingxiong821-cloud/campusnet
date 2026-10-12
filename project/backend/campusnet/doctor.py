@@ -50,18 +50,19 @@ def _environment_check() -> Check:
 
 
 def _root_check() -> Check:
-    """仓库目录要可写：数据库、日志、密钥默认都落在它下面。"""
+    """数据目录要可写：数据库、日志都落在它下面（冻结运行时是用户目录）。"""
+    label = "数据目录" if getattr(sys, "frozen", False) else "仓库目录"
     marker = ROOT / ".campusnet-doctor.tmp"
     try:
         marker.write_text("ok", encoding="utf-8")
     except OSError as exc:
-        return Check("仓库目录", FAIL, f"{ROOT} 不可写：{exc}")
+        return Check(label, FAIL, f"{ROOT} 不可写：{exc}")
     finally:
         try:
             marker.unlink()
         except OSError:
             pass
-    return Check("仓库目录", OK, str(ROOT))
+    return Check(label, OK, str(ROOT))
 
 
 def _storage_check() -> tuple[Check, Any | None]:
