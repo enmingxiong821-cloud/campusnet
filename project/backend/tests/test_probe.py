@@ -203,3 +203,48 @@ def test_detect_portal_from_redirect(server: str) -> None:
 
 def test_detect_portal_returns_none_when_not_portal(server: str) -> None:
     assert probe_mod.detect_portal_url(f"{server}/online") is None
+
+
+def test_probe_configured_splits_targets_and_stops_at_first_online(monkeypatch) -> None:  # noqa: ANN001
+    """多地址配置：按空白或逗号拆开，命中放行后不再打后面那个。"""
+    seen: list[str] = []
+
+    def fake_probe(url: str, timeout: float = 5.0, insecure: bool = False):
+        seen.append(url)
+        online = url.endswith("/ok")
+        return probe_mod.ProbeResult(
+            online, "online" if online else "unreachable", "", url
+        )
+
+    monkeypatch.setattr(probe_mod, "probe", fake_probe)
+    result = probe_mod.probe_configured("http://a/blocked, http://b/ok http://c/never")
+
+    assert result.online is True
+    assert seen == ["http://a/blocked", "http://b/ok"]
+
+
+def test_probe_configured_reports_last_failure(monkeypatch) -> None:  # noqa: ANN001
+    """全部被拦时，结论与详情应来自最后一个地址，方便看日志定位。"""
+
+    def fake_probe(url: str, timeout: float = 5.0, insecure: bool = False):
+        return probe_mod.ProbeResult(False, "unreachable", "blocked", url)
+
+    monkeypatch.setattr(probe_mod, "probe", fake_probe)
+    result = probe_mod.probe_configured("http://a/blocked http://b/blocked")
+
+    assert result.online is False
+    assert result.final_url == "http://b/blocked"
+
+
+def test_probe_configured_empty_falls_back_to_probe(monkeypatch) -> None:  # noqa: ANN001
+    """留空时交给 probe() 处理，由它回落到默认探活地址。"""
+    seen: list[str] = []
+
+    def fake_probe(url: str, timeout: float = 5.0, insecure: bool = False):
+        seen.append(url)
+        return probe_mod.ProbeResult(True, "online", "", url)
+
+    monkeypatch.setattr(probe_mod, "probe", fake_probe)
+
+    assert probe_mod.probe_configured("").online is True
+    assert seen == [""]

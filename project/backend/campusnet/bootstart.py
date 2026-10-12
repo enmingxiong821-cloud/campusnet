@@ -41,6 +41,9 @@ class BootStatus:
     path: Path | None
     detail: str
     success: bool = True
+    #: 这个载体在本机是否真的会拉起服务。装了但不会生效（没有桌面会话的 XDG、
+    #: 没开 systemd 的 WSL）必须和「已开启」区分开，否则用户重启后才发现没联网。
+    effective: bool = True
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -50,6 +53,7 @@ class BootStatus:
             "detail": self.detail,
             "platform": platform_name(),
             "success": self.success,
+            "effective": self.effective,
         }
 
 
@@ -68,6 +72,131 @@ def platform_name() -> str:
     if sys.platform == "darwin":
         return "darwin"
     return "linux" if sys.platform.startswith("linux") else sys.platform
+
+
+def is_wsl() -> bool:
+    """是否跑在 WSL 里。
+
+    WSL 的 os.name 是 posix、sys.platform 是 linux，但默认没有 systemd、
+    也没有桌面会话：XDG autostart 永远不会被执行，用户却会看到「已开启」。
+    WSL2 的 systemd 属于要手动开启的特性，所以这里必须显式识别。
+    """
+    if os.environ.get("WSL_DISTRO_NAME"):
+        return True
+    if sys.platform != "linux":
+        return False
+    try:
+        version = Path("/proc/version").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    return "microsoft" in version.lower()
+
+
+def has_desktop_session() -> bool:
+    """桌面会话线索：XDG autostart 只在桌面会话里被读取。"""
+    return any(
+        os.environ.get(name)
+        for name in (
+            "XDG_CURRENT_DESKTOP",
+            "DESKTOP_SESSION",
+            "DISPLAY",
+            "WAYLAND_DISPLAY",
+        )
+    )
+
+
+def verify_launch() -> tuple[bool, str]:
+    """干跑一次「解释器 + 导入 campusnet」，确认自启动真要拉起时不会当场失败。
+
+    只做导入、不启动服务：路径写错、虚拟环境被删、依赖缺失这类
+    「重启后才发现」的问题，都能在这里提前暴露。
+    """
+    backend = ROOT / "project" / "backend"
+    script = (
+        "import sys;"
+        f"sys.path.insert(0, {str(backend)!r});"
+        "import campusnet;"
+        "print(campusnet.__version__)"
+    )
+    ok, message = _run_quiet([str(python_executable()), "-c", script])
+    if ok:
+        return True, ""
+    return False, message or "解释器或模块导入失败"
+
+
+def task_action(host: str = API_HOST, port: int = API_PORT) -> tuple[str, str]:
+    """计划任务要执行的可执行文件与参数（分开给，PowerShell 需要两段）。"""
+    exe = str(python_executable())
+    args = subprocess.list2cmdline([str(run_script()), *launch_args(host, port)])
+    return exe, args
+
+
+def _ps_quote(text: str) -> str:
+    """PowerShell 单引号字符串的转义：内部单引号写成两个。"""
+    return "'" + str(text).replace("'", "''") + "'"
+
+
+def _run_with_input(args: list[str], text: str) -> tuple[bool, str]:
+    """跑一条命令并把 text 从 stdin 送进去（用于不把密码暴露在命令行）。"""
+    try:
+        proc = subprocess.run(
+            args, input=text, capture_output=True, text=True, timeout=30
+        )
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+    output = ((proc.stdout or "") + (proc.stderr or "")).strip()
+    return proc.returncode == 0, output
+
+
+def task_registered() -> bool:
+    """计划任务是否已注册。非 Windows 或没有 schtasks 时直接返回 False。"""
+    if platform_name() != "windows" or not shutil.which("schtasks"):
+        return False
+    ok, _ = _run_quiet(["schtasks", "/Query", "/TN", TASK_NAME])
+    return ok
+
+
+def register_task(host: str, port: int, password: str) -> tuple[bool, str]:
+    """注册「开机触发、无论是否登录都运行」的计划任务。
+
+    为什么要密码：Windows 只有两条路能让任务不经登录运行——把密码交给
+    任务计划程序保存（它存进 LSA），或者让机器自动登录（密码会落到注册表）。
+    这里选前者，并且密码只从 stdin 传给 PowerShell，不进命令行、不进环境变量。
+    """
+    if not password:
+        return False, "需要当前 Windows 账户的密码，才能注册「无需登录」的任务"
+    user = os.environ.get("USERNAME", "").strip()
+    domain = os.environ.get("USERDOMAIN", "").strip()
+    if not user:
+        return False, "读不到当前 Windows 用户名，无法注册计划任务"
+    account = f"{domain}\\{user}" if domain else user
+    powershell = shutil.which("powershell") or shutil.which("pwsh")
+    if not powershell:
+        return False, "找不到 powershell，无法注册计划任务"
+
+    exe, args = task_action(host, port)
+    script = (
+        "$ErrorActionPreference = 'Stop';"
+        "$plain = [Console]::In.ReadLine();"
+        "$sec = ConvertTo-SecureString $plain -AsPlainText -Force;"
+        f"$act = New-ScheduledTaskAction -Execute {_ps_quote(exe)}"
+        f" -Argument {_ps_quote(args)};"
+        "$trg = New-ScheduledTaskTrigger -AtStartup;"
+        "$set = New-ScheduledTaskSettingsSet -StartWhenAvailable"
+        " -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)"
+        " -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries;"
+        f"Register-ScheduledTask -TaskName {_ps_quote(TASK_NAME)} -Action $act"
+        f" -Trigger $trg -Settings $set -UserId {_ps_quote(account)}"
+        " -Password $sec -Force | Out-Null;"
+    )
+    return _run_with_input(
+        [powershell, "-NoProfile", "-NonInteractive", "-Command", "-"],
+        password + "\n" + script,
+    )
+
+
+def delete_task() -> tuple[bool, str]:
+    return _run_quiet(["schtasks", "/Delete", "/TN", TASK_NAME, "/F"])
 
 
 def python_executable() -> Path:
@@ -321,8 +450,18 @@ def _run_quiet(args: list[str]) -> tuple[bool, str]:
     return proc.returncode == 0, (out + err).strip()
 
 
-def install(host: str = API_HOST, port: int = API_PORT) -> BootStatus:
-    """注册开机自启动。已存在则覆盖，不报错。"""
+def install(
+    host: str = API_HOST,
+    port: int = API_PORT,
+    mode: str = "auto",
+    password: str = "",
+) -> BootStatus:
+    """注册开机自启动。已存在则覆盖，不报错。
+
+    mode="auto" 用各平台的默认载体（Windows 是启动文件夹，属「登录后」语义）；
+    mode="task" 在 Windows 上注册计划任务，做到「开机即运行、无需登录」，
+    代价是要把当前账户密码交给任务计划程序保存一次。
+    """
     name = platform_name()
     if name not in ("windows", "linux", "darwin"):
         return BootStatus(False, False, None, f"不支持的平台：{name}", False)
@@ -331,13 +470,37 @@ def install(host: str = API_HOST, port: int = API_PORT) -> BootStatus:
         launch_args(host, port)
     except ValueError as exc:
         return BootStatus(True, False, path, f"启动参数无效：{exc}", False)
+    ok, message = verify_launch()
+    if not ok:
+        # 装了也起不来：宁可现在报失败，也别让用户重启后才发现没连上。
+        return BootStatus(True, False, path, f"启动自检失败：{message}", False)
+    if mode == "task":
+        if name != "windows":
+            return BootStatus(
+                True,
+                False,
+                None,
+                "计划任务模式目前只支持 Windows，其它平台请用默认载体",
+                False,
+            )
+        ok, message = register_task(host, port, password)
+        if not ok:
+            return BootStatus(True, False, None, f"注册计划任务失败：{message}", False)
+        return BootStatus(
+            True,
+            True,
+            None,
+            "已注册计划任务（开机触发，无需登录即运行）",
+            True,
+            effective=True,
+        )
+    systemctl = shutil.which("systemctl") if name == "linux" else None
     try:
         if name == "windows":
             _write_entry(path, windows_launcher_text(host, port))
         elif name == "darwin":
             _write_entry(path, macos_plist_text(host, port))
         else:
-            systemctl = shutil.which("systemctl")
             if systemctl:
                 _write_entry(path, systemd_unit_text(host, port))
                 ok, message = _run_quiet([systemctl, "--user", "daemon-reload"])
@@ -350,12 +513,35 @@ def install(host: str = API_HOST, port: int = API_PORT) -> BootStatus:
                     return BootStatus(
                         True, False, path, f"单元已写入但 enable 失败：{message}", False
                     )
+            elif is_wsl():
+                # WSL 没有桌面会话，XDG autostart 不会被读取：写了等于没写。
+                return BootStatus(
+                    True,
+                    False,
+                    _linux_desktop_path(),
+                    "WSL 环境既没有 systemd 也没有桌面会话，自启动项不会被执行；"
+                    "如确需自启，请先开启 WSL 的 systemd，再用 systemd --user + linger",
+                    False,
+                )
             else:
                 path = _linux_desktop_path()
                 _write_entry(path, xdg_desktop_text(host, port))
     except OSError as exc:
         return BootStatus(True, False, path, f"写入失败：{type(exc).__name__}: {exc}", False)
-    return BootStatus(True, True, path, "已注册开机自启动")
+    effective, note = True, ""
+    if name == "linux":
+        if systemctl:
+            if is_wsl():
+                note = "（WSL 的 systemd 需手动开启，且要 linger 才能无人登录启动）"
+        else:
+            effective = has_desktop_session()
+            if not effective:
+                note = "（当前没有桌面会话，XDG autostart 不会被读取）"
+    elif name == "windows":
+        note = "（登录后启动；要「有电就连接、无需登录」，用 --mode task 注册计划任务）"
+    return BootStatus(
+        True, True, path, f"已注册开机自启动{note}", True, effective=effective
+    )
 
 
 def uninstall() -> BootStatus:
@@ -363,6 +549,12 @@ def uninstall() -> BootStatus:
     name = platform_name()
     if name not in ("windows", "linux", "darwin"):
         return BootStatus(False, False, None, f"不支持的平台：{name}", False)
+    task_removed = False
+    if name == "windows" and task_registered():
+        ok, message = delete_task()
+        if not ok:
+            return BootStatus(True, True, None, f"删除计划任务失败：{message}", False)
+        task_removed = True
     paths = [entry_path()]
     if name == "linux":
         # 两种载体都清掉：用户可能先用 systemd 装、后来环境没了退到 desktop，
@@ -396,6 +588,8 @@ def uninstall() -> BootStatus:
 
     if removed:
         return BootStatus(True, False, removed[0], "已移除开机自启动")
+    if task_removed:
+        return BootStatus(True, False, None, "已移除开机自启动的计划任务")
     return BootStatus(True, False, None, "未安装开机自启动")
 
 
@@ -404,33 +598,67 @@ def status() -> BootStatus:
     name = platform_name()
     if name not in ("windows", "linux", "darwin"):
         return BootStatus(False, False, None, f"不支持的平台：{name}")
+    if name == "windows" and task_registered():
+        return BootStatus(
+            True,
+            True,
+            None,
+            f"已注册计划任务「{TASK_NAME}」（开机触发，无需登录）",
+            True,
+            effective=True,
+        )
     if name == "linux":
         desktop = _linux_desktop_path()
         if desktop.exists():
-            return BootStatus(True, True, desktop, "已注册 XDG 登录自启动")
+            effective = has_desktop_session()
+            detail = (
+                "已注册 XDG 登录自启动"
+                if effective
+                else "已写入 XDG autostart，但当前环境没有桌面会话，登录时不会被执行"
+            )
+            return BootStatus(True, True, desktop, detail, True, effective=effective)
         unit = _linux_unit_path()
         if unit.exists():
             systemctl = shutil.which("systemctl")
             if not systemctl:
-                return BootStatus(True, False, unit, "单元存在，但无法确认启用状态：未找到 systemctl")
+                return BootStatus(
+                    True,
+                    False,
+                    unit,
+                    "单元存在，但无法确认启用状态：未找到 systemctl",
+                    True,
+                    effective=False,
+                )
             ok, message = _run_quiet([systemctl, "--user", "is-enabled", SYSTEMD_UNIT])
             enabled = ok and message.strip() == "enabled"
-            return BootStatus(True, enabled, unit, "已启用 systemd 登录自启动" if enabled else f"单元未确认启用：{message}")
-        return BootStatus(True, False, _linux_unit_path(), "未安装开机自启动")
+            detail = "已启用 systemd 登录自启动" if enabled else f"单元未确认启用：{message}"
+            return BootStatus(True, enabled, unit, detail, True, effective=enabled)
+        hint = "未安装开机自启动"
+        if is_wsl() and not shutil.which("systemctl"):
+            hint = (
+                "未安装；且当前是 WSL 环境（没有 systemd 与桌面会话），"
+                "装 XDG autostart 也不会被执行"
+            )
+        return BootStatus(True, False, _linux_unit_path(), hint, True, effective=False)
     path = entry_path()
     if path.exists():
         return BootStatus(True, True, path, "已注册开机自启动")
-    return BootStatus(True, False, path, "未安装开机自启动")
+    return BootStatus(True, False, path, "未安装开机自启动", True, effective=False)
 
 
 def activate(status_result: BootStatus) -> str:
     """把结果翻成一句给用户看的话，避免调用方各写一遍。"""
+    suffix = f"（{status_result.path}）" if status_result.path else ""
     if not status_result.success:
-        return f"开机自启动操作失败：{status_result.detail}（{status_result.path}）"
+        return f"开机自启动操作失败：{status_result.detail}{suffix}"
     if not status_result.supported:
         return f"当前系统不支持自动配置开机自启动：{status_result.detail}"
     if status_result.installed:
-        return f"开机自启动已开启（{status_result.path}）"
+        if not status_result.effective:
+            return (
+                f"开机自启动已写入，但在本机不会生效：{status_result.detail}{suffix}"
+            )
+        return f"开机自启动已开启{suffix}"
     if status_result.path:
-        return f"开机自启动未开启：{status_result.detail}（{status_result.path}）"
+        return f"开机自启动未开启：{status_result.detail}{suffix}"
     return f"开机自启动未开启：{status_result.detail}"

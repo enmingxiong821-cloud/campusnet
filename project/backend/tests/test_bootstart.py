@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -260,6 +261,8 @@ def test_linux_reload_failure_stops_enable(fake_home, monkeypatch):
         calls.append(args)
         return False, "reload failed"
     monkeypatch.setattr(boot_mod, "_run_quiet", run)
+    # 启动自检同样走 _run_quiet，这里只关心 daemon-reload 失败时的行为
+    monkeypatch.setattr(boot_mod, "verify_launch", lambda: (True, ""))
     assert not boot_mod.install().installed
     assert len(calls) == 1
     assert calls[0][-1] == "daemon-reload"
@@ -374,3 +377,206 @@ def test_cli_bootstart_install_returns_one_on_failure(
     monkeypatch.setattr(boot_mod.shutil, "which", lambda _name: "/usr/bin/systemctl")
     monkeypatch.setattr(boot_mod, "_run_quiet", lambda args, timeout=20: (False, "no"))
     assert cli_mod.main(["bootstart", "install"]) == 1
+
+
+# ---------- 载体生效判定与 WSL ----------
+
+
+def _clear_desktop_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in ("XDG_CURRENT_DESKTOP", "DESKTOP_SESSION", "DISPLAY", "WAYLAND_DISPLAY"):
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_is_wsl_detects_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("WSL_DISTRO_NAME", "Ubuntu")
+    assert boot_mod.is_wsl() is True
+
+    monkeypatch.delenv("WSL_DISTRO_NAME", raising=False)
+    if sys.platform != "linux":
+        # 非 Linux 平台没有 /proc/version，不可能是 WSL
+        assert boot_mod.is_wsl() is False
+
+
+def test_install_refuses_on_wsl_without_systemd(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """WSL 没有 systemd 也没有桌面会话，写 XDG autostart 等于没写。"""
+    _force(monkeypatch, "linux")
+    monkeypatch.setattr(boot_mod.shutil, "which", lambda _name: None)
+    monkeypatch.setenv("WSL_DISTRO_NAME", "Ubuntu")
+    monkeypatch.setattr(boot_mod, "verify_launch", lambda: (True, ""))
+
+    result = boot_mod.install(port=2268)
+
+    assert result.installed is False
+    assert result.success is False
+    assert "WSL" in result.detail
+    assert not boot_mod._linux_desktop_path().exists()
+
+
+def test_install_fails_when_launch_verify_fails(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """启动自检失败就别写启动项：否则用户重启后才发现它起不来。"""
+    _force(monkeypatch, "windows")
+    monkeypatch.setattr(
+        boot_mod, "verify_launch", lambda: (False, "ModuleNotFoundError: campusnet")
+    )
+
+    result = boot_mod.install(port=2268)
+
+    assert result.installed is False
+    assert "启动自检失败" in result.detail
+    assert not boot_mod.entry_path().exists()
+
+
+def test_verify_launch_passes_on_real_interpreter() -> None:
+    """真的干跑一次导入：本仓库路径正确时必须通过。"""
+    ok, message = boot_mod.verify_launch()
+
+    assert ok is True, message
+
+
+def test_status_reports_ineffective_desktop_entry(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """有 XDG 文件但没有桌面会话，必须如实说「不会生效」。"""
+    _force(monkeypatch, "linux")
+    monkeypatch.setattr(boot_mod.shutil, "which", lambda _name: None)
+    _clear_desktop_env(monkeypatch)
+    desktop = boot_mod._linux_desktop_path()
+    desktop.parent.mkdir(parents=True, exist_ok=True)
+    desktop.write_text("[Desktop Entry]\n", encoding="utf-8")
+
+    result = boot_mod.status()
+
+    assert result.installed is True
+    assert result.effective is False
+    assert "不会被执行" in result.detail
+    assert "不会生效" in boot_mod.activate(result)
+
+
+def test_status_marks_wsl_without_systemd_as_not_installed(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _force(monkeypatch, "linux")
+    monkeypatch.setattr(boot_mod.shutil, "which", lambda _name: None)
+    monkeypatch.setenv("WSL_DISTRO_NAME", "Ubuntu")
+
+    result = boot_mod.status()
+
+    assert result.installed is False
+    assert result.effective is False
+    assert "WSL" in result.detail
+
+
+def test_as_dict_carries_effective() -> None:
+    payload = boot_mod.BootStatus(True, True, Path("/tmp/x"), "ok", True, effective=False).as_dict()
+
+    assert payload["effective"] is False
+    assert payload["installed"] is True
+
+
+# ---------- Windows 计划任务模式（开机触发、无需登录） ----------
+
+
+def test_task_action_keeps_exe_and_args_separate(monkeypatch: pytest.MonkeyPatch) -> None:
+    _force(monkeypatch, "windows")
+
+    exe, args = boot_mod.task_action(host="127.0.0.1", port=2268)
+
+    assert exe.endswith(".exe")
+    assert "serve" in args
+    assert "--port 2268" in args
+
+
+def test_task_install_registers_and_reports_success(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _force(monkeypatch, "windows")
+    monkeypatch.setattr(boot_mod, "verify_launch", lambda: (True, ""))
+    seen: list[tuple] = []
+    monkeypatch.setattr(
+        boot_mod,
+        "register_task",
+        lambda host, port, password: (seen.append((host, port, password)) or (True, "")),
+    )
+
+    result = boot_mod.install(port=2268, mode="task", password="secret")
+
+    assert result.installed and result.success and result.effective
+    assert seen == [("127.0.0.1", 2268, "secret")]
+    assert "无需登录" in result.detail
+    # 计划任务没有文件路径，提示里不该出现 None
+    assert "None" not in boot_mod.activate(result)
+
+
+def test_task_install_fails_without_password(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _force(monkeypatch, "windows")
+    monkeypatch.setattr(boot_mod, "verify_launch", lambda: (True, ""))
+
+    result = boot_mod.install(port=2268, mode="task", password="")
+
+    assert result.installed is False
+    assert "密码" in result.detail
+
+
+def test_task_mode_is_windows_only(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _force(monkeypatch, "linux")
+    monkeypatch.setattr(boot_mod, "verify_launch", lambda: (True, ""))
+
+    result = boot_mod.install(port=2268, mode="task", password="x")
+
+    assert result.installed is False
+    assert "Windows" in result.detail
+
+
+def test_status_prefers_registered_task(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _force(monkeypatch, "windows")
+    monkeypatch.setattr(boot_mod, "task_registered", lambda: True)
+
+    result = boot_mod.status()
+
+    assert result.installed is True
+    assert result.effective is True
+    assert "计划任务" in result.detail
+    assert "None" not in boot_mod.activate(result)
+
+
+def test_uninstall_removes_registered_task(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _force(monkeypatch, "windows")
+    deleted: list[bool] = []
+    monkeypatch.setattr(boot_mod, "task_registered", lambda: True)
+    monkeypatch.setattr(
+        boot_mod, "delete_task", lambda: (deleted.append(True) or (True, ""))
+    )
+
+    result = boot_mod.uninstall()
+
+    assert deleted == [True]
+    assert result.success is True
+    assert result.installed is False
+    assert "计划任务" in result.detail
+
+
+def test_cli_bootstart_task_install_asks_password(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _force(monkeypatch, "windows")
+    monkeypatch.setattr(boot_mod, "verify_launch", lambda: (True, ""))
+    monkeypatch.setattr(
+        boot_mod, "register_task", lambda host, port, password: (True, "")
+    )
+    import getpass
+
+    monkeypatch.setattr(getpass, "getpass", lambda prompt="": "secret")
+
+    assert cli_mod.main(["bootstart", "install", "--mode", "task", "--port", "2268"]) == 0

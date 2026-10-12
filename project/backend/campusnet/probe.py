@@ -187,14 +187,38 @@ def is_portal_url(url: str) -> bool:
     return any(token in lowered for token in ("login", "eportal", "portal", "auth", "logon", "drcom"))
 
 
-def probe_any(urls: tuple[str, ...] = DEFAULT_PROBES, timeout: float = 5.0) -> ProbeResult:
+def probe_any(
+    urls: tuple[str, ...] = DEFAULT_PROBES,
+    timeout: float = 5.0,
+    insecure: bool = False,
+) -> ProbeResult:
     """依次尝试多个探测地址，任一放行即视为在线。"""
     last = ProbeResult(False, "no_probe", "没有可用探测地址")
     for candidate in urls:
-        last = probe(candidate, timeout=timeout)
+        last = probe(candidate, timeout=timeout, insecure=insecure)
         if last.online:
             return last
     return last
+
+
+def probe_configured(
+    raw: str, timeout: float = 5.0, insecure: bool = False
+) -> ProbeResult:
+    """按账号配置的探测地址探活；配置里可以写多个，任一放行即算在线。
+
+    单地址与 probe() 逐字节等价，是历史默认行为；多地址是刻意的加固：
+    canary 在校园网里常被 CDN 拦、被限速或被 DNS 劫持成不明确的结果，
+    只挂一个地址会把「其实在线」判成「未放行」，进而产出大量
+    「在线未确认」，并放大日志与请求量。
+
+    分隔符用空格、逗号或换行都行，例如：
+        http://www.msftconnecttest.com/connecttest.txt, http://captive.apple.com/hotspot-detect.html
+    """
+    targets = [item for item in (raw or "").replace(",", " ").split() if item]
+    if not targets:
+        # 留空时沿用默认 canary，与 probe() 的行为保持一致。
+        return probe(raw, timeout=timeout, insecure=insecure)
+    return probe_any(tuple(targets), timeout=timeout, insecure=insecure)
 
 
 def detect_portal_url(start_url: str, timeout: float = 5.0) -> str | None:
