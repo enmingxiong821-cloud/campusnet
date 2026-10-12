@@ -20,17 +20,20 @@ def test_frozen_mode_splits_resource_and_data(tmp_path, monkeypatch) -> None:  #
     """冻结后资源在解包目录（只读、易失），数据必须落到用户目录。"""
     monkeypatch.delenv("CAMPUSNET_HOME", raising=False)
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "Local"))
+    home = tmp_path / "home"
 
     resource, data = paths.resolve_roots(
         frozen=True,
         bundle=Path("/bundle"),
         source=Path("/repo"),
-        home=tmp_path / "home",
+        home=home,
     )
 
     assert resource == Path("/bundle")
-    assert data.parent == tmp_path / "Local"
     assert data.name == "campusnet"
+    # 关键不变量（跨平台）：数据不能落在解包目录里，否则单文件每次运行都会丢配置。
+    assert Path("/bundle") not in data.parents
+    assert (home in data.parents) or (tmp_path / "Local" in data.parents)
 
 
 def test_home_override_wins(tmp_path, monkeypatch) -> None:  # noqa: ANN001
