@@ -29,7 +29,12 @@ const DEFAULTS = {
   enabled: false,
   intervalMinutes: 1,
   maxEvents: 200,
+  // 跑着 Python 版服务时优先把检测交给它（自动探测可用性，不可用就静默回落）
+  useLocalService: true,
 };
+
+/** 本地服务地址；扩展自己那套 fetch 登录只是「没装 Python」时的简化替代。 */
+const LOCAL_SERVICE_URL = 'http://127.0.0.1:2268';
 
 /** fields 里这两个键是「字段名说明」，不是要提交给门户的表单参数 */
 const META_FIELD_KEYS = new Set(['usernameField', 'passwordField']);
@@ -194,6 +199,45 @@ async function logEvent(level, stage, message, accountId = null) {
 
 /* ------------------------------------------------------------------ 主循环 */
 
+/**
+ * 本地服务是否可用；可用就把这一轮交给它。
+ *
+ * 校园网里的 GBK 页面、SRUN 的 challenge/xxtea、CAS 单点登录，扩展自己那套
+ * fetch 登录都处理不了，而 Python 侧这些坑全踩过。这里只做「能连上就用」的
+ * 探测：连不上（没装、端口不同、需要令牌）就返回 null，静默回落到扩展实现。
+ */
+async function checkViaLocalService(timeoutMs = 2000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const health = await fetch(`${LOCAL_SERVICE_URL}/api/health`, {
+      signal: controller.signal,
+      cache: 'no-store',
+    });
+    if (!health.ok) return null;
+    const info = await health.json();
+    if (!info || info.ok !== true) return null;
+  } catch (e) {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+  try {
+    const resp = await fetch(`${LOCAL_SERVICE_URL}/api/check`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+      cache: 'no-store',
+    });
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    return data && Array.isArray(data.results) ? data : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+
 async function checkOnce() {
   const settings = await load();
   if (!settings.enabled || state.checking) {
@@ -226,6 +270,27 @@ async function checkOnce() {
     if (!settings.portalUrl) {
       await logEvent('warning', 'login', '未配置门户地址，跳过自动登录');
       return { online: false, probe, reason: 'no_portal' };
+    }
+
+    // 跑着 Python 版就优先交给它：认证逻辑与这些年踩过的坑都在那边。
+    if (settings.useLocalService !== false) {
+      const served = await checkViaLocalService();
+      if (served) {
+        const results = served.results;
+        const allOnline = results.length > 0 && results.every(item => item.online);
+        const summary = results.map(item => item.message).filter(Boolean).join('；')
+          || '本地服务已处理这一轮检测';
+        state.online = allOnline;
+        state.lastMessage = summary;
+        setBadge(allOnline ? 'online' : 'offline');
+        await logEvent(
+          allOnline ? 'info' : 'warning',
+          'service',
+          `交给本地服务：${summary}`,
+        );
+        await saveState();
+        return { online: allOnline, via: 'local-service', results };
+      }
     }
 
     let result;

@@ -603,6 +603,67 @@ function probeWith(fetchImpl) {
       });
     }
 
+    console.log('\n[优先使用本地服务]');
+
+    // 本地服务可用：掉线时把这一轮交给它，而不是走扩展自己的 fetch 登录
+    {
+      const storage = { data: { enabled: true, portalUrl: 'http://portal/login' } };
+      const calls = [];
+      const { api } = loadBackground(storage, async (url) => {
+        calls.push(url);
+        if (url.endsWith('/api/health')) {
+          return { ok: true, status: 200, json: async () => ({ ok: true, version: '1.4.0' }) };
+        }
+        if (url.endsWith('/api/check')) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              ok: true,
+              results: [{ online: true, state: 'online', message: '网络已放行' }],
+            }),
+          };
+        }
+        return { status: 302, headers: { get: () => 'http://portal/login' } };
+      });
+      const result = await api.checkOnce();
+      check('本地服务可用时交给它处理', () => {
+        eq(result.via, 'local-service');
+        eq(result.online, true);
+        truthy(calls.some(u => u.endsWith('/api/check')), '调用了 /api/check');
+        eq(storage.data.__state.online, true);
+      });
+    }
+
+    // 本地服务不可用（没装 / 端口不同 / 需要令牌）：静默回落，不能报错
+    {
+      const storage = {
+        data: {
+          enabled: true,
+          portalUrl: 'http://portal/login',
+          username: 'u',
+          password: 'p',
+          probeUrls: ['http://probe.test/x'],
+        },
+      };
+      let posted = 0;
+      const { api } = loadBackground(storage, async (url) => {
+        if (url.includes('127.0.0.1:2268')) throw new Error('Failed to fetch');
+        if (url === 'http://portal/login') {
+          posted += 1;
+          return { ok: true, status: 200, text: async () => '{"result":1}' };
+        }
+        if (url === 'http://probe.test/x') {
+          return { status: 302, headers: { get: () => 'http://portal/login' } };
+        }
+        return { ok: true, status: 200 };
+      });
+      await api.checkOnce();
+      check('本地服务不可用时回落到扩展自己的登录', () => {
+        eq(posted, 1, '扩展自己发起了登录');
+      });
+    }
+
     console.log(`\n=== 结果：${passed} 通过，${failures.length} 失败 ===\n`);
     if (failures.length) {
       for (const f of failures) console.log(`  - ${f.name}: ${f.message}`);

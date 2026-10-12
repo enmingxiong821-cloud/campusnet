@@ -363,6 +363,11 @@ Chrome / Edge：
 4. 选目录 `project/frontend/extension`
 5. 点图标 → 「设置」，填入门户地址与账号
 
+> 插件自带的登录是**简化实现**：只支持纯 fetch 表单登录，处理不了 GBK 页面、
+> SRUN 的 challenge/xxtea、CAS 单点登录。如果你本机跑着 Python 版服务，插件会
+> 自动把检测交给它（探测 `http://127.0.0.1:2268/api/health`，连不上就静默回落
+> 到自己那套）。想要完整的门户适配，请用 Python 版。
+
 按需安装浏览器登录依赖（仅 `browser` 模式需要）：
 
 ```
