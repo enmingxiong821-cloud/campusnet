@@ -70,6 +70,7 @@ def test_parser_exposes_all_commands() -> None:
         "menu",
         "profiles",
         "portal-report",
+        "openapi",
     }
 
 

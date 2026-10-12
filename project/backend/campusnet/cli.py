@@ -463,6 +463,28 @@ def cmd_setup(args: argparse.Namespace) -> int:
     return 0 if report.ok else 1
 
 
+def cmd_openapi(args: argparse.Namespace) -> int:
+    """打印（或写出）控制台 API 的 OpenAPI 契约。"""
+    stdout_ready()
+    import json
+    from pathlib import Path
+
+    from . import openapi as openapi_mod
+    from . import server as server_mod
+    from .monitor import MonitorManager
+
+    store = Store()
+    handler = server_mod.build_handler(store, MonitorManager())
+    spec = openapi_mod.build(handler.routes.keys())
+    text = json.dumps(spec, ensure_ascii=False, indent=2, sort_keys=True)
+    if args.out:
+        Path(args.out).write_text(text + "\n", encoding="utf-8")
+        print(f"已写出契约：{args.out}（{len(spec['paths'])} 条路径）")
+        return 0
+    print(text)
+    return 0
+
+
 def cmd_profiles(args: argparse.Namespace) -> int:
     """查看 / 校验门户适配规则（新增一所学校 = 加一条数据）。"""
     stdout_ready()
@@ -736,6 +758,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_profiles.add_argument("--validate", action="store_true", help="逐条校验规则文件")
     p_profiles.set_defaults(func=cmd_profiles)
+
+    p_openapi = sub.add_parser("openapi", help="输出控制台 API 的 OpenAPI 契约")
+    p_openapi.add_argument("--out", default="", help="写到文件（默认打印到终端）")
+    p_openapi.set_defaults(func=cmd_openapi)
 
     p_report = sub.add_parser(
         "portal-report", help="导出门户 fixture（已脱敏）或离线回放"

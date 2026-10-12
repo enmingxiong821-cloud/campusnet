@@ -115,6 +115,33 @@ def test_healthz(api: _Api) -> None:
     assert status == 200 and data["ok"] is True
 
 
+def test_versioned_path_is_an_alias(api: _Api) -> None:
+    """版本化别名：/api/v1/health 与 /api/health 是同一件事。"""
+    plain = call(f"{api}/api/health")[1]
+
+    status, data = call(f"{api}/api/v1/health")
+
+    assert status == 200
+    assert data["ok"] is True
+    assert data["accounts"] == plain["accounts"]
+
+
+def test_versioned_write_path_works(api: _Api) -> None:
+    status, data = call(
+        f"{api}/api/v1/accounts",
+        "POST",
+        {
+            "name": "v1 路径",
+            "portal_url": "http://10.0.0.1/eportal/portal/login",
+            "username": "u",
+            "password": "p",
+        },
+    )
+
+    assert status == 201
+    assert data["id"] > 0
+
+
 @pytest.mark.parametrize("action", ["install", "uninstall"])
 def test_bootstart_failure_is_http_error(api, monkeypatch, action):
     result = server_mod.bootstart.BootStatus(

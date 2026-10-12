@@ -764,6 +764,10 @@ def _install_dispatch(handler: type[ApiHandler]) -> None:
             return
         parsed = urllib.parse.urlsplit(self.path)
         path = parsed.path.rstrip("/") or "/"
+        if path.startswith("/api/v1/"):
+            # 版本化别名：/api/v1/accounts → /api/accounts。
+            # 老前端与扩展继续用不带版本的路径，互不影响。
+            path = "/api/" + path[len("/api/v1/") :]
         query = urllib.parse.parse_qs(parsed.query)
         fn, params = _match_route(handler, method, path)
         if fn is None:

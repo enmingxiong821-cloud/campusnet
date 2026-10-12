@@ -10,6 +10,8 @@
 - 支持 GB2312 / GBK 中文门户（不会解成乱码）
 - 登录过程逐阶段实时反馈，不是干等十几秒的黑盒
 
+![控制台概览](doc/images/console-dashboard.png)
+
 ---
 
 ## 目录
@@ -432,6 +434,8 @@ Windows 上密码原本走 DPAPI（绑当前用户 + 这台机器），所以**�
 
 **怎么用手机 / 平板远程开关机**
 
+![设置页：电源控制](doc/images/console-settings.png)
+
 「关」这半由程序负责：控制台「设置」页有**远程关机 / 远程重启**两个按钮，
 手机浏览器打开控制台就能点（需先把控制台暴露给手机——同一 Wi-Fi 下用
 `python utils/run.py serve --host 0.0.0.0` 并带上令牌，或两台设备都装 Tailscale）。
@@ -549,6 +553,18 @@ project/frontend/
 | `CAMPUSNET_DB` | `database/campusnet.db` | 数据库路径 |
 | `CAMPUSNET_OBF_KEY` | 自动生成 | 密码混淆密钥 |
 | `PYTHONIOENCODING` | — | Linux 下建议设为 `utf-8` |
+
+### 控制台 API
+
+网页控制台、命令行与浏览器扩展都走同一套 HTTP 接口。接口有**版本化路径**
+`/api/v1/...`（不带 v1 的旧路径仍然可用，老客户端不受影响）：
+
+```
+python utils/run.py openapi --out docs/openapi.json   # 输出 OpenAPI 3.1 契约
+```
+
+契约由真实路由表生成，并有测试锁住两边一致——加了路由却忘了更新契约、或者契约里
+写了不存在的路径，都会直接报红。要写移动端或第三方客户端时，照这份契约即可。
 
 ---
 
