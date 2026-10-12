@@ -137,6 +137,10 @@ class Monitor:
         # 手动「立即检测」走的是同一条路径，但监控线程通常没在跑，
         # 若不分开会话，用户点一次检测就被自己的 stop 打断成假失败。
         self.running_loop = False
+        # 通知出口：未配置 webhook 时 observe() 立刻返回，等于零开销。
+        from .notify import Notifier
+
+        self.notifier = Notifier.from_store(store)
 
     # ---------- 实时进度 ----------
     def emit_progress(self, account: Account, stage: str, message: str) -> None:
@@ -164,7 +168,9 @@ class Monitor:
             except Exception:  # noqa: BLE001 - 订阅者异常不能影响检测
                 pass
 
-    def progress_since(self, seq: int = 0, account_id: int | None = None) -> dict[str, Any]:
+    def progress_since(
+        self, seq: int = 0, account_id: int | None = None
+    ) -> dict[str, Any]:
         with self._progress_lock:
             items = [p for p in self._progress if p.seq > seq]
             if account_id is not None:
@@ -191,7 +197,9 @@ class Monitor:
         if self._thread and self._thread.is_alive():
             return False
         self._stop.clear()
-        self._thread = threading.Thread(target=self._loop, name="campusnet-monitor", daemon=True)
+        self._thread = threading.Thread(
+            target=self._loop, name="campusnet-monitor", daemon=True
+        )
         self._thread.start()
         return True
 
@@ -200,7 +208,8 @@ class Monitor:
         if self._thread:
             self._thread.join(timeout=timeout)
             alive = self._thread.is_alive()
-            self._thread = None
+            if not alive:
+                self._thread = None
             return not alive
         return True
 
@@ -239,9 +248,18 @@ class Monitor:
                     # 「一轮成功即转常规」这个核心承诺整个落空。
                     # 已有门户会话但连通未确认时不重复认证，按常规间隔复核，
                     # 避免密集空转；这不代表 online=True，CLI 仍返回失败码。
-                    ok = all(r.get("online") or r.get("state") == STATE_UNKNOWN for r in results) if results else False
+                    ok = (
+                        all(
+                            r.get("online") or r.get("state") == STATE_UNKNOWN
+                            for r in results
+                        )
+                        if results
+                        else False
+                    )
                 except Exception as exc:  # noqa: BLE001 - 循环线程不能因单次异常退出
-                    self.store.add_event(f"监控循环异常: {exc}", level="error", stage="monitor")
+                    self.store.add_event(
+                        f"监控循环异常: {exc}", level="error", stage="monitor"
+                    )
                     ok = False
                 self._stop.wait(self._next_delay(started_at, ok))
         finally:
@@ -329,6 +347,39 @@ class Monitor:
             return None, f"{type(exc).__name__}: {exc}"
 
     def check_account(self, account: Account) -> CheckOutcome:
+        """探活一次并把结果喂给通知出口；真正的检测在 _check_account。"""
+        outcome = self._check_account(account)
+        self._notify(account, outcome)
+        return outcome
+
+    def _notify(self, account: Account, outcome: CheckOutcome) -> None:
+        """按结果发通知；通知出任何问题都不能影响检测本身。"""
+        from .notify import refresh
+
+        self.notifier = refresh(self.notifier, self.store)
+        try:
+            kind = self.notifier.observe(
+                account.id, account.name, outcome.online, outcome.state, outcome.message
+            )
+        except Exception as exc:  # noqa: BLE001 - 通知失败绝不打断检测
+            self.store.add_event(
+                f"{account.name}: 通知发送异常 - {type(exc).__name__}: {exc}",
+                level="warning",
+                stage="notify",
+                account_id=account.id,
+            )
+            return
+        if kind:
+            label = "恢复" if kind == "recovered" else "连续失败"
+            self.store.add_event(
+                f"{account.name}: 已发送{label}通知",
+                level="info",
+                stage="notify",
+                state=outcome.state,
+                account_id=account.id,
+            )
+
+    def _check_account(self, account: Account) -> CheckOutcome:
         """探活一次；离线则按 max_retries 重试登录。
 
         每个阶段都 emit_progress，调用方能实时看到「卡在哪一步」。
@@ -343,7 +394,7 @@ class Monitor:
         self._check_network_identity(account)
 
         self.emit_progress(account, "probe", f"正在探测 {account.probe_url}")
-        check = probe_mod.probe(account.probe_url)
+        check = probe_mod.probe_configured(account.probe_url)
         if check.online:
             self.emit_progress(account, "done", "网络已放行，无需登录")
             outcome = CheckOutcome(
@@ -376,10 +427,16 @@ class Monitor:
         self.emit_progress(account, "verify", "探活未放行，正在向门户复核会话状态")
         auth_ok, auth_detail = self._portal_recheck(account)
         if auth_ok is True:
-            self.emit_progress(account, "warn", f"门户会话存在，但网络探活失败（{auth_detail}）")
+            self.emit_progress(
+                account, "warn", f"门户会话存在，但网络探活失败（{auth_detail}）"
+            )
             outcome = CheckOutcome(
-                account.id, account.name, False, STATE_UNKNOWN,
-                f"门户会话存在，但网络连通未确认：{auth_detail}", check.detail
+                account.id,
+                account.name,
+                False,
+                STATE_UNKNOWN,
+                f"门户会话存在，但网络连通未确认：{auth_detail}",
+                check.detail,
             )
             self.store.set_state(account.id, STATE_UNKNOWN)
             self.store.add_event(
@@ -393,7 +450,9 @@ class Monitor:
         if auth_ok is False:
             self.emit_progress(account, "offline", f"门户确认无会话（{auth_detail}）")
         else:
-            self.emit_progress(account, "warn", f"门户状态问不出来（{auth_detail}），按探活结果处理")
+            self.emit_progress(
+                account, "warn", f"门户状态问不出来（{auth_detail}），按探活结果处理"
+            )
 
         self.emit_progress(
             account, "offline", f"检测到掉线（{check.status}），准备登录重连"
@@ -414,9 +473,7 @@ class Monitor:
                     break
             attempts = attempt
             total = max(1, account.max_retries)
-            self.emit_progress(
-                account, "retry", f"第 {attempt}/{total} 次尝试登录"
-            )
+            self.emit_progress(account, "retry", f"第 {attempt}/{total} 次尝试登录")
 
             def _progress(stage: str, message: str, _acc: Account = account) -> None:
                 self.emit_progress(_acc, stage, message)
@@ -431,7 +488,7 @@ class Monitor:
             )
             if last.ok:
                 self.emit_progress(account, "verify", "门户已受理，复检网络状态")
-                confirm = probe_mod.probe(account.probe_url)
+                confirm = probe_mod.probe_configured(account.probe_url)
                 if confirm.online:
                     network_confirmed = True
                     self.emit_progress(account, "done", f"重连成功（{last.message}）")
@@ -450,9 +507,14 @@ class Monitor:
             state = STATE_LOGGED_IN if network_confirmed else STATE_OFFLINE
             self.store.set_state(account.id, state)
             return CheckOutcome(
-                account.id, account.name, network_confirmed, state,
+                account.id,
+                account.name,
+                network_confirmed,
+                state,
                 last.message if network_confirmed else "门户已受理，但网络复检仍未放行",
-                last.detail, attempts, elapsed
+                last.detail,
+                attempts,
+                elapsed,
             )
 
         if aborted:
@@ -492,7 +554,14 @@ class Monitor:
             account_id=account.id,
         )
         return CheckOutcome(
-            account.id, account.name, False, state, last.message, last.detail, attempts, elapsed
+            account.id,
+            account.name,
+            False,
+            state,
+            last.message,
+            last.detail,
+            attempts,
+            elapsed,
         )
 
     def check_all(self) -> list[dict[str, Any]]:
@@ -527,7 +596,10 @@ class Monitor:
         settings 是单行覆盖，不增长也不参与裁剪。
         """
         try:
-            keep = int(self.store.get_setting("max_events", DEFAULT_MAX_EVENTS) or DEFAULT_MAX_EVENTS)
+            keep = int(
+                self.store.get_setting("max_events", DEFAULT_MAX_EVENTS)
+                or DEFAULT_MAX_EVENTS
+            )
             removed = self.store.prune_events(keep)
             if not removed:
                 return
@@ -538,7 +610,11 @@ class Monitor:
             # 累计值要从 settings 续接：重启后新建的 Monitor 计数器是 0，
             # 直接用实例字段会把上一段进程的累计覆盖掉。
             previous = self.store.get_setting(PRUNE_STATS_KEY, None)
-            carried = int(previous.get("total_removed", 0)) if isinstance(previous, dict) else 0
+            carried = (
+                int(previous.get("total_removed", 0))
+                if isinstance(previous, dict)
+                else 0
+            )
             self._prune_total_removed = carried + removed
             self.store.set_setting(
                 PRUNE_STATS_KEY,
@@ -561,7 +637,9 @@ class Monitor:
                     stage="maintenance",
                 )
         except Exception as exc:  # noqa: BLE001
-            self.store.add_event(f"事件裁剪失败: {exc}", level="error", stage="maintenance")
+            self.store.add_event(
+                f"事件裁剪失败: {exc}", level="error", stage="maintenance"
+            )
 
     def prune_stats(self) -> dict[str, Any]:
         """裁剪统计，从 settings 读，不受 events 裁剪影响。"""
@@ -573,7 +651,8 @@ class Monitor:
             "last_at": None,
             "total_removed": self._prune_total_removed,
             "keep": int(
-                self.store.get_setting("max_events", DEFAULT_MAX_EVENTS) or DEFAULT_MAX_EVENTS
+                self.store.get_setting("max_events", DEFAULT_MAX_EVENTS)
+                or DEFAULT_MAX_EVENTS
             ),
             "suppressed": self._prune_log_suppressed,
         }
@@ -598,7 +677,9 @@ class MonitorManager:
 
     def ensure(self, store: Store) -> Monitor:
         if self.monitor is None:
-            interval = int(store.get_setting("interval", DEFAULT_INTERVAL) or DEFAULT_INTERVAL)
+            interval = int(
+                store.get_setting("interval", DEFAULT_INTERVAL) or DEFAULT_INTERVAL
+            )
             headless = bool(store.get_setting("headless", True))
             self.monitor = Monitor(store, interval=interval, headless=headless)
             self.store = store
@@ -615,7 +696,8 @@ class MonitorManager:
         return True
 
     def restart(self, store: Store, interval: int | None = None) -> Monitor:
-        self.stop()
+        if not self.stop():
+            raise RuntimeError("监控线程未能在超时时间内停止，拒绝启动第二个监控线程")
         monitor = self.ensure(store)
         if interval is not None:
             monitor.interval = Monitor._clamp(interval)

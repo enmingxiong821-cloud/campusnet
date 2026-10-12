@@ -165,6 +165,59 @@ def test_serve_auto_shift_starts_on_next_port(api_port: int) -> None:
             httpd.server_close()
 
 
+@pytest.fixture(autouse=True)
+def isolated_instance_lock(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:  # noqa: ANN001
+    """端口专项使用临时锁，不能碰本机运行服务的锁文件。"""
+    monkeypatch.setenv("CAMPUSNET_INSTANCE_LOCK_FILE", str(tmp_path / "service.lock"))
+
+
+def test_serve_rejects_second_instance_and_releases_lock(
+    api_port: int, tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:  # noqa: ANN001
+    """实际服务入口必须互斥，停止后才允许再次启动。"""
+    import os
+    import subprocess
+    import sys
+
+    from campusnet import server
+
+    lock_path = tmp_path / "service.lock"
+    monkeypatch.setenv("CAMPUSNET_INSTANCE_LOCK_FILE", str(lock_path))
+    first = server.serve(port=api_port, autostart=False, blocking=False)
+    try:
+        helper = (
+            "from campusnet import server\n"
+            "import sys\n"
+            "try:\n"
+            "    server.serve(port=int(sys.argv[1]), autostart=False, blocking=False)\n"
+            "except SystemExit as exc:\n"
+            "    print(f'EXIT:{exc.code}', flush=True)\n"
+            "    raise\n"
+        )
+        env = dict(os.environ)
+        env["CAMPUSNET_INSTANCE_LOCK_FILE"] = str(lock_path)
+        env["PYTHONPATH"] = str(
+            __import__("pathlib").Path(__file__).resolve().parents[1]
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", helper, str(api_port + 1)],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            env=env,
+            timeout=30,
+        )
+        assert result.returncode == 1
+        assert "EXIT:1" in result.stdout
+    finally:
+        first.shutdown()
+        first.server_close()
+
+    second = server.serve(port=api_port + 1, autostart=False, blocking=False)
+    second.shutdown()
+    second.server_close()
+
+
 @pytest.fixture()
 def api_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
@@ -190,8 +243,10 @@ def _run_mock_portal(extra_args: list[str], busy: int, probe: int | None = None)
         [
             sys.executable,
             str(utils_dir / "mock_portal.py"),
-            "--portal-port", str(busy),
-            "--probe-port", str(probe if probe is not None else busy),
+            "--portal-port",
+            str(busy),
+            "--probe-port",
+            str(probe if probe is not None else busy),
             *extra_args,
         ],
         capture_output=True,
@@ -239,8 +294,10 @@ def test_mock_portal_auto_shift_survives_conflict() -> None:
             [
                 sys.executable,
                 str(utils_dir / "mock_portal.py"),
-                "--portal-port", str(busy),
-                "--probe-port", str(busy + 1),
+                "--portal-port",
+                str(busy),
+                "--probe-port",
+                str(busy + 1),
                 "--auto-shift",
                 "--drop",
             ],

@@ -48,16 +48,23 @@ let state = {
   lastCheckedAt: 0,
   lastMessage: '',
 };
+let stateLoaded = false;
 
 async function load() {
   const stored = await chrome.storage.local.get(Object.keys(DEFAULTS));
   const settings = { ...DEFAULTS, ...stored };
-  state = { ...state, ...(await chrome.storage.local.get(['__state']))['__state'] };
+  if (!stateLoaded) {
+    const persisted = (await chrome.storage.local.get(['__state']))['__state'] || {};
+    // checking 只属于当前 Worker，不能从上次运行的存储状态恢复。
+    state = { ...state, ...persisted, checking: state.checking };
+    stateLoaded = true;
+  }
   return settings;
 }
 
 async function saveState() {
-  await chrome.storage.local.set({ __state: state });
+  const { checking, ...persisted } = state;
+  await chrome.storage.local.set({ __state: persisted });
 }
 
 function setBadge(kind) {

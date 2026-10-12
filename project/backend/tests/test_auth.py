@@ -33,6 +33,7 @@ def _request(
         request.add_header("Content-Type", "application/json")
     if cookie:
         request.add_header("Cookie", cookie)
+
     def _decode(raw: bytes) -> dict:
         text = raw.decode("utf-8")
         return json.loads(text) if text.strip() else {}
@@ -77,13 +78,21 @@ def test_existing_token_permissions_are_restricted(tmp_path) -> None:  # noqa: A
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX mode bits are not Windows ACLs")
-def test_existing_token_rejects_failed_permission_restriction(tmp_path, monkeypatch) -> None:  # noqa: ANN001
+def test_existing_token_rejects_failed_permission_restriction(
+    tmp_path, monkeypatch
+) -> None:  # noqa: ANN001
     path = tmp_path / "console.api-token"
     path.write_text("a" * 32, encoding="utf-8")
     path.chmod(0o644)
-    monkeypatch.setattr(path.__class__, "chmod", lambda *_args, **_kwargs: (_ for _ in ()).throw(PermissionError("denied")))
-    with pytest.raises(RuntimeError, match="权限"):
+    monkeypatch.setattr(
+        path.__class__,
+        "chmod",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(PermissionError("denied")),
+    )
+    with pytest.raises(RuntimeError, match="权限") as error:
         ApiAuth(path)
+    assert str(path) in str(error.value)
+    assert "0600" in str(error.value)
 
 
 def test_authentication_headers_and_expiring_session(tmp_path, monkeypatch) -> None:  # noqa: ANN001
@@ -106,7 +115,7 @@ def test_authentication_headers_and_expiring_session(tmp_path, monkeypatch) -> N
 
 def test_malformed_cookie_does_not_authorize(tmp_path, monkeypatch) -> None:  # noqa: ANN001
     auth = ApiAuth(tmp_path / "token", token="a" * 32)
-    assert not auth.authenticated({"Cookie": "campusnet_session=\"unterminated"})
+    assert not auth.authenticated({"Cookie": 'campusnet_session="unterminated'})
 
     class BadCookie:
         def load(self, _raw):  # noqa: ANN001
@@ -133,10 +142,14 @@ def test_auth_protects_business_api_and_keeps_health_public(tmp_path) -> None:  
         status, denied, _ = _request(base, "/api/accounts")
         assert status == 401 and denied["ok"] is False
 
-        status, denied, _ = _request(base, "/api/auth/login", "POST", {"token": "wrong"})
+        status, denied, _ = _request(
+            base, "/api/auth/login", "POST", {"token": "wrong"}
+        )
         assert status == 401 and denied["ok"] is False
 
-        status, logged, headers = _request(base, "/api/auth/login", "POST", {"token": "a" * 32})
+        status, logged, headers = _request(
+            base, "/api/auth/login", "POST", {"token": "a" * 32}
+        )
         assert status == 200 and logged["authenticated"] is True
         cookie = headers["Set-Cookie"].split(";", 1)[0]
 

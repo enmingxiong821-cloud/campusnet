@@ -11,11 +11,19 @@ from campusnet import monitor as monitor_mod
 from campusnet import srun as srun_mod
 from campusnet.monitor import CheckOutcome, Monitor, MonitorManager
 from campusnet.portal import LoginResult
-from campusnet.storage import STATE_FAILED, STATE_LOGGED_IN, STATE_OFFLINE, STATE_ONLINE, Account
+from campusnet.storage import (
+    STATE_FAILED,
+    STATE_LOGGED_IN,
+    STATE_OFFLINE,
+    STATE_ONLINE,
+    Account,
+)
 
 
 def _online(_url: str, **_: object):
-    return monitor_mod.probe_mod.probe.__globals__["ProbeResult"](True, "online", "OK", "")
+    return monitor_mod.probe_mod.probe.__globals__["ProbeResult"](
+        True, "online", "OK", ""
+    )
 
 
 @pytest.fixture()
@@ -35,7 +43,9 @@ def offline_probe(monkeypatch: pytest.MonkeyPatch):
     state = {"online": False}
 
     def fake_probe(url: str, timeout: float = 5.0, insecure: bool = False):
-        return monitor_mod.probe_mod.ProbeResult(state["online"], "redirected", "portal", url)
+        return monitor_mod.probe_mod.ProbeResult(
+            state["online"], "redirected", "portal", url
+        )
 
     monkeypatch.setattr(monitor_mod.probe_mod, "probe", fake_probe)
     return state
@@ -65,7 +75,9 @@ def test_offline_then_login_success(store, account, monkeypatch) -> None:  # noq
     state = {"online": False}
 
     def fake_probe(url: str, timeout: float = 5.0, insecure: bool = False):
-        return monitor_mod.probe_mod.ProbeResult(state["online"], "online" if state["online"] else "redirected", "", url)
+        return monitor_mod.probe_mod.ProbeResult(
+            state["online"], "online" if state["online"] else "redirected", "", url
+        )
 
     monkeypatch.setattr(monitor_mod.probe_mod, "probe", fake_probe)
 
@@ -91,7 +103,11 @@ def test_portal_ok_but_probe_still_blocked_retries(store, account, monkeypatch) 
         return monitor_mod.probe_mod.ProbeResult(False, "redirected", "", url)
 
     monkeypatch.setattr(monitor_mod.probe_mod, "probe", fake_probe)
-    monkeypatch.setattr(monitor_mod.portal, "login", lambda *a, **k: LoginResult("success", "门户说成功"))
+    monkeypatch.setattr(
+        monitor_mod.portal,
+        "login",
+        lambda *a, **k: LoginResult("success", "门户说成功"),
+    )
     monkeypatch.setattr(time, "sleep", lambda *_a: None)
 
     result = Monitor(store, interval=10).check_account(store.get_account(acc_id))
@@ -101,10 +117,14 @@ def test_portal_ok_but_probe_still_blocked_retries(store, account, monkeypatch) 
     assert result.online is False
 
 
-def test_offline_login_failure_marks_failed(store, account, offline_probe, monkeypatch) -> None:  # noqa: ANN001
+def test_offline_login_failure_marks_failed(
+    store, account, offline_probe, monkeypatch
+) -> None:  # noqa: ANN001
     acc_id = store.add_account(account)
     offline_probe["online"] = False
-    monkeypatch.setattr(monitor_mod.portal, "login", lambda *a, **k: LoginResult("failed", "密码错误"))
+    monkeypatch.setattr(
+        monitor_mod.portal, "login", lambda *a, **k: LoginResult("failed", "密码错误")
+    )
     monkeypatch.setattr(time, "sleep", lambda *_a: None)
 
     result = Monitor(store, interval=10).check_account(store.get_account(acc_id))
@@ -115,10 +135,14 @@ def test_offline_login_failure_marks_failed(store, account, offline_probe, monke
     assert store.get_account(acc_id).last_state == STATE_FAILED
 
 
-def test_login_error_state_maps_to_offline(store, account, offline_probe, monkeypatch) -> None:  # noqa: ANN001
+def test_login_error_state_maps_to_offline(
+    store, account, offline_probe, monkeypatch
+) -> None:  # noqa: ANN001
     acc_id = store.add_account(account)
     offline_probe["online"] = False
-    monkeypatch.setattr(monitor_mod.portal, "login", lambda *a, **k: LoginResult("error", "没有表单"))
+    monkeypatch.setattr(
+        monitor_mod.portal, "login", lambda *a, **k: LoginResult("error", "没有表单")
+    )
     monkeypatch.setattr(time, "sleep", lambda *_a: None)
 
     result = Monitor(store, interval=10).check_account(store.get_account(acc_id))
@@ -129,7 +153,9 @@ def test_success_confirmed_by_probe(store, account, offline_probe, monkeypatch) 
     """登录返回成功但探活仍不通时，不应误报在线。"""
     acc_id = store.add_account(account)
     offline_probe["online"] = False
-    monkeypatch.setattr(monitor_mod.portal, "login", lambda *a, **k: LoginResult("success", "ok"))
+    monkeypatch.setattr(
+        monitor_mod.portal, "login", lambda *a, **k: LoginResult("success", "ok")
+    )
     monkeypatch.setattr(time, "sleep", lambda *_a: None)
 
     result = Monitor(store, interval=10).check_account(store.get_account(acc_id))
@@ -141,7 +167,9 @@ def test_success_confirmed_by_probe(store, account, offline_probe, monkeypatch) 
 
 def test_check_all_only_enabled_accounts(store, account, online_probe) -> None:  # noqa: ANN001
     store.add_account(account)
-    disabled = Account(name="停用", portal_url="http://b", username="u", password="p", enabled=False)
+    disabled = Account(
+        name="停用", portal_url="http://b", username="u", password="p", enabled=False
+    )
     store.add_account(disabled)
 
     results = Monitor(store, interval=10).check_all()
@@ -154,7 +182,9 @@ def test_check_all_without_accounts_returns_empty(store) -> None:  # noqa: ANN00
     assert Monitor(store, interval=10).check_all() == []
 
 
-def test_check_all_is_reentrant_guard(store, account, online_probe, monkeypatch) -> None:  # noqa: ANN001
+def test_check_all_is_reentrant_guard(
+    store, account, online_probe, monkeypatch
+) -> None:  # noqa: ANN001
     store.add_account(account)
     mon = Monitor(store, interval=10)
     reentered = {"count": 0}
@@ -350,7 +380,9 @@ def test_portal_recheck_swallows_exception(store, srun_account, monkeypatch) -> 
     assert "RuntimeError" in detail
 
 
-def test_portal_recheck_skips_when_stop_requested(store, srun_account, monkeypatch) -> None:  # noqa: ANN001
+def test_portal_recheck_skips_when_stop_requested(
+    store, srun_account, monkeypatch
+) -> None:  # noqa: ANN001
     """后台循环已被要求停止时，不再发起 5 秒的网络请求。"""
     calls = _patch_auth_state(monkeypatch, (True, "门户已认证"))
 
@@ -365,7 +397,9 @@ def test_portal_recheck_skips_when_stop_requested(store, srun_account, monkeypat
     assert calls == []
 
 
-def test_probe_offline_but_portal_online_skips_login(store, srun_account, monkeypatch) -> None:  # noqa: ANN001
+def test_probe_offline_but_portal_online_skips_login(
+    store, srun_account, monkeypatch
+) -> None:  # noqa: ANN001
     """假掉线：canary 挂了但门户说有会话 —— 不许重登。"""
     acc_id = store.add_account(srun_account)
     _patch_auth_state(monkeypatch, (True, "门户已认证（20240001）"))
@@ -390,7 +424,11 @@ def test_probe_offline_but_portal_online_skips_login(store, srun_account, monkey
 
 def test_unknown_session_uses_regular_interval(store, monkeypatch):
     mon = Monitor(store, interval=300)
-    monkeypatch.setattr(mon, "check_all", lambda: [{"online": False, "state": monitor_mod.STATE_UNKNOWN}])
+    monkeypatch.setattr(
+        mon,
+        "check_all",
+        lambda: [{"online": False, "state": monitor_mod.STATE_UNKNOWN}],
+    )
     delays = []
 
     def wait(delay):
@@ -402,7 +440,9 @@ def test_unknown_session_uses_regular_interval(store, monkeypatch):
     assert delays == [300.0]
 
 
-def test_probe_offline_and_portal_offline_logs_in(store, srun_account, monkeypatch) -> None:  # noqa: ANN001
+def test_probe_offline_and_portal_offline_logs_in(
+    store, srun_account, monkeypatch
+) -> None:  # noqa: ANN001
     """真掉线：门户也说没会话 —— 必须照常走登录。"""
     acc_id = store.add_account(srun_account)
     _patch_auth_state(monkeypatch, (False, "门户在线表中无本机会话"))
@@ -433,7 +473,9 @@ def test_portal_unknown_falls_back_to_probe(store, srun_account, monkeypatch) ->
     _patch_auth_state(monkeypatch, (None, "门户响应无法判读（无 res/error 字段）"))
     _patch_probe_offline(monkeypatch)
 
-    monkeypatch.setattr(monitor_mod.portal, "login", lambda *a, **k: LoginResult("failed", "密码错误"))
+    monkeypatch.setattr(
+        monitor_mod.portal, "login", lambda *a, **k: LoginResult("failed", "密码错误")
+    )
     monkeypatch.setattr(time, "sleep", lambda *_a: None)
 
     result = Monitor(store, interval=10).check_account(store.get_account(acc_id))
@@ -442,7 +484,9 @@ def test_portal_unknown_falls_back_to_probe(store, srun_account, monkeypatch) ->
     assert result.state == STATE_FAILED
 
 
-def test_online_probe_never_queries_portal(store, srun_account, online_probe, monkeypatch) -> None:  # noqa: ANN001
+def test_online_probe_never_queries_portal(
+    store, srun_account, online_probe, monkeypatch
+) -> None:  # noqa: ANN001
     """在线时不得发门户查询：那是纯多余的一次网络往返。"""
     acc_id = store.add_account(srun_account)
     calls = _patch_auth_state(monkeypatch, (False, "门户在线表中无本机会话"))
@@ -452,7 +496,9 @@ def test_online_probe_never_queries_portal(store, srun_account, online_probe, mo
     assert calls == []
 
 
-def test_stop_during_retry_reports_interrupted_not_failed(store, srun_account, monkeypatch) -> None:  # noqa: ANN001
+def test_stop_during_retry_reports_interrupted_not_failed(
+    store, srun_account, monkeypatch
+) -> None:  # noqa: ANN001
     """后台循环里收到停止指令，必须报「已中断」，不能报成「重连未成功」。
 
     回归防护：中断曾经落在 failed 分支上，于是
@@ -513,7 +559,9 @@ def test_abort_stops_further_retries(store, srun_account, monkeypatch) -> None: 
     assert not [e for e in store.list_events(limit=50) if e["level"] == "error"]
 
 
-def test_manual_check_survives_stale_stop_flag(store, srun_account, monkeypatch) -> None:  # noqa: ANN001
+def test_manual_check_survives_stale_stop_flag(
+    store, srun_account, monkeypatch
+) -> None:  # noqa: ANN001
     """手动「立即检测」时监控线程没在跑，残留的 _stop 不能中断它。
 
     这是 running_loop 存在的原因：手动与后台共用同一条路径，
@@ -558,7 +606,7 @@ def _bare_monitor(**kwargs) -> Monitor:  # noqa: ANN003
 def test_next_delay_all_four_combinations() -> None:
     """热身窗口内失败走密集重试，成功立刻退回常规；窗口外失败走快速重试。"""
     mon = _bare_monitor()
-    hot = time.monotonic() - 5      # 刚启动
+    hot = time.monotonic() - 5  # 刚启动
     cold = time.monotonic() - 9999  # 早已过窗口
 
     assert mon._next_delay(hot, False) == 15.0
@@ -596,3 +644,89 @@ def test_monitor_thread_is_named(store) -> None:  # noqa: ANN001
         assert names
     finally:
         mon.stop()
+
+
+def test_restart_does_not_start_second_thread_after_stop_timeout(
+    store, monkeypatch
+) -> None:  # noqa: ANN001
+    """旧监控线程未退出时，重启必须拒绝创建第二条监控线程。"""
+    manager = MonitorManager()
+    monitor = manager.ensure(store)
+    monkeypatch.setattr(monitor, "stop", lambda timeout=5.0: False)
+
+    with pytest.raises(RuntimeError, match="拒绝启动第二个监控线程"):
+        manager.restart(store)
+
+    assert manager.monitor is monitor
+
+
+def test_multi_target_probe_reaches_second_target(store, account, monkeypatch) -> None:  # noqa: ANN001
+    """第一个探测地址被拦时，第二个放行仍算在线，避免单 canary 误判掉线。"""
+    account.probe_url = "http://127.0.0.1:1/blocked http://127.0.0.1:2/ok"
+    acc_id = store.add_account(account)
+    seen: list[str] = []
+
+    def fake_probe(url: str, timeout: float = 5.0, insecure: bool = False):
+        seen.append(url)
+        online = url.endswith("/ok")
+        return monitor_mod.probe_mod.ProbeResult(
+            online, "online" if online else "unreachable", "", url
+        )
+
+    monkeypatch.setattr(monitor_mod.probe_mod, "probe", fake_probe)
+    result = Monitor(store, interval=10).check_account(store.get_account(acc_id))
+
+    assert result.online is True
+    assert result.state == STATE_ONLINE
+    assert seen == ["http://127.0.0.1:1/blocked", "http://127.0.0.1:2/ok"]
+
+
+def test_check_account_feeds_notifier(store, account, online_probe, monkeypatch) -> None:  # noqa: ANN001
+    """检测结果要喂给通知出口，并留下一条可审计的事件。"""
+    from campusnet import notify as notify_mod
+
+    acc_id = store.add_account(account)
+    seen: list[tuple] = []
+
+    class FakeNotifier:
+        url = "http://fake"
+        after_failures = 3
+
+        def observe(self, *args: object) -> str:
+            seen.append(args)
+            return "recovered"
+
+    monkeypatch.setattr(
+        notify_mod.Notifier, "from_store", classmethod(lambda cls, _store: FakeNotifier())
+    )
+
+    outcome = Monitor(store, interval=10).check_account(store.get_account(acc_id))
+
+    assert outcome.online is True
+    assert seen and seen[0][1] == account.name
+    events = [item["message"] for item in store.list_events(limit=10)]
+    assert any("已发送恢复通知" in item for item in events)
+
+
+def test_notifier_exception_does_not_break_check(store, account, online_probe, monkeypatch) -> None:  # noqa: ANN001
+    """通知实现抛异常时，检测结果必须照常返回，只留一条告警事件。"""
+    from campusnet import notify as notify_mod
+
+    acc_id = store.add_account(account)
+
+    class BoomNotifier:
+        url = "http://fake"
+        after_failures = 3
+
+        def observe(self, *args: object) -> str:
+            raise RuntimeError("webhook 炸了")
+
+    monkeypatch.setattr(
+        notify_mod.Notifier, "from_store", classmethod(lambda cls, _store: BoomNotifier())
+    )
+
+    outcome = Monitor(store, interval=10).check_account(store.get_account(acc_id))
+
+    assert outcome.online is True
+    events = [item["message"] for item in store.list_events(limit=10)]
+    assert any("通知发送异常" in item for item in events)

@@ -1,21 +1,24 @@
-# Security Policy
+# 安全说明
 
-## Supported Versions
+## 维护范围
 
-Use this section to tell people about which versions of your project are
-currently being supported with security updates.
+安全修复优先针对当前 main 分支。项目尚未声明长期支持版本或固定响应时限；
+旧版本使用者应核对最新变更并在升级前备份本地数据。
 
-| Version | Supported          |
-| ------- | ------------------ |
-| 5.1.x   | :white_check_mark: |
-| 5.0.x   | :x:                |
-| 4.0.x   | :white_check_mark: |
-| < 4.0   | :x:                |
+## 报告安全问题
 
-## Reporting a Vulnerability
+若仓库启用了 GitHub 私密漏洞报告，请通过 Security 页面的 Report a vulnerability
+提交。若该入口不可用，请通过已有的私密联系方式联系维护者；不要在公开 Issue
+中提交真实账号、密码、令牌、密钥、数据库、Cookie 或含敏感内容的抓包。
 
-Use this section to tell people how to report a vulnerability.
+报告请包含受影响版本或提交、平台、脱敏复现步骤、预期与实际结果。
+普通功能故障可以提交脱敏 Issue，疑似凭据泄漏应优先撤销或轮换相关凭据。
 
-Tell them where to go, how often they can expect to get an update on a
-reported vulnerability, what to expect if the vulnerability is accepted or
-declined, etc.
+## 使用边界
+
+- 默认仅监听本机回环地址。非回环监听应保留令牌认证，不建议直接映射公网端口。
+- Windows 凭据使用当前用户的 DPAPI；数据库备份不等同于可跨用户或跨机器恢复密码。
+- POSIX 令牌文件必须收紧为 0600，权限收紧失败时拒绝继续，不关闭认证作为降级方案。
+- 配置、数据库、令牌、密钥、日志和运行时锁文件不得进入仓库或发布包。
+- 敏感内容扫描是辅助检查，扫描通过不代表不存在遗漏；分享前仍需审查变更和产物。
+- 本项目用于正常校园网认证，不提供绕过计费或学校网络管理策略的功能。

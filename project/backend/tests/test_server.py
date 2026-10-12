@@ -59,24 +59,47 @@ def call(url: str, method: str = "GET", body: dict | None = None) -> tuple[int, 
             return exc.code, {"raw": raw}
 
 
-@pytest.mark.parametrize("method,path", [
-    ("POST", "/api/check"), ("POST", "/api/monitor/start"),
-    ("POST", "/api/events/clear"), ("POST", "/api/accounts"),
-    ("PUT", "/api/accounts/1"), ("DELETE", "/api/accounts/1"),
-])
+@pytest.mark.parametrize(
+    "method,path",
+    [
+        ("POST", "/api/check"),
+        ("POST", "/api/monitor/start"),
+        ("POST", "/api/events/clear"),
+        ("POST", "/api/accounts"),
+        ("PUT", "/api/accounts/1"),
+        ("DELETE", "/api/accounts/1"),
+    ],
+)
 def test_write_routes_reject_foreign_origin(api, method, path):
-    request = urllib.request.Request(str(api) + path, data=b"{}", method=method,
-        headers={"Content-Type": "application/json", "Origin": "https://foreign.invalid"})
+    request = urllib.request.Request(
+        str(api) + path,
+        data=b"{}",
+        method=method,
+        headers={
+            "Content-Type": "application/json",
+            "Origin": "https://foreign.invalid",
+        },
+    )
     with pytest.raises(urllib.error.HTTPError) as error:
         urllib.request.urlopen(request, timeout=5)
     assert error.value.code == 403
     error.value.close()
 
 
-@pytest.mark.parametrize("origin", ["https://console.example", "http://console.example"])
+@pytest.mark.parametrize(
+    "origin", ["https://console.example", "http://console.example"]
+)
 def test_write_origin_supports_proxy_scheme(api, origin):
-    request = urllib.request.Request(str(api) + "/api/settings", data=b"{}", method="PUT",
-        headers={"Content-Type": "application/json", "Host": "console.example", "Origin": origin})
+    request = urllib.request.Request(
+        str(api) + "/api/settings",
+        data=b"{}",
+        method="PUT",
+        headers={
+            "Content-Type": "application/json",
+            "Host": "console.example",
+            "Origin": origin,
+        },
+    )
     with urllib.request.urlopen(request, timeout=5) as response:
         assert response.status == 200
 
@@ -94,7 +117,9 @@ def test_healthz(api: _Api) -> None:
 
 @pytest.mark.parametrize("action", ["install", "uninstall"])
 def test_bootstart_failure_is_http_error(api, monkeypatch, action):
-    result = server_mod.bootstart.BootStatus(True, False, None, "simulated failure", False)
+    result = server_mod.bootstart.BootStatus(
+        True, False, None, "simulated failure", False
+    )
     monkeypatch.setattr(server_mod.bootstart, action, lambda **kwargs: result)
     status, data = call(f"{api}/api/bootstart/{action}", "POST", {})
     assert status == 500
@@ -103,10 +128,14 @@ def test_bootstart_failure_is_http_error(api, monkeypatch, action):
     assert data["error"] == "simulated failure"
 
 
-@pytest.mark.parametrize("payload", [{"port": "abc"}, {"port": 0}, {"port": True}, {"port": 1.5}, {"host": "bad host"}])
+@pytest.mark.parametrize(
+    "payload",
+    [{"port": "abc"}, {"port": 0}, {"port": True}, {"port": 1.5}, {"host": "bad host"}],
+)
 def test_bootstart_invalid_parameters(api, monkeypatch, payload):
     def unexpected(**kwargs):
         pytest.fail("invalid parameters must not install startup entry")
+
     monkeypatch.setattr(server_mod.bootstart, "install", unexpected)
     status, data = call(f"{api}/api/bootstart/install", "POST", payload)
     assert status == 400
@@ -115,22 +144,80 @@ def test_bootstart_invalid_parameters(api, monkeypatch, payload):
 
 def test_bootstart_defaults_to_listener(api, monkeypatch):
     captured = {}
+
     def install(**kwargs):
         captured.update(kwargs)
         return server_mod.bootstart.BootStatus(True, True, None, "ok")
+
     monkeypatch.setattr(server_mod.bootstart, "install", install)
     assert call(f"{api}/api/bootstart/install", "POST", {})[0] == 200
     assert captured == {"host": "127.0.0.1", "port": int(api.rsplit(":", 1)[1])}
 
 
+def test_power_action_requires_confirm(api, monkeypatch) -> None:  # noqa: ANN001
+    """没有 confirm 就不能关机：防止误点，也防止跨站脚本一键断电。"""
+    calls: list[str] = []
+    monkeypatch.setattr(
+        "campusnet.power.shutdown", lambda *a, **k: calls.append("off") or "cmd"
+    )
+
+    status, data = call(f"{api}/api/power/off", "POST", {})
+
+    assert status == 400
+    assert calls == []
+    assert "确认" in data["error"]
+
+
+def test_power_action_executes_with_confirm(api, monkeypatch) -> None:  # noqa: ANN001
+    calls: list[str] = []
+    monkeypatch.setattr(
+        "campusnet.power.shutdown",
+        lambda *a, **k: calls.append("off") or "shutdown /s /t 0",
+    )
+
+    status, data = call(f"{api}/api/power/off", "POST", {"confirm": True})
+
+    assert status == 200
+    assert data["ok"] is True
+    assert data["action"] == "off"
+    assert data["command"] == "shutdown /s /t 0"
+    assert calls == ["off"]
+
+
+def test_power_action_reboot_and_unknown(api, monkeypatch) -> None:  # noqa: ANN001
+    rebooted: list[str] = []
+    monkeypatch.setattr(
+        "campusnet.power.reboot", lambda *a, **k: rebooted.append("reboot") or "cmd"
+    )
+
+    ok_status, ok_data = call(f"{api}/api/power/reboot", "POST", {"confirm": True})
+    bad_status, bad_data = call(f"{api}/api/power/format", "POST", {"confirm": True})
+
+    assert ok_status == 200
+    assert ok_data["action"] == "reboot"
+    assert rebooted == ["reboot"]
+    assert bad_status == 404
+    assert bad_data["ok"] is False
+
+
 def test_uninstall_consumes_body_on_persistent_connection(api, monkeypatch):
     import http.client
-    result = server_mod.bootstart.BootStatus(True, True, None, "permission denied", False)
+
+    result = server_mod.bootstart.BootStatus(
+        True, True, None, "permission denied", False
+    )
     monkeypatch.setattr(server_mod.bootstart, "uninstall", lambda: result)
     monkeypatch.setattr(server_mod.bootstart, "status", lambda: result)
-    conn = http.client.HTTPConnection("127.0.0.1", int(api.rsplit(":", 1)[1]), timeout=5)
+    conn = http.client.HTTPConnection(
+        "127.0.0.1", int(api.rsplit(":", 1)[1]), timeout=5
+    )
     try:
-        conn.request("POST", "/api/bootstart/uninstall", "{}", {"Content-Type": "application/json"})
+        conn.request(
+            "POST",
+            "/api/bootstart/uninstall",
+            "{}",
+            {"Content-Type": "application/json"},
+        )
         response = conn.getresponse()
         assert response.status == 500
         response.read()
@@ -143,16 +230,23 @@ def test_uninstall_consumes_body_on_persistent_connection(api, monkeypatch):
 
 
 @pytest.mark.parametrize("action", ["install", "uninstall"])
-@pytest.mark.parametrize("headers,expected", [
-    ({"Content-Type": "text/plain"}, 415),
-    ({"Content-Type": "application/json", "Origin": "http://evil.example"}, 403),
-    ({"Content-Type": "application/json", "Origin": "null"}, 403),
-    ({"Content-Type": "application/json", "Sec-Fetch-Site": "cross-site"}, 403),
-])
+@pytest.mark.parametrize(
+    "headers,expected",
+    [
+        ({"Content-Type": "text/plain"}, 415),
+        ({"Content-Type": "application/json", "Origin": "http://evil.example"}, 403),
+        ({"Content-Type": "application/json", "Origin": "null"}, 403),
+        ({"Content-Type": "application/json", "Sec-Fetch-Site": "cross-site"}, 403),
+    ],
+)
 def test_bootstart_rejects_cross_site(api, monkeypatch, action, headers, expected):
     calls = []
-    monkeypatch.setattr(server_mod.bootstart, action, lambda **kwargs: calls.append(kwargs))
-    request = urllib.request.Request(f"{api}/api/bootstart/{action}", data=b"{}", headers=headers)
+    monkeypatch.setattr(
+        server_mod.bootstart, action, lambda **kwargs: calls.append(kwargs)
+    )
+    request = urllib.request.Request(
+        f"{api}/api/bootstart/{action}", data=b"{}", headers=headers
+    )
     with pytest.raises(urllib.error.HTTPError) as error:
         urllib.request.urlopen(request, timeout=5)
     assert error.value.code == expected
@@ -196,7 +290,9 @@ def test_account_crud_flow(api: _Api) -> None:
 
 
 def test_update_missing_account_404(api: _Api) -> None:
-    status, data = call(f"{api}/api/accounts/999", "PUT", {"name": "x", "portal_url": "http://a"})
+    status, data = call(
+        f"{api}/api/accounts/999", "PUT", {"name": "x", "portal_url": "http://a"}
+    )
     assert status == 404
     assert "不存在" in data["error"]
 
@@ -208,7 +304,9 @@ def test_create_validation_errors(api: _Api) -> None:
     status, data = call(f"{api}/api/accounts", "POST", {"name": "a"})
     assert status == 400 and "门户地址" in data["error"]
 
-    status, data = call(f"{api}/api/accounts", "POST", {"name": "a", "portal_url": "ftp://a"})
+    status, data = call(
+        f"{api}/api/accounts", "POST", {"name": "a", "portal_url": "ftp://a"}
+    )
     assert status == 400 and "http" in data["error"]
 
     status, data = call(
@@ -245,6 +343,85 @@ def test_method_not_allowed(api: _Api) -> None:
     assert "GET" in data["error"]
 
 
+def test_rejected_method_consumes_body_on_persistent_connection(api):
+    import http.client
+
+    conn = http.client.HTTPConnection(
+        "127.0.0.1", int(api.rsplit(":", 1)[1]), timeout=5
+    )
+    try:
+        for _ in range(3):
+            conn.request(
+                "POST", "/api/health", "{}", {"Content-Type": "application/json"}
+            )
+            response = conn.getresponse()
+            assert response.status == 405
+            response.read()
+            conn.request("GET", "/api/health")
+            response = conn.getresponse()
+            assert response.status == 200
+            assert json.loads(response.read())["ok"]
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize(
+    "headers,status",
+    [
+        ({"Content-Length": "-1"}, 400),
+        ({"Content-Length": "invalid"}, 400),
+        ({"Content-Length": str(server_mod.MAX_REQUEST_BODY + 1)}, 413),
+        ({"Transfer-Encoding": "chunked"}, 400),
+    ],
+)
+def test_request_body_rejects_invalid_framing(api, headers, status):
+    import http.client
+
+    conn = http.client.HTTPConnection(
+        "127.0.0.1", int(api.rsplit(":", 1)[1]), timeout=5
+    )
+    try:
+        conn.request("POST", "/api/health", headers=headers)
+        response = conn.getresponse()
+        assert response.status == status
+        assert json.loads(response.read())["ok"] is False
+    finally:
+        conn.close()
+
+
+def test_request_body_timeout_is_bounded(api, monkeypatch):
+    import http.client
+
+    monkeypatch.setattr(server_mod, "BODY_READ_TIMEOUT", 0.1)
+    conn = http.client.HTTPConnection(
+        "127.0.0.1", int(api.rsplit(":", 1)[1]), timeout=5
+    )
+    try:
+        conn.request("POST", "/api/health", headers={"Content-Length": "10"})
+        response = conn.getresponse()
+        assert response.status == 408
+        response.read()
+    finally:
+        conn.close()
+
+
+def test_request_body_truncated_is_rejected(api):
+    import http.client
+    import socket
+
+    conn = http.client.HTTPConnection(
+        "127.0.0.1", int(api.rsplit(":", 1)[1]), timeout=5
+    )
+    try:
+        conn.request("POST", "/api/health", body=b"{", headers={"Content-Length": "10"})
+        conn.sock.shutdown(socket.SHUT_WR)
+        response = conn.getresponse()
+        assert response.status == 400
+        response.read()
+    finally:
+        conn.close()
+
+
 def test_unknown_api_path_returns_json_404(api: _Api) -> None:
     status, data = call(f"{api}/api/nope")
     assert status == 404 and data["ok"] is False
@@ -263,7 +440,9 @@ def test_detect_portal_endpoint(api: _Api) -> None:
 
 
 def test_discover_endpoint_without_scan(api: _Api) -> None:
-    status, data = call(f"{api}/api/discover?seed=http://127.0.0.1:9/x&timeout=1&scan=0")
+    status, data = call(
+        f"{api}/api/discover?seed=http://127.0.0.1:9/x&timeout=1&scan=0"
+    )
     assert status == 200
     assert data["ok"] is True
     assert data["report"]["ok"] is False
@@ -272,7 +451,9 @@ def test_discover_endpoint_without_scan(api: _Api) -> None:
     assert data["account_fields"] is None
 
 
-def test_discover_endpoint_fills_account_fields(api: _Api, monkeypatch: pytest.MonkeyPatch) -> None:  # noqa: ANN001
+def test_discover_endpoint_fills_account_fields(
+    api: _Api, monkeypatch: pytest.MonkeyPatch
+) -> None:  # noqa: ANN001
     """探到门户时要把可直接建号的字段一并返回。"""
     from campusnet import discovery as discovery_mod
 
@@ -310,16 +491,25 @@ def test_login_endpoint_reports_missing_account(api: _Api) -> None:
     assert status == 404 and "不存在" in data["error"]
 
 
-def test_login_endpoint_runs_manual_mode(api: _Api, monkeypatch: pytest.MonkeyPatch) -> None:  # noqa: ANN001
+def test_login_endpoint_runs_manual_mode(
+    api: _Api, monkeypatch: pytest.MonkeyPatch
+) -> None:  # noqa: ANN001
     from campusnet.portal import LoginResult
 
     monkeypatch.setattr(
-        server_mod.portal, "login", lambda *a, **k: LoginResult("success", "已放行", "detail")
+        server_mod.portal,
+        "login",
+        lambda *a, **k: LoginResult("success", "已放行", "detail"),
     )
     _, created = call(
         f"{api}/api/accounts",
         "POST",
-        {"name": "手动", "portal_url": "http://10.0.0.1/x", "username": "u", "password": "p"},
+        {
+            "name": "手动",
+            "portal_url": "http://10.0.0.1/x",
+            "username": "u",
+            "password": "p",
+        },
     )
     status, data = call(f"{api}/api/accounts/{created['id']}/login", "POST", {})
     assert status == 200
@@ -359,7 +549,12 @@ def test_events_endpoint(api: _Api) -> None:
     _, created = call(
         f"{api}/api/accounts",
         "POST",
-        {"name": "日志", "portal_url": "http://10.0.0.1/x", "username": "u", "password": "p"},
+        {
+            "name": "日志",
+            "portal_url": "http://10.0.0.1/x",
+            "username": "u",
+            "password": "p",
+        },
     )
     status, data = call(f"{api}/api/events?limit=10")
     assert status == 200
@@ -375,7 +570,9 @@ def test_events_endpoint(api: _Api) -> None:
 
 
 def test_settings_get_and_put(api: _Api) -> None:
-    status, data = call(f"{api}/api/settings", "PUT", {"interval": 90, "headless": False})
+    status, data = call(
+        f"{api}/api/settings", "PUT", {"interval": 90, "headless": False}
+    )
     assert status == 200 and data["settings"]["interval"] == 90
 
     status, data = call(f"{api}/api/settings")
@@ -399,9 +596,13 @@ def test_path_traversal_blocked(api: _Api) -> None:
     assert status in (403, 404)
 
 
-def test_server_exception_returns_500(api: _Api, monkeypatch: pytest.MonkeyPatch) -> None:  # noqa: ANN001
+def test_server_exception_returns_500(
+    api: _Api, monkeypatch: pytest.MonkeyPatch
+) -> None:  # noqa: ANN001
     monkeypatch.setattr(
-        server_mod.Store, "list_accounts", lambda self: (_ for _ in ()).throw(RuntimeError("boom"))
+        server_mod.Store,
+        "list_accounts",
+        lambda self: (_ for _ in ()).throw(RuntimeError("boom")),
     )
     status, data = call(f"{api}/api/accounts")
     assert status == 500
@@ -412,12 +613,22 @@ def test_account_password_kept_when_blank_on_update(api: _Api) -> None:
     _, created = call(
         f"{api}/api/accounts",
         "POST",
-        {"name": "保留", "portal_url": "http://10.0.0.1/x", "username": "u", "password": "orig"},
+        {
+            "name": "保留",
+            "portal_url": "http://10.0.0.1/x",
+            "username": "u",
+            "password": "orig",
+        },
     )
     status, _ = call(
         f"{api}/api/accounts/{created['id']}",
         "PUT",
-        {"name": "改名", "portal_url": "http://10.0.0.1/x", "username": "u", "password": ""},
+        {
+            "name": "改名",
+            "portal_url": "http://10.0.0.1/x",
+            "username": "u",
+            "password": "",
+        },
     )
     assert status == 200
 
@@ -440,7 +651,9 @@ def test_progress_empty_buffer(api: _Api) -> None:
 
 def test_progress_returns_emitted_items(api: _Api, store: Store) -> None:  # noqa: ANN001
     monitor = api.manager.ensure(store)
-    account = Account(id=1, name="甲", portal_url="http://a", username="u", password="p")
+    account = Account(
+        id=1, name="甲", portal_url="http://a", username="u", password="p"
+    )
     monitor.emit_progress(account, "probe", "正在探测")
     monitor.emit_progress(account, "done", "已放行")
 
@@ -455,7 +668,9 @@ def test_progress_returns_emitted_items(api: _Api, store: Store) -> None:  # noq
 def test_progress_seq_filter_is_incremental(api: _Api, store: Store) -> None:  # noqa: ANN001
     """带 seq 回来只拿新增部分，前端靠这个避免重复渲染。"""
     monitor = api.manager.ensure(store)
-    account = Account(id=1, name="甲", portal_url="http://a", username="u", password="p")
+    account = Account(
+        id=1, name="甲", portal_url="http://a", username="u", password="p"
+    )
     for i in range(5):
         monitor.emit_progress(account, "probe", f"第 {i} 条")
 
@@ -467,7 +682,9 @@ def test_progress_seq_filter_is_incremental(api: _Api, store: Store) -> None:  #
 
 def test_progress_seq_zero_returns_all(api: _Api, store: Store) -> None:  # noqa: ANN001
     monitor = api.manager.ensure(store)
-    account = Account(id=1, name="甲", portal_url="http://a", username="u", password="p")
+    account = Account(
+        id=1, name="甲", portal_url="http://a", username="u", password="p"
+    )
     monitor.emit_progress(account, "probe", "唯一一条")
 
     _, data = call(f"{api}/api/progress?seq=0")
@@ -476,7 +693,9 @@ def test_progress_seq_zero_returns_all(api: _Api, store: Store) -> None:  # noqa
 
 def test_progress_future_seq_returns_empty(api: _Api, store: Store) -> None:  # noqa: ANN001
     monitor = api.manager.ensure(store)
-    account = Account(id=1, name="甲", portal_url="http://a", username="u", password="p")
+    account = Account(
+        id=1, name="甲", portal_url="http://a", username="u", password="p"
+    )
     monitor.emit_progress(account, "probe", "一条")
 
     _, data = call(f"{api}/api/progress?seq=999")
@@ -497,7 +716,9 @@ def test_progress_filters_by_account(api: _Api, store: Store) -> None:  # noqa: 
 
 def test_progress_latest_mode_returns_tail(api: _Api, store: Store) -> None:  # noqa: ANN001
     monitor = api.manager.ensure(store)
-    account = Account(id=1, name="甲", portal_url="http://a", username="u", password="p")
+    account = Account(
+        id=1, name="甲", portal_url="http://a", username="u", password="p"
+    )
     for i in range(20):
         monitor.emit_progress(account, "probe", f"第 {i} 条")
 
@@ -507,10 +728,14 @@ def test_progress_latest_mode_returns_tail(api: _Api, store: Store) -> None:  # 
 
 
 @pytest.mark.parametrize("flag", ["0", "false", ""])
-def test_progress_latest_flag_false_falls_back_to_seq(api: _Api, store: Store, flag: str) -> None:  # noqa: ANN001
+def test_progress_latest_flag_false_falls_back_to_seq(
+    api: _Api, store: Store, flag: str
+) -> None:  # noqa: ANN001
     """latest=0 / false / 空 都应走增量模式，不能被当成真。"""
     monitor = api.manager.ensure(store)
-    account = Account(id=1, name="甲", portal_url="http://a", username="u", password="p")
+    account = Account(
+        id=1, name="甲", portal_url="http://a", username="u", password="p"
+    )
     for i in range(5):
         monitor.emit_progress(account, "probe", f"第 {i} 条")
 
@@ -533,7 +758,9 @@ def test_progress_rejects_non_integer_account_id(api: _Api) -> None:
 def test_progress_blank_account_id_means_all(api: _Api, store: Store) -> None:  # noqa: ANN001
     """account_id 留空表示不过滤，不该报 400。"""
     monitor = api.manager.ensure(store)
-    account = Account(id=1, name="甲", portal_url="http://a", username="u", password="p")
+    account = Account(
+        id=1, name="甲", portal_url="http://a", username="u", password="p"
+    )
     monitor.emit_progress(account, "probe", "一条")
 
     status, data = call(f"{api}/api/progress?account_id=")
@@ -551,7 +778,9 @@ def test_progress_reports_checking_state(api: _Api, store: Store) -> None:  # no
 
 def test_progress_items_carry_ts_for_display(api: _Api, store: Store) -> None:  # noqa: ANN001
     monitor = api.manager.ensure(store)
-    account = Account(id=1, name="甲", portal_url="http://a", username="u", password="p")
+    account = Account(
+        id=1, name="甲", portal_url="http://a", username="u", password="p"
+    )
     monitor.emit_progress(account, "probe", "带时间戳")
 
     _, data = call(f"{api}/api/progress")

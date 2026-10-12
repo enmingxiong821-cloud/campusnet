@@ -51,21 +51,21 @@ function makeChrome(storage) {
 
   const local = {
     async get(keys) {
-      if (keys === undefined || keys === null) return { ...storage.data };
+      if (keys === undefined || keys === null) return structuredClone(storage.data);
       if (Array.isArray(keys)) {
         const out = {};
         for (const k of keys) {
-          if (k in storage.data) out[k] = storage.data[k];
+          if (k in storage.data) out[k] = structuredClone(storage.data[k]);
         }
         return out;
       }
       if (typeof keys === 'string') {
-        return keys in storage.data ? { [keys]: storage.data[keys] } : {};
+        return keys in storage.data ? { [keys]: structuredClone(storage.data[keys]) } : {};
       }
-      return { ...storage.data };
+      return structuredClone(storage.data);
     },
     async set(obj) {
-      Object.assign(storage.data, obj);
+      Object.assign(storage.data, structuredClone(obj));
     },
     async remove(keys) {
       for (const k of Array.isArray(keys) ? keys : [keys]) delete storage.data[k];
@@ -124,9 +124,10 @@ function loadBackground(storage, fetchImpl) {
     URLSearchParams,
     Error,
     JSON,
-    Object,
-    Array,
-    Promise,
+     Object,
+     Array,
+     Promise,
+     structuredClone,
     String,
     encodeURIComponent,
   };
@@ -566,6 +567,26 @@ function probeWith(fetchImpl) {
         eq(maxInflight, 1, '最大并发数');
         eq(b.skipped, true, '第二次被跳过');
         truthy(a.online);
+      });
+    }
+
+    console.log('\n[Worker 状态恢复]');
+    {
+      const storage = { data: { enabled: true, __state: { checking: true } } };
+      let calls = 0;
+      const fetchImpl = async () => {
+        calls += 1;
+        return { ok: true, status: 200 };
+      };
+      const first = loadBackground(storage, fetchImpl);
+      const a = await first.api.checkOnce();
+      const b = await first.api.checkOnce();
+      const restarted = loadBackground(storage, fetchImpl);
+      const c = await restarted.api.checkOnce();
+      check('旧互斥状态不阻止连续检测及 Worker 重建', () => {
+        truthy(a.online && b.online && c.online);
+        eq(calls, 3);
+        eq(Object.hasOwn(storage.data.__state, 'checking'), false);
       });
     }
 

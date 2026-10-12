@@ -13,7 +13,15 @@ from pathlib import Path
 
 
 SENSITIVE_NAMES = {"config.json", ".env", ".campusnet_obf.key"}
-SENSITIVE_SUFFIXES = (".db", ".db-wal", ".db-shm", ".key", ".api-token", ".log")
+SENSITIVE_SUFFIXES = (
+    ".db",
+    ".db-wal",
+    ".db-shm",
+    ".key",
+    ".api-token",
+    ".log",
+    ".lock",
+)
 ACCOUNT_NUMBER = re.compile(r"(?<!\d)20\d{8}(?!\d)")
 PHONE_NUMBER = re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)")
 PRIVATE_PORTAL = re.compile(r"(?<!\d)172\.26\.8\.11(?!\d)")
@@ -24,6 +32,9 @@ QUOTED_CREDENTIAL = re.compile(
 ENV_CREDENTIAL = re.compile(
     r"(?m)(?<![a-z0-9_])(?:PASSWORD|PASSWD|SECRET|TOKEN|API_KEY)"
     r"\s*=\s*([A-Za-z0-9_-]{6,})(?![A-Za-z0-9_-])"
+)
+CHINESE_CREDENTIAL = re.compile(
+    r"(?:密码|口令|令牌)\s*[:：=]\s*(['\"])([^'\"\r\n]{6,})\1"
 )
 
 
@@ -36,18 +47,24 @@ def is_distribution_source(relative: Path) -> bool:
     if parts[:1] == ("utils",):
         return relative != Path("utils/mock_portal.py") and "_tmp" not in parts
     return relative.as_posix() in {
-        "database/schema.sql", "database/config.example.yml", "README.md", "LICENSE",
+        "database/schema.sql",
+        "database/config.example.yml",
+        "README.md",
+        "LICENSE",
     }
 
 
 def repository_files(root: Path) -> list[Path]:
     result = subprocess.run(
         ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
-        cwd=root, check=True, capture_output=True,
+        cwd=root,
+        check=True,
+        capture_output=True,
     )
     return [
         Path(raw.decode("utf-8", errors="surrogateescape"))
-        for raw in result.stdout.split(b"\0") if raw
+        for raw in result.stdout.split(b"\0")
+        if raw
     ]
 
 
@@ -69,7 +86,11 @@ def scan_file(root: Path, relative: Path, *, fixture: bool = False) -> list[str]
         rules.append("疑似手机号")
     if PRIVATE_PORTAL.search(text):
         rules.append("校园内网地址")
-    if not fixture and (QUOTED_CREDENTIAL.search(text) or ENV_CREDENTIAL.search(text)):
+    if not fixture and (
+        QUOTED_CREDENTIAL.search(text)
+        or ENV_CREDENTIAL.search(text)
+        or CHINESE_CREDENTIAL.search(text)
+    ):
         rules.append("疑似明文凭据")
     return rules
 
@@ -92,7 +113,9 @@ def main() -> int:
     args = parser.parse_args()
     root = (args.repo or args.root).resolve()
     if args.repo:
-        files = [item for item in repository_files(root) if is_distribution_source(item)]
+        files = [
+            item for item in repository_files(root) if is_distribution_source(item)
+        ]
     else:
         files = [item.relative_to(root) for item in root.rglob("*") if item.is_file()]
     findings = scan(root, files)

@@ -27,6 +27,14 @@ def store(tmp_db: Path) -> Store:
     return Store(tmp_db)
 
 
+@pytest.fixture(autouse=True)
+def isolated_log_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """日志默认落在仓库 database/logs；测试一律改到临时目录，避免污染工作区。"""
+    logs = tmp_path / "logs"
+    monkeypatch.setenv("CAMPUSNET_LOG_DIR", str(logs))
+    return logs
+
+
 @pytest.fixture()
 def account() -> Account:
     return Account(

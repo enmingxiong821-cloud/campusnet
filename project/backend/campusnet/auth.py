@@ -24,7 +24,9 @@ class ApiAuth:
     HttpOnly 会话 Cookie，前端不会把令牌写进 localStorage 或 URL。
     """
 
-    def __init__(self, token_file: Path | str | None = None, token: str | None = None) -> None:
+    def __init__(
+        self, token_file: Path | str | None = None, token: str | None = None
+    ) -> None:
         self.token_file = Path(token_file) if token_file else api_token_path()
         self._token = token.strip() if token else self._load_or_create()
         if not self._token:
@@ -47,10 +49,14 @@ class ApiAuth:
 
         value = secrets.token_urlsafe(TOKEN_SIZE)
         self.token_file.parent.mkdir(parents=True, exist_ok=True)
-        temp = self.token_file.with_name(f".{self.token_file.name}.{secrets.token_hex(6)}.tmp")
+        temp = self.token_file.with_name(
+            f".{self.token_file.name}.{secrets.token_hex(6)}.tmp"
+        )
         try:
             flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-            with os.fdopen(os.open(temp, flags, 0o600), "w", encoding="utf-8") as stream:
+            with os.fdopen(
+                os.open(temp, flags, 0o600), "w", encoding="utf-8"
+            ) as stream:
                 stream.write(value + "\n")
             temp.replace(self.token_file)
             self._restrict_permissions()
@@ -68,7 +74,11 @@ class ApiAuth:
         try:
             self.token_file.chmod(0o600)
         except OSError as exc:
-            raise RuntimeError("API 令牌文件权限无法收紧") from exc
+            raise RuntimeError(
+                f"API 令牌文件权限无法收紧：{self.token_file}。"
+                "请确认文件归当前运行用户所有，并将权限设置为 0600 后重新启动；"
+                "不要通过关闭认证绕过此错误。"
+            ) from exc
 
     def check_token(self, candidate: str) -> bool:
         return bool(candidate) and hmac.compare_digest(candidate, self._token)

@@ -18,6 +18,9 @@ htmlcov/
 *.db
 *.db-shm
 *.db-wal
+# 只忽略运行时的服务实例锁。不要写成 *.lock：那会连带忽略
+# uv.lock / poetry.lock / Pipfile.lock 这类必须入库的依赖锁文件。
+database/*.lock
 database/backup/
 
 # 密码混淆密钥，绝不能入库

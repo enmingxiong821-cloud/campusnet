@@ -14,6 +14,7 @@ from . import crypto
 from .paths import SCHEMA_PATH, db_path as db_path_default
 
 _WRITE_LOCK = threading.Lock()
+SCHEMA_VERSION = 2
 
 STATE_UNKNOWN = "unknown"
 STATE_ONLINE = "online"
@@ -40,6 +41,7 @@ class Account:
     enabled: bool = True
     last_state: str = STATE_UNKNOWN
     last_checked_at: str | None = None
+    last_ok_at: str | None = None
 
     @property
     def password_encoded(self) -> str:
@@ -62,6 +64,7 @@ class Account:
             "enabled": self.enabled,
             "last_state": self.last_state,
             "last_checked_at": self.last_checked_at,
+            "last_ok_at": self.last_ok_at,
         }
 
     @classmethod
@@ -87,6 +90,7 @@ class Account:
             enabled=bool(row["enabled"]),
             last_state=row["last_state"],
             last_checked_at=row["last_checked_at"],
+            last_ok_at=row["last_ok_at"],
         )
 
 
@@ -121,7 +125,38 @@ class Store:
     def init_db(self) -> None:
         schema = SCHEMA_PATH.read_text(encoding="utf-8")
         with _WRITE_LOCK, self._connection() as conn:
-            conn.executescript(schema)
+            version = conn.execute("PRAGMA user_version").fetchone()[0]
+            if version > SCHEMA_VERSION:
+                raise RuntimeError(
+                    f"数据库版本 {version} 高于当前支持的 {SCHEMA_VERSION}，拒绝降级运行"
+                )
+            conn.execute("PRAGMA journal_mode = WAL")
+            conn.execute("BEGIN IMMEDIATE")
+            # 获得写锁后重读，覆盖独立进程并发初始化的情形。
+            version = conn.execute("PRAGMA user_version").fetchone()[0]
+            if version > SCHEMA_VERSION:
+                raise RuntimeError(
+                    f"数据库版本 {version} 高于当前支持的 {SCHEMA_VERSION}，拒绝降级运行"
+                )
+            statement = ""
+            for line in schema.splitlines(keepends=True):
+                statement += line
+                if sqlite3.complete_statement(statement):
+                    if "PRAGMA journal_mode" not in statement:
+                        conn.execute(statement)
+                    statement = ""
+            if statement.strip():
+                raise RuntimeError("数据库结构脚本包含未结束的 SQL")
+            if version < 2:
+                self._migrate_v2(conn)
+            conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+
+    @staticmethod
+    def _migrate_v2(conn: sqlite3.Connection) -> None:
+        """旧库新增事实字段；不从当前状态推断未知的历史成功时间。"""
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(accounts)")}
+        if "last_ok_at" not in columns:
+            conn.execute("ALTER TABLE accounts ADD COLUMN last_ok_at TEXT")
 
     # ---------- accounts ----------
     def list_accounts(self, enabled_only: bool = False) -> list[Account]:
@@ -134,7 +169,9 @@ class Store:
 
     def get_account(self, account_id: int) -> Account | None:
         with self._connection() as conn:
-            row = conn.execute("SELECT * FROM accounts WHERE id = ?", (account_id,)).fetchone()
+            row = conn.execute(
+                "SELECT * FROM accounts WHERE id = ?", (account_id,)
+            ).fetchone()
         return Account.from_row(row) if row else None
 
     def add_account(self, account: Account) -> int:
@@ -204,10 +241,12 @@ class Store:
         with _WRITE_LOCK, self._connection() as conn:
             conn.execute(
                 """
-                UPDATE accounts SET last_state = ?, last_checked_at = datetime('now','localtime')
+                UPDATE accounts SET last_state = ?, last_checked_at = datetime('now','localtime'),
+                       last_ok_at = CASE WHEN ? IN ('online', 'logged_in')
+                           THEN datetime('now','localtime') ELSE last_ok_at END
                  WHERE id = ?
                 """,
-                (state, account_id),
+                (state, state, account_id),
             )
 
     # ---------- events ----------
@@ -230,7 +269,9 @@ class Store:
             rowid = cur.lastrowid
             return int(rowid) if rowid is not None else 0
 
-    def list_events(self, limit: int = 200, account_id: int | None = None) -> list[dict[str, Any]]:
+    def list_events(
+        self, limit: int = 200, account_id: int | None = None
+    ) -> list[dict[str, Any]]:
         sql = "SELECT * FROM events"
         params: list[Any] = []
         if account_id is not None:
@@ -272,12 +313,16 @@ class Store:
         公告本身删掉，若只看时间戳就永远不会补记。
         """
         with self._connection() as conn:
-            row = conn.execute("SELECT 1 FROM events WHERE id = ? LIMIT 1", (event_id,)).fetchone()
+            row = conn.execute(
+                "SELECT 1 FROM events WHERE id = ? LIMIT 1", (event_id,)
+            ).fetchone()
         return row is not None
 
     # ---------- settings ----------
     def set_setting(self, key: str, value: Any) -> None:
-        blob = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+        blob = (
+            value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+        )
         with _WRITE_LOCK, self._connection() as conn:
             conn.execute(
                 "INSERT INTO settings (key, value) VALUES (?, ?) "
@@ -287,7 +332,9 @@ class Store:
 
     def get_setting(self, key: str, default: Any = None) -> Any:
         with self._connection() as conn:
-            row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+            row = conn.execute(
+                "SELECT value FROM settings WHERE key = ?", (key,)
+            ).fetchone()
         if not row:
             return default
         try:

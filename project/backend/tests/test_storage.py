@@ -5,6 +5,7 @@ from __future__ import annotations
 import sqlite3
 
 import pytest
+from campusnet import storage as storage_mod
 
 from campusnet.storage import (
     STATE_FAILED,
@@ -32,7 +33,9 @@ def test_password_not_exposed_in_public(account: Account) -> None:
     assert "topsecret" not in str(account.public())
 
 
-def test_update_account_keeps_password_when_blank(store: Store, account: Account) -> None:
+def test_update_account_keeps_password_when_blank(
+    store: Store, account: Account
+) -> None:
     new_id = store.add_account(account)
     changed = store.get_account(new_id)
     assert changed is not None
@@ -67,8 +70,12 @@ def test_delete_and_missing_get(store: Store, account: Account) -> None:
 
 
 def test_list_accounts_enabled_filter(store: Store) -> None:
-    on = Account(name="开", portal_url="http://a", username="u", password="p", enabled=True)
-    off = Account(name="关", portal_url="http://b", username="u", password="p", enabled=False)
+    on = Account(
+        name="开", portal_url="http://a", username="u", password="p", enabled=True
+    )
+    off = Account(
+        name="关", portal_url="http://b", username="u", password="p", enabled=False
+    )
     store.add_account(on)
     store.add_account(off)
 
@@ -84,6 +91,9 @@ def test_set_state_updates_last_checked(store: Store, account: Account) -> None:
     assert loaded is not None
     assert loaded.last_state == STATE_ONLINE
     assert loaded.last_checked_at
+    assert loaded.last_ok_at == loaded.last_checked_at
+    store.set_state(new_id, STATE_FAILED)
+    assert store.get_account(new_id).last_ok_at == loaded.last_ok_at
 
 
 def test_events_order_and_filter(store: Store, account: Account) -> None:
@@ -122,7 +132,9 @@ def test_settings_roundtrip(store: Store) -> None:
 
 def test_reinit_db_is_idempotent(tmp_db) -> None:  # noqa: ANN001
     first = Store(tmp_db)
-    first.add_account(Account(name="x", portal_url="http://a", username="u", password="p"))
+    first.add_account(
+        Account(name="x", portal_url="http://a", username="u", password="p")
+    )
     second = Store(tmp_db)
     assert len(second.list_accounts()) == 1
 
@@ -142,7 +154,9 @@ def test_failed_state_roundtrip(store: Store, account: Account) -> None:
 
 def test_connection_commits_and_closes(store: Store) -> None:
     with store._connection() as conn:
-        conn.execute("INSERT INTO settings (key, value) VALUES (?, ?)", ("commit_test", "42"))
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?, ?)", ("commit_test", "42")
+        )
     with pytest.raises(sqlite3.ProgrammingError):
         conn.execute("SELECT 1")
     assert store.get_setting("commit_test") == 42
@@ -153,7 +167,10 @@ def test_connection_rolls_back_and_closes(store: Store) -> None:
     with pytest.raises(RuntimeError, match="abort transaction"):
         with store._connection() as current:
             conn = current
-            conn.execute("INSERT INTO settings (key, value) VALUES (?, ?)", ("rollback_test", "42"))
+            conn.execute(
+                "INSERT INTO settings (key, value) VALUES (?, ?)",
+                ("rollback_test", "42"),
+            )
             raise RuntimeError("abort transaction")
     assert conn is not None
     with pytest.raises(sqlite3.ProgrammingError):
@@ -161,7 +178,9 @@ def test_connection_rolls_back_and_closes(store: Store) -> None:
     assert store.get_setting("rollback_test") is None
 
 
-def test_store_operations_close_connections(store: Store, account: Account, monkeypatch) -> None:
+def test_store_operations_close_connections(
+    store: Store, account: Account, monkeypatch
+) -> None:
     opened = []
     original = store.connect
 
@@ -191,3 +210,69 @@ def test_store_operations_close_connections(store: Store, account: Account, monk
     for conn in opened:
         with pytest.raises(sqlite3.ProgrammingError):
             conn.execute("SELECT 1")
+
+
+def _legacy_database(path):
+    schema = storage_mod.SCHEMA_PATH.read_text(encoding="utf-8")
+    schema = schema.replace("    last_ok_at        TEXT,\n", "")
+    with sqlite3.connect(path) as conn:
+        conn.executescript(schema)
+        conn.execute("INSERT INTO settings VALUES ('legacy', '42')")
+        conn.execute(
+            "INSERT INTO accounts (name, portal_url, username, password_obf) VALUES (?, ?, ?, ?)",
+            ("legacy", "http://portal.invalid", "synthetic", ""),
+        )
+
+
+def test_legacy_schema_migrates_without_data_loss(tmp_path):
+    path = tmp_path / "legacy.db"
+    _legacy_database(path)
+    migrated = Store(path)
+    assert migrated.get_setting("legacy") == 42
+    assert migrated.list_accounts()[0].last_ok_at is None
+    assert Store(path).list_accounts()[0].name == "legacy"
+    with sqlite3.connect(path) as conn:
+        assert (
+            conn.execute("PRAGMA user_version").fetchone()[0]
+            == storage_mod.SCHEMA_VERSION
+        )
+        assert [r[1] for r in conn.execute("PRAGMA table_info(accounts)")].count(
+            "last_ok_at"
+        ) == 1
+
+
+def test_migration_failure_rolls_back_schema_and_version(tmp_path, monkeypatch):
+    path = tmp_path / "legacy.db"
+    _legacy_database(path)
+    original = Store._migrate_v2
+
+    def fail(conn):
+        original(conn)
+        raise RuntimeError("injected migration failure")
+
+    monkeypatch.setattr(Store, "_migrate_v2", staticmethod(fail))
+    with pytest.raises(RuntimeError, match="injected"):
+        Store(path)
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 0
+        assert "last_ok_at" not in {
+            r[1] for r in conn.execute("PRAGMA table_info(accounts)")
+        }
+        assert (
+            conn.execute("SELECT value FROM settings WHERE key='legacy'").fetchone()[0]
+            == "42"
+        )
+
+
+def test_newer_database_version_is_rejected(tmp_path):
+    path = tmp_path / "future.db"
+    with sqlite3.connect(path) as conn:
+        conn.execute("PRAGMA user_version = 999")
+    with pytest.raises(RuntimeError, match="拒绝降级"):
+        Store(path)
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 999
+        assert (
+            conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+            == []
+        )

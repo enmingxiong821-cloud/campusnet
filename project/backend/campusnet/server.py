@@ -13,11 +13,14 @@ from typing import Any, Callable
 
 from . import __version__, bootstart, discovery, portal, ports, probe as probe_mod
 from .auth import ApiAuth
+from .lockfile import SingleInstance
 from .monitor import MonitorManager
-from .paths import API_HOST, API_PORT, FRONTEND_DIR, stdout_ready
+from .paths import API_HOST, API_PORT, FRONTEND_DIR, instance_lock_path, stdout_ready
 from .storage import Account, Store
 
 Handler = Callable[[dict[str, Any], "ApiHandler"], Any]
+MAX_REQUEST_BODY = 1024 * 1024
+BODY_READ_TIMEOUT = 5.0
 
 
 class ApiError(Exception):
@@ -27,7 +30,9 @@ class ApiError(Exception):
         self.message = message
 
 
-def _account_from_payload(payload: dict[str, Any], existing: Account | None = None) -> Account:
+def _account_from_payload(
+    payload: dict[str, Any], existing: Account | None = None
+) -> Account:
     base = existing or Account()
 
     def take(key: str, default: Any = "") -> Any:
@@ -37,7 +42,10 @@ def _account_from_payload(payload: dict[str, Any], existing: Account | None = No
         id=base.id,
         name=str(take("name", base.name)).strip(),
         portal_url=str(take("portal_url", base.portal_url)).strip(),
-        probe_url=str(take("probe_url", base.probe_url) or "http://www.msftconnecttest.com/connecttest.txt").strip(),
+        probe_url=str(
+            take("probe_url", base.probe_url)
+            or "http://www.msftconnecttest.com/connecttest.txt"
+        ).strip(),
         username=str(take("username", base.username)).strip(),
         password=str(take("password", base.password)),
         username_field=str(take("username_field", base.username_field)).strip(),
@@ -49,7 +57,9 @@ def _account_from_payload(payload: dict[str, Any], existing: Account | None = No
         enabled=bool(take("enabled", base.enabled)),
     )
     extra = take("extra_fields", base.extra_fields) or {}
-    account.extra_fields = {str(k): str(v) for k, v in extra.items()} if isinstance(extra, dict) else {}
+    account.extra_fields = (
+        {str(k): str(v) for k, v in extra.items()} if isinstance(extra, dict) else {}
+    )
 
     if not account.name:
         raise ApiError(HTTPStatus.BAD_REQUEST, "账号名称不能为空")
@@ -57,11 +67,17 @@ def _account_from_payload(payload: dict[str, Any], existing: Account | None = No
         raise ApiError(HTTPStatus.BAD_REQUEST, "门户地址不能为空")
     parsed = urllib.parse.urlsplit(account.portal_url)
     if parsed.scheme not in ("http", "https"):
-        raise ApiError(HTTPStatus.BAD_REQUEST, "门户地址必须以 http:// 或 https:// 开头")
+        raise ApiError(
+            HTTPStatus.BAD_REQUEST, "门户地址必须以 http:// 或 https:// 开头"
+        )
     if account.password_mode not in ("plain", "base64", "md5", "md5_base64", "sha256"):
-        raise ApiError(HTTPStatus.BAD_REQUEST, f"不支持的密码编码方式: {account.password_mode}")
+        raise ApiError(
+            HTTPStatus.BAD_REQUEST, f"不支持的密码编码方式: {account.password_mode}"
+        )
     if account.login_mode not in ("http", "browser", "manual", "srun"):
-        raise ApiError(HTTPStatus.BAD_REQUEST, f"不支持的登录模式: {account.login_mode}")
+        raise ApiError(
+            HTTPStatus.BAD_REQUEST, f"不支持的登录模式: {account.login_mode}"
+        )
     if not account.password and existing is not None and not payload.get("password"):
         account.password = existing.password
     return account
@@ -81,15 +97,53 @@ class ApiHandler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A002, D102
         return  # 静默，避免刷屏
 
+    def _read_raw_body(self) -> bytes:
+        """有界读取并缓存本次请求体，包括随后被拒绝的请求。"""
+        if hasattr(self, "_request_body"):
+            return self._request_body
+        if self.headers.get("Transfer-Encoding"):
+            self.close_connection = True
+            raise ApiError(HTTPStatus.BAD_REQUEST, "不支持 Transfer-Encoding")
+        lengths = self.headers.get_all("Content-Length", [])
+        try:
+            if len(lengths) > 1:
+                raise ValueError("重复长度")
+            length = int(lengths[0]) if lengths else 0
+            if length < 0:
+                raise ValueError("负长度")
+        except ValueError as exc:
+            self.close_connection = True
+            raise ApiError(HTTPStatus.BAD_REQUEST, "Content-Length 无效") from exc
+        if length > MAX_REQUEST_BODY:
+            self.close_connection = True
+            raise ApiError(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "请求体超过 1 MiB 上限")
+        previous_timeout = self.connection.gettimeout()
+        try:
+            self.connection.settimeout(BODY_READ_TIMEOUT)
+            raw = self.rfile.read(length) if length else b""
+        except (TimeoutError, OSError) as exc:
+            self.close_connection = True
+            raise ApiError(
+                HTTPStatus.REQUEST_TIMEOUT, "请求体读取超时或连接中断"
+            ) from exc
+        finally:
+            self.connection.settimeout(previous_timeout)
+        if len(raw) != length:
+            self.close_connection = True
+            raise ApiError(HTTPStatus.BAD_REQUEST, "请求体长度不足")
+        self._request_body = raw
+        return raw
+
     def _read_body(self) -> dict[str, Any]:
-        length = int(self.headers.get("Content-Length") or 0)
-        if length <= 0:
+        raw = self._read_raw_body()
+        if not raw:
             return {}
-        raw = self.rfile.read(length)
         try:
             data = json.loads(raw.decode("utf-8"))
         except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-            raise ApiError(HTTPStatus.BAD_REQUEST, f"请求体不是合法 JSON: {exc}") from exc
+            raise ApiError(
+                HTTPStatus.BAD_REQUEST, f"请求体不是合法 JSON: {exc}"
+            ) from exc
         if not isinstance(data, dict):
             raise ApiError(HTTPStatus.BAD_REQUEST, "请求体必须是 JSON 对象")
         return data
@@ -104,7 +158,9 @@ class ApiHandler(BaseHTTPRequestHandler):
         if content_type.startswith("application/json"):
             body = json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
         else:
-            body = payload if isinstance(payload, bytes) else str(payload).encode("utf-8")
+            body = (
+                payload if isinstance(payload, bytes) else str(payload).encode("utf-8")
+            )
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
@@ -138,7 +194,9 @@ class ApiHandler(BaseHTTPRequestHandler):
         except ApiError as exc:
             self._send(exc.status, {"ok": False, "error": exc.message})
         except Exception as exc:  # noqa: BLE001 - API 不能因单请求崩掉
-            self.store.add_event(f"API 处理异常 {method} {path}: {exc}", level="error", stage="api")
+            self.store.add_event(
+                f"API 处理异常 {method} {path}: {exc}", level="error", stage="api"
+            )
             self._send(
                 HTTPStatus.INTERNAL_SERVER_ERROR,
                 {"ok": False, "error": f"{type(exc).__name__}: {exc}"},
@@ -169,7 +227,9 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._send(HTTPStatus.NOT_FOUND, {"ok": False, "error": f"找不到 {path}"})
             return
         ctype, _ = mimetypes.guess_type(str(target))
-        self._send(HTTPStatus.OK, target.read_bytes(), ctype or "application/octet-stream")
+        self._send(
+            HTTPStatus.OK, target.read_bytes(), ctype or "application/octet-stream"
+        )
 
 
 # ---------------------------------------------------------------- 路由实现
@@ -177,14 +237,21 @@ class ApiHandler(BaseHTTPRequestHandler):
 
 def routes_accounts(store: Store) -> dict[tuple[str, str], Handler]:
     def list_accounts(_: dict[str, Any], h: ApiHandler) -> None:
-        h._send(HTTPStatus.OK, {"ok": True, "accounts": [a.public() for a in store.list_accounts()]})
+        h._send(
+            HTTPStatus.OK,
+            {"ok": True, "accounts": [a.public() for a in store.list_accounts()]},
+        )
 
     def create_account(ctx: dict[str, Any], h: ApiHandler) -> None:
         payload = h._read_body()
         account = _account_from_payload(payload)
         new_id = store.add_account(account)
-        store.add_event(f"新增账号 {account.name}", level="info", stage="account", account_id=new_id)
-        h._send(HTTPStatus.CREATED, {"ok": True, "id": new_id, "account": account.public()})
+        store.add_event(
+            f"新增账号 {account.name}", level="info", stage="account", account_id=new_id
+        )
+        h._send(
+            HTTPStatus.CREATED, {"ok": True, "id": new_id, "account": account.public()}
+        )
 
     def _account_id(ctx: dict[str, Any]) -> int:
         params = ctx.get("params") or {}
@@ -204,7 +271,12 @@ def routes_accounts(store: Store) -> dict[tuple[str, str], Handler]:
         account = _account_from_payload(h._read_body(), existing)
         account.id = account_id
         store.update_account(account_id, account)
-        store.add_event(f"更新账号 {account.name}", level="info", stage="account", account_id=account_id)
+        store.add_event(
+            f"更新账号 {account.name}",
+            level="info",
+            stage="account",
+            account_id=account_id,
+        )
         h._send(HTTPStatus.OK, {"ok": True, "account": account.public()})
 
     def delete_account(ctx: dict[str, Any], h: ApiHandler) -> None:
@@ -222,7 +294,9 @@ def routes_accounts(store: Store) -> dict[tuple[str, str], Handler]:
     }
 
 
-def routes_actions(store: Store, manager: MonitorManager) -> dict[tuple[str, str], Handler]:
+def routes_actions(
+    store: Store, manager: MonitorManager
+) -> dict[tuple[str, str], Handler]:
     def probe_now(ctx: dict[str, Any], h: ApiHandler) -> None:
         url = (ctx["query"].get("url") or [probe_mod.DEFAULT_PROBES[0]])[0]
         timeout = float((ctx["query"].get("timeout") or ["5"])[0])
@@ -230,11 +304,18 @@ def routes_actions(store: Store, manager: MonitorManager) -> dict[tuple[str, str
         h._send(HTTPStatus.OK, {"ok": True, "result": result.__dict__})
 
     def detect_portal(ctx: dict[str, Any], h: ApiHandler) -> None:
-        url = (ctx["query"].get("url") or ["http://www.msftconnecttest.com/connecttest.txt"])[0]
+        url = (
+            ctx["query"].get("url")
+            or ["http://www.msftconnecttest.com/connecttest.txt"]
+        )[0]
         found = probe_mod.detect_portal_url(url)
         h._send(
             HTTPStatus.OK,
-            {"ok": True, "portal_url": found, "hint": None if found else "未能从跳转中识别门户地址，请手动填写"},
+            {
+                "ok": True,
+                "portal_url": found,
+                "hint": None if found else "未能从跳转中识别门户地址，请手动填写",
+            },
         )
 
     def discover_portal(ctx: dict[str, Any], h: ApiHandler) -> None:
@@ -242,7 +323,9 @@ def routes_actions(store: Store, manager: MonitorManager) -> dict[tuple[str, str
         seed = (query.get("seed") or [""])[0]
         timeout = float((query.get("timeout") or ["4"])[0])
         scan = (query.get("scan") or ["1"])[0] not in ("0", "false", "no")
-        report = discovery.discover(seed=seed, timeout=timeout, include_gateway_scan=scan)
+        report = discovery.discover(
+            seed=seed, timeout=timeout, include_gateway_scan=scan
+        )
         best = report["candidates"][0] if report["candidates"] else None
         h._send(
             HTTPStatus.OK,
@@ -259,7 +342,9 @@ def routes_actions(store: Store, manager: MonitorManager) -> dict[tuple[str, str
         try:
             account_id = int(params.get("id", ""))
         except ValueError as exc:
-            raise ApiError(HTTPStatus.BAD_REQUEST, f"账号 ID 非法: {params.get('id')}") from exc
+            raise ApiError(
+                HTTPStatus.BAD_REQUEST, f"账号 ID 非法: {params.get('id')}"
+            ) from exc
         account = store.get_account(account_id)
         if account is None:
             raise ApiError(HTTPStatus.NOT_FOUND, f"账号 {account_id} 不存在")
@@ -268,7 +353,9 @@ def routes_actions(store: Store, manager: MonitorManager) -> dict[tuple[str, str
         result = portal.login(
             account,
             headless=monitor.headless,
-            on_progress=lambda stage, message: monitor.emit_progress(account, stage, message),
+            on_progress=lambda stage, message: monitor.emit_progress(
+                account, stage, message
+            ),
         )
         store.add_event(
             f"手动登录 {account.name}: {result.state} - {result.message}",
@@ -280,7 +367,12 @@ def routes_actions(store: Store, manager: MonitorManager) -> dict[tuple[str, str
         store.set_state(account_id, "logged_in" if result.ok else "failed")
         h._send(
             HTTPStatus.OK,
-            {"ok": True, "state": result.state, "message": result.message, "detail": result.detail},
+            {
+                "ok": True,
+                "state": result.state,
+                "message": result.message,
+                "detail": result.detail,
+            },
         )
 
     def progress(ctx: dict[str, Any], h: ApiHandler) -> None:
@@ -294,11 +386,15 @@ def routes_actions(store: Store, manager: MonitorManager) -> dict[tuple[str, str
         try:
             account_id = int(account_raw) if account_raw else None
         except ValueError:
-            raise ApiError(HTTPStatus.BAD_REQUEST, f"account_id 非法: {account_raw}") from None
+            raise ApiError(
+                HTTPStatus.BAD_REQUEST, f"account_id 非法: {account_raw}"
+            ) from None
 
         monitor = manager.ensure(store)
         if (query.get("latest") or [""])[0] not in ("", "0", "false"):
-            payload = monitor.latest_progress(limit=int((query.get("limit") or ["30"])[0]))
+            payload = monitor.latest_progress(
+                limit=int((query.get("limit") or ["30"])[0])
+            )
         else:
             payload = monitor.progress_since(seq, account_id=account_id)
         payload["ok"] = True
@@ -320,7 +416,9 @@ def routes_actions(store: Store, manager: MonitorManager) -> dict[tuple[str, str
     }
 
 
-def routes_monitor(store: Store, manager: MonitorManager) -> dict[tuple[str, str], Handler]:
+def routes_monitor(
+    store: Store, manager: MonitorManager
+) -> dict[tuple[str, str], Handler]:
     def status(_: dict[str, Any], h: ApiHandler) -> None:
         h._send(HTTPStatus.OK, {"ok": True, "status": manager.ensure(store).status()})
 
@@ -343,7 +441,9 @@ def routes_monitor(store: Store, manager: MonitorManager) -> dict[tuple[str, str
             level="info",
             stage="monitor",
         )
-        h._send(HTTPStatus.OK, {"ok": True, "started": started, "status": monitor.status()})
+        h._send(
+            HTTPStatus.OK, {"ok": True, "started": started, "status": monitor.status()}
+        )
 
     def stop(_: dict[str, Any], h: ApiHandler) -> None:
         stopped = manager.monitor.stop() if manager.monitor else True
@@ -365,7 +465,10 @@ def routes_events(store: Store) -> dict[tuple[str, str], Handler]:
         account_id = int(account_raw) if account_raw else None
         h._send(
             HTTPStatus.OK,
-            {"ok": True, "events": store.list_events(limit=limit, account_id=account_id)},
+            {
+                "ok": True,
+                "events": store.list_events(limit=limit, account_id=account_id),
+            },
         )
 
     def clear_events(_: dict[str, Any], h: ApiHandler) -> None:
@@ -380,7 +483,14 @@ def routes_events(store: Store) -> dict[tuple[str, str], Handler]:
 
 def routes_system(store: Store) -> dict[tuple[str, str], Handler]:
     def health(_: dict[str, Any], h: ApiHandler) -> None:
-        h._send(HTTPStatus.OK, {"ok": True, "version": __version__, "accounts": len(store.list_accounts())})
+        h._send(
+            HTTPStatus.OK,
+            {
+                "ok": True,
+                "version": __version__,
+                "accounts": len(store.list_accounts()),
+            },
+        )
 
     def healthz(_: dict[str, Any], h: ApiHandler) -> None:
         h._send(HTTPStatus.OK, {"ok": True, "version": __version__})
@@ -399,20 +509,31 @@ def routes_system(store: Store) -> dict[tuple[str, str], Handler]:
 
     def validate_bootstart_request(h: ApiHandler) -> None:
         # Rejected requests may have unread bodies; do not reuse that connection.
-        if h.headers.get("Content-Type", "").split(";", 1)[0].strip().lower() != "application/json":
+        if (
+            h.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+            != "application/json"
+        ):
             h.close_connection = True
-            raise ApiError(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, "自启动操作要求 application/json")
+            raise ApiError(
+                HTTPStatus.UNSUPPORTED_MEDIA_TYPE, "自启动操作要求 application/json"
+            )
 
     def bootstart_install(ctx: dict[str, Any], h: ApiHandler) -> None:
         validate_bootstart_request(h)
         payload = h._read_body()
         address = h.server.server_address
         if not isinstance(address, tuple):
-            raise ApiError(HTTPStatus.INTERNAL_SERVER_ERROR, "服务监听地址不是 TCP 地址")
+            raise ApiError(
+                HTTPStatus.INTERNAL_SERVER_ERROR, "服务监听地址不是 TCP 地址"
+            )
         host = payload.get("host", address[0])
         raw_port = payload.get("port", address[1])
         try:
-            if not isinstance(host, str) or isinstance(raw_port, bool) or not isinstance(raw_port, (int, str)):
+            if (
+                not isinstance(host, str)
+                or isinstance(raw_port, bool)
+                or not isinstance(raw_port, (int, str))
+            ):
                 raise ValueError("host 必须为字符串，port 必须为整数")
             port = int(raw_port)
             bootstart.launch_args(host, port)
@@ -424,9 +545,14 @@ def routes_system(store: Store) -> dict[tuple[str, str], Handler]:
             level="info" if result.installed else "warning",
             stage="server",
         )
-        h._send(HTTPStatus.OK if result.success else HTTPStatus.INTERNAL_SERVER_ERROR,
-                {"ok": result.success, "error": "" if result.success else result.detail,
-                 **result.as_dict()})
+        h._send(
+            HTTPStatus.OK if result.success else HTTPStatus.INTERNAL_SERVER_ERROR,
+            {
+                "ok": result.success,
+                "error": "" if result.success else result.detail,
+                **result.as_dict(),
+            },
+        )
 
     def bootstart_uninstall(_: dict[str, Any], h: ApiHandler) -> None:
         validate_bootstart_request(h)
@@ -437,9 +563,36 @@ def routes_system(store: Store) -> dict[tuple[str, str], Handler]:
             level="info" if result.success else "warning",
             stage="server",
         )
-        h._send(HTTPStatus.OK if result.success else HTTPStatus.INTERNAL_SERVER_ERROR,
-                {"ok": result.success, "error": "" if result.success else result.detail,
-                 **result.as_dict()})
+        h._send(
+            HTTPStatus.OK if result.success else HTTPStatus.INTERNAL_SERVER_ERROR,
+            {
+                "ok": result.success,
+                "error": "" if result.success else result.detail,
+                **result.as_dict(),
+            },
+        )
+
+    def power_action(ctx: dict[str, Any], h: ApiHandler) -> None:
+        """远程关机 / 重启：手机控制台上的一键操作，必须显式确认。"""
+        from . import power as power_mod
+
+        action = str((ctx.get("params") or {}).get("action", "")).lower()
+        if action not in ("off", "reboot"):
+            raise ApiError(HTTPStatus.NOT_FOUND, f"不支持的电源操作：{action}")
+        payload = h._read_body()
+        if not payload.get("confirm"):
+            raise ApiError(
+                HTTPStatus.BAD_REQUEST, "关机/重启需要显式确认（confirm=true）"
+            )
+        try:
+            command = power_mod.shutdown() if action == "off" else power_mod.reboot()
+        except power_mod.PowerError as exc:
+            raise ApiError(HTTPStatus.INTERNAL_SERVER_ERROR, f"执行失败：{exc}") from exc
+        label = "关机" if action == "off" else "重启"
+        store.add_event(
+            f"收到远程{label}指令：{command}", level="warning", stage="power"
+        )
+        h._send(HTTPStatus.OK, {"ok": True, "action": action, "command": command})
 
     return {
         ("GET", "/api/health"): health,
@@ -449,6 +602,7 @@ def routes_system(store: Store) -> dict[tuple[str, str], Handler]:
         ("GET", "/api/bootstart"): bootstart_status,
         ("POST", "/api/bootstart/install"): bootstart_install,
         ("POST", "/api/bootstart/uninstall"): bootstart_uninstall,
+        ("POST", "/api/power/{action}"): power_action,
     }
 
 
@@ -457,12 +611,19 @@ def routes_auth(auth: ApiAuth | None) -> dict[tuple[str, str], Handler]:
 
     def status(_: dict[str, Any], h: ApiHandler) -> None:
         required = bool(getattr(h, "auth_required", False))
-        authenticated = bool(auth and auth.authenticated(h.headers)) if required else True
-        h._send(HTTPStatus.OK, {"ok": True, "required": required, "authenticated": authenticated})
+        authenticated = (
+            bool(auth and auth.authenticated(h.headers)) if required else True
+        )
+        h._send(
+            HTTPStatus.OK,
+            {"ok": True, "required": required, "authenticated": authenticated},
+        )
 
     def login(_: dict[str, Any], h: ApiHandler) -> None:
         if auth is None:
-            h._send(HTTPStatus.OK, {"ok": True, "required": False, "authenticated": True})
+            h._send(
+                HTTPStatus.OK, {"ok": True, "required": False, "authenticated": True}
+            )
             return
         payload = h._read_body()
         token = str(payload.get("token", ""))
@@ -483,7 +644,11 @@ def routes_auth(auth: ApiAuth | None) -> dict[tuple[str, str], Handler]:
     def logout(_: dict[str, Any], h: ApiHandler) -> None:
         if auth is not None:
             auth.logout(h.headers)
-        h._send(HTTPStatus.OK, {"ok": True}, extra_headers={"Set-Cookie": ApiAuth.clear_cookie()})
+        h._send(
+            HTTPStatus.OK,
+            {"ok": True},
+            extra_headers={"Set-Cookie": ApiAuth.clear_cookie()},
+        )
 
     return {
         ("GET", "/api/auth/status"): status,
@@ -523,7 +688,9 @@ def build_handler(
     return handler_cls
 
 
-def _match_route(handler: type[ApiHandler], method: str, path: str) -> tuple[Handler | None, dict[str, str]]:
+def _match_route(
+    handler: type[ApiHandler], method: str, path: str
+) -> tuple[Handler | None, dict[str, str]]:
     """把 /api/accounts/3 映射到模板 /api/accounts/{id}。"""
     exact = handler.routes.get((method, path))
     if exact is not None:
@@ -560,7 +727,9 @@ def require_same_origin(h: ApiHandler) -> None:
                 and bool(parsed.netloc)
                 and parsed.netloc.lower() == h.headers.get("Host", "").lower()
                 and parsed.username is None
-                and not parsed.path and not parsed.query and not parsed.fragment
+                and not parsed.path
+                and not parsed.query
+                and not parsed.fragment
             )
         except ValueError:
             valid = False
@@ -579,6 +748,13 @@ def _install_dispatch(handler: type[ApiHandler]) -> None:
     }
 
     def _dispatch(self: ApiHandler, method: str) -> None:
+        # 每个请求重置缓存，不能把 keep-alive 上一请求的正文重复使用。
+        self.__dict__.pop("_request_body", None)
+        try:
+            self._read_raw_body()
+        except ApiError as exc:
+            self._send(exc.status, {"ok": False, "error": exc.message})
+            return
         parsed = urllib.parse.urlsplit(self.path)
         path = parsed.path.rstrip("/") or "/"
         query = urllib.parse.parse_qs(parsed.query)
@@ -612,7 +788,9 @@ def _install_dispatch(handler: type[ApiHandler]) -> None:
         except ApiError as exc:
             self._send(exc.status, {"ok": False, "error": exc.message})
         except Exception as exc:  # noqa: BLE001
-            self.store.add_event(f"API 处理异常 {method} {path}: {exc}", level="error", stage="api")
+            self.store.add_event(
+                f"API 处理异常 {method} {path}: {exc}", level="error", stage="api"
+            )
             self._send(
                 HTTPStatus.INTERNAL_SERVER_ERROR,
                 {"ok": False, "error": f"{type(exc).__name__}: {exc}"},
@@ -629,8 +807,13 @@ def _install_dispatch(handler: type[ApiHandler]) -> None:
         self.send_header("Content-Length", "0")
         self.send_header("Cache-Control", "no-store")
         self.send_header("Allow", "GET, POST, PUT, DELETE, OPTIONS")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-CampusNet-Token")
+        self.send_header(
+            "Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS"
+        )
+        self.send_header(
+            "Access-Control-Allow-Headers",
+            "Content-Type, Authorization, X-CampusNet-Token",
+        )
         self.end_headers()
 
     handler.do_OPTIONS = _options  # type: ignore[method-assign]
@@ -652,56 +835,103 @@ def serve(
     auto_shift=True 时自动往后找一个空闲端口。
     """
     stdout_ready()
-    store = store or Store()
-    manager = MonitorManager()
-    if auth_required is None:
-        auth_required = host not in ("127.0.0.1", "localhost", "::1")
-    auth = ApiAuth() if auth_required else None
-    handler_cls = build_handler(store, manager, auth=auth, auth_required=bool(auth_required))
-    _install_dispatch(handler_cls)
+    lock = SingleInstance(instance_lock_path())
+    if not lock.acquire():
+        holder = lock.holder_pid()
+        detail = f"（持有者 PID {holder}）" if holder else ""
+        print(f"[错误] 校园网自连服务已有实例运行{detail}。", file=sys.stderr)
+        raise SystemExit(1)
 
     try:
-        port = ports.resolve_ports({port: "服务"}, host=host, auto_shift=auto_shift)[port]
-    except OSError as exc:
-        print(f"[错误] {exc}", file=sys.stderr)
-        print(
-            f"        换个端口启动：python utils/run.py serve --port {port + 20}\n"
-            "        或先关掉占用它的那个程序。",
-            file=sys.stderr,
+        store = store or Store()
+        manager = MonitorManager()
+        if auth_required is None:
+            auth_required = host not in ("127.0.0.1", "localhost", "::1")
+        auth = ApiAuth() if auth_required else None
+        handler_cls = build_handler(
+            store, manager, auth=auth, auth_required=bool(auth_required)
         )
-        raise SystemExit(1) from exc
+        _install_dispatch(handler_cls)
 
-    try:
-        httpd = ThreadingHTTPServer((host, port), handler_cls)
-    except OSError as exc:
-        # 预检通过但 bind 仍失败：端口在竞态窗口内被抢占
-        print(f"[错误] 端口 {port} 绑定失败：{exc}", file=sys.stderr)
-        raise SystemExit(1) from exc
-    httpd.daemon_threads = True
+        try:
+            port = ports.resolve_ports(
+                {port: "服务"}, host=host, auto_shift=auto_shift
+            )[port]
+        except OSError as exc:
+            print(f"[错误] {exc}", file=sys.stderr)
+            print(
+                f"        换个端口启动：python utils/run.py serve --port {port + 20}\n"
+                "        或先关掉占用它的那个程序。",
+                file=sys.stderr,
+            )
+            raise SystemExit(1) from exc
 
-    if autostart:
-        want = bool(store.get_setting("autostart", True))
-        if want:
-            manager.start(store)
-        store.add_event(
-            f"服务启动 http://{host}:{port}（自动监控={'开' if want else '关'}）",
-            level="info",
-            stage="server",
-        )
+        try:
+            httpd = ThreadingHTTPServer((host, port), handler_cls)
+        except OSError as exc:
+            # 预检通过但 bind 仍失败：端口在竞态窗口内被抢占
+            print(f"[错误] 端口 {port} 绑定失败：{exc}", file=sys.stderr)
+            raise SystemExit(1) from exc
+        httpd.daemon_threads = True
 
-    if not blocking:
-        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
-        thread.start()
+        if autostart:
+            want = bool(store.get_setting("autostart", True))
+            if want:
+                manager.start(store)
+            store.add_event(
+                f"服务启动 http://{host}:{port}（自动监控={'开' if want else '关'}）",
+                level="info",
+                stage="server",
+            )
+
+        if not blocking:
+            released = False
+            original_shutdown = httpd.shutdown
+            original_close = httpd.server_close
+
+            def release() -> None:
+                nonlocal released
+                if not released:
+                    released = True
+                    manager.stop()
+                    lock.release()
+
+            def shutdown() -> None:
+                try:
+                    original_shutdown()
+                finally:
+                    release()
+
+            def server_close() -> None:
+                try:
+                    original_close()
+                finally:
+                    release()
+
+            httpd.shutdown = shutdown  # type: ignore[method-assign]
+            httpd.server_close = server_close  # type: ignore[method-assign]
+            thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+            thread.start()
+            return httpd
+
+        print(f"校园网自连服务已启动： http://{host}:{port}  （Ctrl+C 停止）")
+        if auth is not None:
+            print(
+                "局域网控制台已启用令牌保护。令牌可用 `python utils/run.py token` 查看。"
+            )
+        try:
+            httpd.serve_forever()
+        except KeyboardInterrupt:
+            print("\n正在停止监控与服务…")
+        finally:
+            try:
+                manager.stop()
+            finally:
+                try:
+                    httpd.server_close()
+                finally:
+                    lock.release()
         return httpd
-
-    print(f"校园网自连服务已启动： http://{host}:{port}  （Ctrl+C 停止）")
-    if auth is not None:
-        print("局域网控制台已启用令牌保护。令牌可用 `python utils/run.py token` 查看。")
-    try:
-        httpd.serve_forever()
-    except KeyboardInterrupt:
-        print("\n正在停止监控与服务…")
-    finally:
-        manager.stop()
-        httpd.server_close()
-    return httpd
+    except BaseException:
+        lock.release()
+        raise

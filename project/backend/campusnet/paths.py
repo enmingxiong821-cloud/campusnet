@@ -36,6 +36,12 @@ def api_token_path() -> Path:
     return Path(override).expanduser() if override else db_path().with_suffix(".api-token")
 
 
+def instance_lock_path() -> Path:
+    """服务单实例锁路径；默认与当前数据库放在同一目录。"""
+    override = os.environ.get("CAMPUSNET_INSTANCE_LOCK_FILE")
+    return Path(override).expanduser() if override else db_path().with_suffix(".lock")
+
+
 # 兼容旧引用：导入时的快照，仅供不便改动调用方时使用。
 # 新代码请调 db_path()，否则环境变量改不动。
 DB_PATH = db_path()

@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS accounts (
     enabled           INTEGER NOT NULL DEFAULT 1,
     last_state        TEXT    NOT NULL DEFAULT 'unknown',
     last_checked_at   TEXT,
+    last_ok_at        TEXT,
     created_at        TEXT    NOT NULL DEFAULT (datetime('now','localtime')),
     updated_at        TEXT    NOT NULL DEFAULT (datetime('now','localtime'))
 );
