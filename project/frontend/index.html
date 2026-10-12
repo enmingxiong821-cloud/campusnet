@@ -178,6 +178,12 @@
     .card .val{font-size:20px}
     th:nth-child(3),td:nth-child(3){display:none}
     .pg-item .who{display:none}
+    /* 手机上表单改成单列，避免 210px 的两列挤成窄条 */
+    .form-grid{grid-template-columns:1fr}
+    .panel-body{padding:14px}
+    /* 唤醒命令与 MAC 很长，窄屏要能断行，否则整页被撑出横向滚动 */
+    #wakeHint{overflow-wrap:anywhere}
+    .row button{flex:1 1 auto}
   }
 </style>
 </head>
