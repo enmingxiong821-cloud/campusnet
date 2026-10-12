@@ -109,3 +109,44 @@ def test_cli_power_wake_requires_mac(capsys) -> None:  # noqa: ANN001
     assert cli_mod.main(["power", "wake"]) == 2
 
     assert "需要 --mac" in capsys.readouterr().err
+
+
+def test_local_macs_parses_getmac(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Windows 上从 getmac 的 CSV 输出里取 MAC，统一成冒号大写形式。"""
+    monkeypatch.setattr(power.os, "name", "nt")
+    monkeypatch.setattr(power.shutil, "which", lambda _name: "getmac")
+    monkeypatch.setattr(
+        power,
+        "_run_capture",
+        lambda args: (
+            True,
+            '"AC-45-EF-49-B7-F4","\\Device\\Tcpip_{X}"\n"8C-32-23-61-A3-ED","Media disconnected"\n',
+        ),
+    )
+
+    assert power.local_macs() == ["AC:45:EF:49:B7:F4", "8C:32:23:61:A3:ED"]
+
+
+def test_local_macs_returns_empty_when_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(power.os, "name", "nt")
+    monkeypatch.setattr(power.shutil, "which", lambda _name: None)
+
+    assert power.local_macs() == []
+
+
+def test_wake_info_carries_mac_command_and_notes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(power, "local_macs", lambda: ["AC:45:EF:49:B7:F4"])
+
+    info = power.wake_info()
+
+    assert info["macs"] == ["AC:45:EF:49:B7:F4"]
+    assert "power wake --mac AC:45:EF:49:B7:F4" in str(info["command"])
+    assert any("BIOS" in str(item) for item in info["notes"])  # type: ignore[union-attr]
+
+
+def test_wake_info_without_mac_gives_placeholder(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(power, "local_macs", lambda: [])
+
+    assert "<网卡MAC>" in str(power.wake_info()["command"])

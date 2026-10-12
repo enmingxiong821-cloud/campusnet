@@ -572,6 +572,12 @@ def routes_system(store: Store) -> dict[tuple[str, str], Handler]:
             },
         )
 
+    def power_info(_: dict[str, Any], h: ApiHandler) -> None:
+        """远程开机需要的信息：网卡 MAC、唤醒命令与硬件路线说明（只读）。"""
+        from . import power as power_mod
+
+        h._send(HTTPStatus.OK, {"ok": True, **power_mod.wake_info()})
+
     def power_action(ctx: dict[str, Any], h: ApiHandler) -> None:
         """远程关机 / 重启：手机控制台上的一键操作，必须显式确认。"""
         from . import power as power_mod
@@ -603,6 +609,7 @@ def routes_system(store: Store) -> dict[tuple[str, str], Handler]:
         ("POST", "/api/bootstart/install"): bootstart_install,
         ("POST", "/api/bootstart/uninstall"): bootstart_uninstall,
         ("POST", "/api/power/{action}"): power_action,
+        ("GET", "/api/power/info"): power_info,
     }
 
 

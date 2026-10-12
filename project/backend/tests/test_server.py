@@ -168,6 +168,24 @@ def test_power_action_requires_confirm(api, monkeypatch) -> None:  # noqa: ANN00
     assert "确认" in data["error"]
 
 
+def test_power_info_exposes_wake_instructions(api, monkeypatch) -> None:  # noqa: ANN001
+    monkeypatch.setattr(
+        "campusnet.power.wake_info",
+        lambda: {
+            "macs": ["AC:45:EF:49:B7:F4"],
+            "command": "python utils/run.py power wake --mac AC:45:EF:49:B7:F4",
+            "notes": ["BIOS 里设断电恢复为 Power On"],
+        },
+    )
+
+    status, data = call(f"{api}/api/power/info")
+
+    assert status == 200
+    assert data["ok"] is True
+    assert data["macs"] == ["AC:45:EF:49:B7:F4"]
+    assert "power wake" in data["command"]
+
+
 def test_power_action_executes_with_confirm(api, monkeypatch) -> None:  # noqa: ANN001
     calls: list[str] = []
     monkeypatch.setattr(

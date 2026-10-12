@@ -273,8 +273,10 @@
           <span class="lbl" style="min-width:96px">电源控制</span>
           <button class="ghost danger" id="btnPowerOff">远程关机</button>
           <button class="ghost" id="btnPowerReboot">远程重启</button>
-          <span class="hint" id="powerHint">关机后要靠 WOL 或智能插座才能再开机</span>
+          <button class="ghost" id="btnPowerInfo">怎么远程开机</button>
+          <span class="hint" id="powerHint"></span>
         </div>
+        <p class="hint" id="wakeHint" style="margin-top:8px;white-space:pre-wrap"></p>
         <label style="margin-top:18px"><span class="lbl">用于检测门户地址的探测网址</span>
           <input id="setDetectUrl" value="http://www.msftconnecttest.com/connecttest.txt">
         </label>
@@ -288,9 +290,12 @@
           <span class="hint" id="bootHint"></span>
         </div>
         <p class="hint" style="margin-top:8px">
-          开启后服务随登录自动拉起，认证与重连在后台运行。
-          Windows 写入当前用户启动文件夹，Linux 走 systemd 用户单元（无则退化为 XDG autostart），macOS 走 LaunchAgent；
-          启动项写入当前用户目录，是否允许注册取决于系统策略。
+          目标链路是：通电 → 程序自动运行 → 自动认证你配置好的网络；机器开不开机由你远程决定
+          （关机用上面的按钮，开机需要 BIOS 上电自启 / 智能插座 / WOL 之一）。
+          默认载体写在当前用户启动文件夹，是「登录后」语义；想要「通电就自动连」，
+          用桌面快捷方式「注册开机自启-无需登录(需管理员)」注册计划任务——开机触发、无论是否登录都运行，
+          需要管理员权限并确认一次 UAC。
+          Linux 走 systemd 用户单元（无则退化为 XDG autostart），macOS 走 LaunchAgent。
         </p>
       </div>
     </section>
@@ -787,7 +792,7 @@ document.querySelectorAll('.tab').forEach(t => t.onclick = () => {
     $('tab-' + k).hidden = k !== t.dataset.tab;
   });
   if (t.dataset.tab === 'events') loadEvents();
-  if (t.dataset.tab === 'settings') { loadSettings(); loadBootstart(); }
+  if (t.dataset.tab === 'settings') { loadSettings(); loadBootstart(); loadWakeHint(); }
 });
 
 $('btnAdd').onclick = () => openModal(null);
@@ -817,8 +822,21 @@ async function powerAction(action) {
   }
 }
 
+async function loadWakeHint() {
+  try {
+    const info = await api('/api/power/info');
+    const mac = (info.macs && info.macs.length) ? info.macs.join(' / ') : '（未识别到网卡 MAC）';
+    const notes = (info.notes || []).map(x => '· ' + x).join('\n');
+    $('wakeHint').textContent =
+      '远程开机（需要硬件配合）\n本机网卡 MAC：' + mac + '\n唤醒命令：' + info.command + '\n' + notes;
+  } catch (e) {
+    $('wakeHint').textContent = '读取开机信息失败: ' + e.message;
+  }
+}
+
 $('btnPowerOff').onclick = () => powerAction('off');
 $('btnPowerReboot').onclick = () => powerAction('reboot');
+$('btnPowerInfo').onclick = loadWakeHint;
 $('btnSaveSettings').onclick = saveSettings;
 $('btnBootInstall').onclick = () => setBootstart('install');
 $('btnBootUninstall').onclick = () => setBootstart('uninstall');
