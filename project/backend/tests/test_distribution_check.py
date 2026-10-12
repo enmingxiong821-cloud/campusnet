@@ -27,7 +27,6 @@ SPEC.loader.exec_module(scanner)
         ("令牌='example-token'", "疑似明文凭据"),
         ("student=2012345678", "疑似学号"),
         ("phone=13800000000", "疑似手机号"),
-        ("http://172.26.8.11/", "校园内网地址"),
     ],
 )
 def test_distribution_scan_reports_synthetic_values(tmp_path, content, rule):
@@ -43,6 +42,28 @@ def test_distribution_scan_ignores_nonliteral_code(tmp_path):
         encoding="utf-8",
     )
     assert scanner.scan_file(tmp_path, relative) == []
+
+
+def test_local_identifiers_come_from_private_list(tmp_path):
+    """真实内网地址这类标识走本地清单，公开仓库里不留硬编码。"""
+    (tmp_path / "utils").mkdir()
+    (tmp_path / "utils" / "local_sensitive.txt").write_text(
+        "# 注释行\n172\\.26\\.1\\.1\n", encoding="utf-8"
+    )
+    relative = Path("example.py")
+    (tmp_path / relative).write_text(
+        "portal=http://172.26.1.1/eportal\n", encoding="utf-8"
+    )
+
+    patterns = scanner.load_local_patterns(tmp_path)
+    findings = scanner.scan_file(tmp_path, relative, local=patterns)
+
+    assert patterns
+    assert findings == ["本地敏感标识 #1"]
+
+
+def test_missing_local_list_is_not_an_error(tmp_path):
+    assert scanner.load_local_patterns(tmp_path) == []
 
 
 def test_distribution_scan_rejects_sensitive_filename(tmp_path):

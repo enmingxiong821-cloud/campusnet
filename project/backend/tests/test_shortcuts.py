@@ -16,20 +16,18 @@ from campusnet import shortcuts as shortcuts_mod
 # ---------- 快捷方式 ----------
 
 
-def test_default_shortcuts_cover_every_usage() -> None:
-    names = [item.name for item in shortcuts_mod.DEFAULT_SHORTCUTS]
+def test_desktop_has_exactly_one_shortcut() -> None:
+    """桌面只留一个入口：其余操作都在菜单里选。"""
+    assert len(shortcuts_mod.DEFAULT_SHORTCUTS) == 1
+    entry = shortcuts_mod.DEFAULT_SHORTCUTS[0]
+    assert entry.name == "校园网自连"
+    assert entry.args == ("menu",)
 
-    for keyword in (
-        "启动校园网服务",
-        "打开控制台",
-        "立即检测",
-        "自检",
-        "访问",
-        "自启",
-        "日志",
-        "关机",
-    ):
-        assert any(keyword in name for name in names), keyword
+
+def test_legacy_names_cover_old_shortcuts() -> None:
+    """旧版本生成过的名字要留下来，才能在重新生成时清掉。"""
+    for legacy in ("启动校园网服务", "打开控制台", "远程关机"):
+        assert legacy in shortcuts_mod.LEGACY_NAMES
 
 
 def test_create_linux_writes_desktop_entries(tmp_path: Path) -> None:
@@ -39,10 +37,10 @@ def test_create_linux_writes_desktop_entries(tmp_path: Path) -> None:
     assert "快捷方式" in message
     files = sorted(item.name for item in tmp_path.iterdir())
     assert len(files) == len(shortcuts_mod.DEFAULT_SHORTCUTS)
-    entry = tmp_path / "立即检测网络.desktop"
+    entry = tmp_path / "校园网自连.desktop"
     text = entry.read_text(encoding="utf-8")
     assert "Type=Application" in text
-    assert "check" in text
+    assert "menu" in text
     assert "Terminal=true" in text
     if os.name == "posix":
         assert entry.stat().st_mode & 0o111
@@ -52,9 +50,9 @@ def test_create_macos_writes_command_scripts(tmp_path: Path) -> None:
     ok, _ = shortcuts_mod.create(tmp_path, platform="darwin")
 
     assert ok is True
-    script = (tmp_path / "查看运行日志.command").read_text(encoding="utf-8")
+    script = (tmp_path / "校园网自连.command").read_text(encoding="utf-8")
     assert script.startswith("#!/bin/sh")
-    assert "logs" in script
+    assert "menu" in script
 
 
 def test_create_windows_calls_powershell(
@@ -71,16 +69,25 @@ def test_create_windows_calls_powershell(
 
     assert ok is True
     assert "快捷方式" in message
-    # 普通一组 + 需要提权的一组
-    assert len(scripts) == 2
+    assert len(scripts) == 1
     assert "WScript.Shell" in scripts[0]
     for item in shortcuts_mod.DEFAULT_SHORTCUTS:
         assert item.name + ".lnk" in scripts[0]
     # 交互式命令要包一层 cmd /k，否则双击后窗口一闪而过看不到报错
     assert "/k " in scripts[0]
-    # 需要管理员的那个快捷方式要能自我提权
-    assert "Start-Process -Verb RunAs" in scripts[1]
-    assert "需管理员" in scripts[1]
+
+
+def test_create_cleans_up_legacy_shortcuts(tmp_path: Path) -> None:
+    """桌面上的旧快捷方式要在重新生成时被清掉，不能越攒越多。"""
+    for legacy in ("启动校园网服务", "远程关机"):
+        (tmp_path / f"{legacy}.desktop").write_text("old", encoding="utf-8")
+
+    ok, message = shortcuts_mod.create(tmp_path, platform="linux")
+
+    assert ok is True
+    assert "清理了 2 个旧快捷方式" in message
+    assert not (tmp_path / "启动校园网服务.desktop").exists()
+    assert not (tmp_path / "远程关机.desktop").exists()
 
 
 def test_create_rejects_unknown_platform(tmp_path: Path) -> None:

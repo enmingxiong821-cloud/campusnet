@@ -24,7 +24,29 @@ SENSITIVE_SUFFIXES = (
 )
 ACCOUNT_NUMBER = re.compile(r"(?<!\d)20\d{8}(?!\d)")
 PHONE_NUMBER = re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)")
-PRIVATE_PORTAL = re.compile(r"(?<!\d)172\.26\.8\.11(?!\d)")
+
+#: 本机私有标识清单（不入库）。真实校园内网地址、学校特有的 SSID 之类不该
+#: 写进公开仓库，但检查规则又要能覆盖它们，所以改成从这份本地文件里读。
+LOCAL_IDENTIFIERS_FILE = "utils/local_sensitive.txt"
+
+
+def load_local_patterns(root: Path) -> list[re.Pattern[str]]:
+    """读本地敏感标识清单，一行一条正则；文件不存在就返回空列表。"""
+    path = root / LOCAL_IDENTIFIERS_FILE
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    patterns: list[re.Pattern[str]] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        try:
+            patterns.append(re.compile(line))
+        except re.error:
+            continue
+    return patterns
 QUOTED_CREDENTIAL = re.compile(
     r"(?i)(?<![a-z0-9_])(?:password|passwd|pwd|api_?key|secret|token)"
     r"\s*[:=]\s*(['\"])([^'\"\r\n]{7,})\1"
@@ -68,7 +90,13 @@ def repository_files(root: Path) -> list[Path]:
     ]
 
 
-def scan_file(root: Path, relative: Path, *, fixture: bool = False) -> list[str]:
+def scan_file(
+    root: Path,
+    relative: Path,
+    *,
+    fixture: bool = False,
+    local: list[re.Pattern[str]] | None = None,
+) -> list[str]:
     name = relative.name.lower()
     if name in SENSITIVE_NAMES or name.endswith(SENSITIVE_SUFFIXES):
         return ["敏感文件名"]
@@ -84,8 +112,10 @@ def scan_file(root: Path, relative: Path, *, fixture: bool = False) -> list[str]
         rules.append("疑似学号")
     if PHONE_NUMBER.search(text):
         rules.append("疑似手机号")
-    if PRIVATE_PORTAL.search(text):
-        rules.append("校园内网地址")
+    for index, pattern in enumerate(local or [], start=1):
+        # 只报编号不报内容：清单里的值本身就是敏感的，不能进 CI 日志。
+        if pattern.search(text):
+            rules.append(f"本地敏感标识 #{index}")
     if not fixture and (
         QUOTED_CREDENTIAL.search(text)
         or ENV_CREDENTIAL.search(text)
@@ -97,10 +127,11 @@ def scan_file(root: Path, relative: Path, *, fixture: bool = False) -> list[str]
 
 def scan(root: Path, files: list[Path]) -> list[tuple[Path, str]]:
     findings = []
+    local = load_local_patterns(root)
     for relative in files:
         # mock 门户使用固定夹具口令；豁免这一文件的口令匹配，不豁免真实号码。
         fixture = relative.as_posix() == "utils/mock_portal.py"
-        for rule in scan_file(root, relative, fixture=fixture):
+        for rule in scan_file(root, relative, fixture=fixture, local=local):
             findings.append((relative, rule))
     return findings
 

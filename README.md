@@ -266,15 +266,15 @@ http://www.msftconnecttest.com/connecttest.txt, http://captive.apple.com/hotspot
 ```bash
 # 先看清当前连的是什么网（不建账号、不碰数据库）
 python -m campusnet add --show-ssid
-# 当前 Wi-Fi：NWAFU
+# 当前 Wi-Fi：CAMPUS
 
 # 建号时直接带上规则
 python -m campusnet add --name 宿舍 --portal http://10.0.0.1/eportal/portal/login \
-  --username 20240001 --password '******' --wifi-ssid NWAFU
+  --username 20240001 --password '******' --wifi-ssid CAMPUS
 ```
 
-- 多个 SSID 用逗号分隔，按「或」关系匹配；大小写不敏感，按包含匹配（`NWAFU` 能匹配 `NWAFU-5G`）
-- 也可在 Web 控制台的「附加字段 JSON」里填 `{"wifi_ssid": "NWAFU"}`
+- 多个 SSID 用逗号分隔，按「或」关系匹配；大小写不敏感，按包含匹配（`CAMPUS` 能匹配 `CAMPUS-5G`）
+- 也可在 Web 控制台的「附加字段 JSON」里填 `{"wifi_ssid": "CAMPUS"}`
 - **留空即关闭，一个 netsh 都不会发**，有线用户与多网卡环境零影响
 - 有线连接读不到 SSID 时直接放行，不会误判成「不在校园网」
 - **不匹配只告警、不阻断**。热点下认证必然失败，但失败原因该由门户来报；程序提前抛一个含糊的异常只会把真因盖掉。它解决的是「看得见病」——事后能解释为什么程序一直没登录

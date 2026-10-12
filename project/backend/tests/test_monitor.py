@@ -308,7 +308,7 @@ def test_check_outcome_as_dict_shape() -> None:
 @pytest.fixture()
 def srun_account(account):  # noqa: ANN001
     acc = account
-    acc.portal_url = "http://172.26.8.11"
+    acc.portal_url = "http://10.10.10.10"
     acc.login_mode = "srun"
     return acc
 
@@ -366,7 +366,7 @@ def test_portal_recheck_propagates_auth_state(store, srun_account, monkeypatch) 
     assert got is True
     assert "门户已认证" in detail
     assert len(calls) == 1
-    assert calls[0].base_url == "http://172.26.8.11"
+    assert calls[0].base_url == "http://10.10.10.10"
     assert calls[0].timeout == monitor_mod.AUTH_STATE_TIMEOUT
 
 

@@ -7,7 +7,7 @@
     2. 本地算 hmd5 / info / chksum    → 三段密文
     3. GET /cgi-bin/srun_portal        → 带密文提交登录
 
-已实测西北农林科技大学的门户暴露 get_challenge 且能取到 token。
+已实测某高校的门户暴露 get_challenge 且能取到 token。
 
 三段密文的算法（公开逆向资料，参数与实测抓包一致）：
 
@@ -475,7 +475,7 @@ class SrunConfig:
 class _NoProxy(urllib.request.ProxyHandler):
     """强制直连，不读 http_proxy 环境变量。
 
-    SRUN 的认证服务器是内网地址（实测西北农林科技大学门户在 172.26.0.0/16 段），
+    SRUN 的认证服务器是内网地址（实测某高校门户在 172.26.0.0/16 段），
     走系统代理必然到不了。同类项目普遍这么处理。
     """
 

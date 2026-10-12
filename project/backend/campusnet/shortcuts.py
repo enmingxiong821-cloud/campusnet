@@ -27,24 +27,24 @@ class Shortcut:
 
 
 #: 覆盖现在的每一种用法；新增子命令后在这里加一行即可。
+#: 桌面只留一个入口：打开菜单，其余操作在里面选。
+#: 注册开机自启需要管理员权限，菜单会主动提出提权重试，所以不必再单独开一个快捷方式。
 DEFAULT_SHORTCUTS: tuple[Shortcut, ...] = (
-    Shortcut("启动校园网服务", ("serve",), "后台跑服务与自动监控"),
-    Shortcut("打开控制台", ("console",), "浏览器打开控制台"),
-    Shortcut("立即检测网络", ("check",), "掉线会自动重连"),
-    Shortcut("查看自检报告", ("doctor",), "端口/数据库/令牌/自启动/探活"),
-    Shortcut("查看多端访问", ("access",), "手机怎么连上这台电脑"),
-    Shortcut("注册开机自启-无需登录", ("bootstart", "install", "--mode", "task"), "会要一次 Windows 密码"),
-    Shortcut("查看运行日志", ("logs",), "最近若干行日志"),
-    Shortcut("远程关机", ("power", "off"), "关机后需靠 WOL 或插座再开机"),
+    Shortcut("校园网自连", ("menu",), "启动服务、打开控制台、检测、自检、开关机都在里面"),
 )
 
-#: 需要提权的动作单独列出来，双击时会弹 UAC。
-ELEVATED_SHORTCUTS: tuple[Shortcut, ...] = (
-    Shortcut(
-        "注册开机自启-无需登录(需管理员)",
-        ("bootstart", "install", "--mode", "task"),
-        "双击后出现 UAC 提示，同意即可",
-    ),
+#: 早期版本生成过的快捷方式，重新生成时顺手清掉，避免桌面越攒越多。
+LEGACY_NAMES: tuple[str, ...] = (
+    "启动校园网服务",
+    "打开控制台",
+    "立即检测网络",
+    "查看自检报告",
+    "查看多端访问",
+    "查看运行日志",
+    "远程关机",
+    "远程重启",
+    "注册开机自启-无需登录",
+    "注册开机自启-无需登录(需管理员)",
 )
 
 
@@ -58,6 +58,21 @@ def desktop_dir() -> Path:
         base = Path(profile) if profile else Path.home()
         return base / "Desktop"
     return Path.home() / "Desktop"
+
+
+def _remove_legacy(directory: Path) -> list[str]:
+    """删掉早期版本留下的快捷方式（只删我们自己生成的那几个名字）。"""
+    removed: list[str] = []
+    for name in LEGACY_NAMES:
+        for suffix in (".lnk", ".desktop", ".command"):
+            target = directory / f"{name}{suffix}"
+            if target.exists():
+                try:
+                    target.unlink()
+                    removed.append(target.name)
+                except OSError:
+                    pass
+    return removed
 
 
 def _ps_quote(text: str) -> str:
@@ -197,18 +212,17 @@ def create(
     """生成快捷方式；platform 参数供测试注入。"""
     name = platform or platform_name()
     target = Path(directory).expanduser() if directory else desktop_dir()
+    removed = _remove_legacy(target)
     if name == "windows":
         ok, message = create_windows(DEFAULT_SHORTCUTS, target)
-        if not ok:
-            return ok, message
-        elevated_ok, elevated_message = create_windows_elevated(
-            ELEVATED_SHORTCUTS, target
-        )
-        if not elevated_ok:
-            return False, f"{message}；{elevated_message}"
-        return True, f"{message}；{elevated_message}"
+        if ok and removed:
+            message += f"（顺手清理了 {len(removed)} 个旧快捷方式）"
+        return ok, message
     if name in ("darwin", "linux"):
-        return create_posix(DEFAULT_SHORTCUTS, target, darwin=name == "darwin")
+        ok, message = create_posix(DEFAULT_SHORTCUTS, target, darwin=name == "darwin")
+        if ok and removed:
+            message += f"（顺手清理了 {len(removed)} 个旧快捷方式）"
+        return ok, message
     return False, f"不支持的平台：{name}"
 
 

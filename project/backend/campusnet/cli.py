@@ -463,6 +463,14 @@ def cmd_setup(args: argparse.Namespace) -> int:
     return 0 if report.ok else 1
 
 
+def cmd_menu(_: argparse.Namespace) -> int:
+    """交互式主菜单：桌面快捷方式指向这里。"""
+    stdout_ready()
+    from .menu import run_menu
+
+    return run_menu()
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="campusnet", description="校园网自连：浏览器验证式自动重连工具"
@@ -642,6 +650,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-shortcut", action="store_true", help="不生成桌面快捷方式"
     )
     p_setup.set_defaults(func=cmd_setup)
+
+    p_menu = sub.add_parser("menu", help="交互式主菜单（桌面快捷方式指向它）")
+    p_menu.set_defaults(func=cmd_menu)
 
     return parser
 

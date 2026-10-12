@@ -35,6 +35,10 @@ database/backup/
 *.log
 nul
 
+# 本机敏感标识清单（真实校园内网地址、学校 SSID 等）。
+# 仓库里只放 utils/local_sensitive.example.txt，真实清单保持本地。
+/utils/local_sensitive.txt
+
 # 编辑器与系统
 .vscode/
 .idea/

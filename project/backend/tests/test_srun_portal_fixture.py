@@ -1,4 +1,4 @@
-"""H3C srun_portal_pc（西北农林科大在用）路径的回归测试。
+"""H3C srun_portal_pc（某高校科大在用）路径的回归测试。
 
 提交 7064638 针对真实门户改了三件事，但当时零测试覆盖：
   1. 提交按钮用 `<button type="button" id="login-account">`
@@ -27,8 +27,8 @@ from campusnet.portal import (
 )
 from campusnet.storage import Account
 
-NWAFU_LOGIN_URL = "http://172.26.8.11/srun_portal_pc?ac_id=1&theme=pro"
-NWAFU_SUCCESS_URL = "http://172.26.8.11/srun_portal_success?ac_id=1&theme=pro"
+CAMPUS_LOGIN_URL = "http://10.10.10.10/srun_portal_pc?ac_id=1&theme=pro"
+CAMPUS_SUCCESS_URL = "http://10.10.10.10/srun_portal_success?ac_id=1&theme=pro"
 
 
 # ---------- looks_already_authenticated：纯函数 ----------
@@ -37,9 +37,9 @@ NWAFU_SUCCESS_URL = "http://172.26.8.11/srun_portal_success?ac_id=1&theme=pro"
 @pytest.mark.parametrize(
     "url",
     [
-        NWAFU_SUCCESS_URL,
+        CAMPUS_SUCCESS_URL,
         "http://10.0.0.1/srun_portal_success?ac_id=1",
-        "HTTP://172.26.8.11/SRUN_PORTAL_SUCCESS",
+        "HTTP://10.10.10.10/SRUN_PORTAL_SUCCESS",
         "http://x/portal_success",
         "http://x/login/success.html",
         "http://x/success",
@@ -52,9 +52,9 @@ def test_detects_success_page(url: str) -> None:
 @pytest.mark.parametrize(
     "url",
     [
-        NWAFU_LOGIN_URL,
-        "http://172.26.8.11/",
-        "http://172.26.8.11/index_1.html",
+        CAMPUS_LOGIN_URL,
+        "http://10.10.10.10/",
+        "http://10.10.10.10/index_1.html",
         "http://x/eportal/portal/login",
         "",
         "not a url",
@@ -66,8 +66,8 @@ def test_login_page_is_not_authenticated(url: str) -> None:
 
 def test_success_marker_is_exact_not_substring_of_login() -> None:
     """/success 标志不能把 srun_portal_pc（登录页）误判成已认证。"""
-    assert looks_already_authenticated(NWAFU_LOGIN_URL) is False
-    assert looks_already_authenticated(NWAFU_SUCCESS_URL) is True
+    assert looks_already_authenticated(CAMPUS_LOGIN_URL) is False
+    assert looks_already_authenticated(CAMPUS_SUCCESS_URL) is True
 
 
 def test_none_url_is_safe() -> None:
@@ -212,7 +212,7 @@ class _RenderPage:
         ready_after: int = 0,
         password_ready: bool = False,
         username_only: bool = False,
-        url: str = NWAFU_LOGIN_URL,
+        url: str = CAMPUS_LOGIN_URL,
     ) -> None:
         self.polls = 0
         self.ready_after = ready_after
@@ -268,7 +268,7 @@ def test_returns_false_when_form_never_renders() -> None:
 
 def test_returns_false_immediately_on_success_url() -> None:
     """门户按 IP 判定会话时直接跳成功页，不该死等表单。"""
-    page = _RenderPage(ready_after=999, password_ready=False, url=NWAFU_SUCCESS_URL)
+    page = _RenderPage(ready_after=999, password_ready=False, url=CAMPUS_SUCCESS_URL)
     assert _wait_for_login_form(page, timeout=30) is False
     assert page.polls <= 1, f"成功页应立即返回，实际轮询 {page.polls} 次"
 
@@ -353,7 +353,7 @@ def _patch_probe(monkeypatch: pytest.MonkeyPatch, online: bool) -> None:
 class _FullPage:
     """登录表单已就绪的页面桩，记录 fill 收到的值。"""
 
-    def __init__(self, url: str = NWAFU_LOGIN_URL, content: str = "网络准入认证") -> None:
+    def __init__(self, url: str = CAMPUS_LOGIN_URL, content: str = "网络准入认证") -> None:
         self.url = url
         self.fills: list[tuple[str, str]] = []
         self.clicks: list[str] = []
@@ -388,10 +388,10 @@ def test_already_authenticated_returns_already_online(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """门户跳成功页时应报 already_online，不该尝试填不存在的表单。"""
-    page = _RenderPage(ready_after=999, password_ready=False, url=NWAFU_SUCCESS_URL)
+    page = _RenderPage(ready_after=999, password_ready=False, url=CAMPUS_SUCCESS_URL)
     account = Account(
         name="西农大",
-        portal_url=NWAFU_LOGIN_URL,
+        portal_url=CAMPUS_LOGIN_URL,
         probe_url="http://127.0.0.1:9/probe",
         username="20240001",
         password="secret",
@@ -482,10 +482,10 @@ def test_browser_login_closes_browser_on_already_online(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """already_online 是早退分支，同样不能漏关浏览器。"""
-    page = _RenderPage(ready_after=999, password_ready=False, url=NWAFU_SUCCESS_URL)
+    page = _RenderPage(ready_after=999, password_ready=False, url=CAMPUS_SUCCESS_URL)
     account = Account(
         name="西农大",
-        portal_url=NWAFU_LOGIN_URL,
+        portal_url=CAMPUS_LOGIN_URL,
         probe_url="http://127.0.0.1:9/probe",
         username="u",
         password="p",
@@ -503,10 +503,10 @@ def test_browser_login_closes_browser_on_already_online(
 def test_browser_login_progress_reports_already_online(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    page = _RenderPage(ready_after=999, password_ready=False, url=NWAFU_SUCCESS_URL)
+    page = _RenderPage(ready_after=999, password_ready=False, url=CAMPUS_SUCCESS_URL)
     account = Account(
         name="西农大",
-        portal_url=NWAFU_LOGIN_URL,
+        portal_url=CAMPUS_LOGIN_URL,
         probe_url="http://127.0.0.1:9/probe",
         username="u",
         password="p",

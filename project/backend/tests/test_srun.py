@@ -374,7 +374,7 @@ def test_interpret_uses_error_msg_when_code_unknown() -> None:
 @pytest.mark.parametrize(
     "url",
     [
-        "http://172.26.8.11/srun_portal_pc?ac_id=1&theme=pro",
+        "http://10.10.10.10/srun_portal_pc?ac_id=1&theme=pro",
         "http://10.0.0.1/cgi-bin/get_challenge",
         "http://x/srun_portal",
     ],
@@ -715,8 +715,8 @@ def test_route_probe_targets_portal_and_closes_socket(monkeypatch) -> None:
             closed.append(True)
 
     monkeypatch.setattr(socket, "socket", lambda *args: FakeSocket())
-    assert portal._guess_ip_by_route("http://172.26.8.11/index_1.html") == "10.20.30.40"
-    assert targets == [("172.26.8.11", 1)]
+    assert portal._guess_ip_by_route("http://10.10.10.10/index_1.html") == "10.20.30.40"
+    assert targets == [("10.10.10.10", 1)]
     assert closed == [True]
 
 
@@ -737,7 +737,7 @@ def test_srun_login_resolves_ip_once(monkeypatch) -> None:
 
     monkeypatch.setattr(portal, "_local_ip_for_portal", resolve)
     monkeypatch.setattr(srun, "srun_login", login)
-    result = portal.srun_login(Account(portal_url="http://172.26.8.11", username="test", password="test"))
+    result = portal.srun_login(Account(portal_url="http://10.10.10.10", username="test", password="test"))
     assert len(calls) == 1
     assert captured == ["10.20.30.40"]
     assert result.detail == "ip=10.20.30.40"
@@ -746,7 +746,7 @@ def test_srun_login_resolves_ip_once(monkeypatch) -> None:
 def test_local_ip_helper_uses_route() -> None:
     from campusnet import portal
 
-    ip = portal._local_ip_for_portal("http://172.26.8.11/x")
+    ip = portal._local_ip_for_portal("http://10.10.10.10/x")
     if ip:
         assert ip.count(".") == 3
 
@@ -763,7 +763,7 @@ def test_local_ip_prefers_portal_page_over_guess(monkeypatch: pytest.MonkeyPatch
 
     monkeypatch.setattr(portal, "_ip_from_portal_page", lambda *a, **k: "10.110.3.4")
     monkeypatch.setattr(portal, "_guess_ip_by_route", lambda *a, **k: "10.0.0.9")
-    assert portal._local_ip_for_portal("http://172.26.8.11/x") == "10.110.3.4"
+    assert portal._local_ip_for_portal("http://10.10.10.10/x") == "10.110.3.4"
 
 
 def test_local_ip_falls_back_to_route_when_page_unreadable(
@@ -774,7 +774,7 @@ def test_local_ip_falls_back_to_route_when_page_unreadable(
 
     monkeypatch.setattr(portal, "_ip_from_portal_page", lambda *a, **k: "")
     monkeypatch.setattr(portal, "_guess_ip_by_route", lambda *a, **k: "10.0.0.9")
-    assert portal._local_ip_for_portal("http://172.26.8.11/x") == "10.0.0.9"
+    assert portal._local_ip_for_portal("http://10.10.10.10/x") == "10.0.0.9"
 
 
 # ---------- auth_state 三态 ----------

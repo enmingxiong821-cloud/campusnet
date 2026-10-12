@@ -105,15 +105,18 @@ jobs:
       - name: 检查数据库与密钥是否可恢复
         run: |
           set -e
-          # 数据库与混淆密钥绝不能出现在 git 历史里
+          # 数据库、备份、密钥、令牌、本地配置都不能出现在 git 历史里。
+          # 用正则而不是精确路径：早先只写了 database/campusnet.db，
+          # 结果 database/backup/*.db 被提交进历史却一路放行（已用 filter-branch 清除）。
+          history=$(git log --all --name-only --pretty=format:)
           leaked=""
-          for path in database/campusnet.db .campusnet_obf.key; do
-            if git log --all --name-only --pretty=format: | grep -qx "$path"; then
-              leaked="$leaked $path"
+          for pattern in 'database/.*\.db$' '\.campusnet_obf\.key$' '\.api-token$' '^config\.json$'; do
+            if printf '%s\n' "$history" | grep -Eq "$pattern"; then
+              echo "::error::历史中存在匹配 $pattern 的敏感文件"
+              leaked="$leaked $pattern"
             fi
           done
           if [ -n "$leaked" ]; then
-            echo "::error::以下敏感文件曾被提交过:$leaked"
             exit 1
           fi
           echo "历史中未发现敏感文件"

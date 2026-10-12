@@ -19,7 +19,7 @@ INTERFACES_ZH = """接口名称 : WLAN
     GUID : 8f1c2d3e-4a5b-6c7d-8e9f-0a1b2c3d4e5f
     物理地址 : a4:b1:c2:d3:e4:f5
     状态 : 已连接
-    SSID : NWAFU
+    SSID : CAMPUS
     BSSID : 8c:85:90:11:22:33
     网络类型 : 基础设施
     无线电类型 : 802.11ac
@@ -31,7 +31,7 @@ INTERFACES_EN = """Name : Wi-Fi
     GUID : 1111-2222
     Physical address : a4:b1:c2:d3:e4:f5
     State : connected
-    SSID : NWAFU
+    SSID : CAMPUS
     BSSID : 8c:85:90:11:22:33
     Channel : 44
 """
@@ -54,7 +54,7 @@ def netsh_calls(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
 
 
 def test_current_ssid_reads_chinese_output(netsh_calls) -> None:  # noqa: ANN001
-    assert wifi_mod.current_ssid() == "NWAFU"
+    assert wifi_mod.current_ssid() == "CAMPUS"
 
 
 def test_current_ssid_reads_english_output(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -62,7 +62,7 @@ def test_current_ssid_reads_english_output(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setattr(
         wifi_mod, "_run_netsh", lambda args, timeout=8.0: (True, INTERFACES_EN)
     )
-    assert wifi_mod.current_ssid() == "NWAFU"
+    assert wifi_mod.current_ssid() == "CAMPUS"
 
 
 def test_current_ssid_skips_bssid_line(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -106,36 +106,36 @@ def test_empty_patterns_passes_with_blank_strings(netsh_calls) -> None:  # noqa:
 def test_wired_connection_passes(monkeypatch: pytest.MonkeyPatch) -> None:
     """有线读不到 SSID，不能判定「不在校园网」。"""
     monkeypatch.setattr(wifi_mod, "_run_netsh", lambda args, timeout=8.0: (False, ""))
-    check = wifi_mod.ensure_campus_wifi(["NWAFU"])
+    check = wifi_mod.ensure_campus_wifi(["CAMPUS"])
     assert check.ok is True
     assert check.ssid == ""
 
 
 def test_matching_ssid_passes(netsh_calls) -> None:  # noqa: ANN001
-    check = wifi_mod.ensure_campus_wifi(["NWAFU"])
+    check = wifi_mod.ensure_campus_wifi(["CAMPUS"])
     assert check.ok is True
-    assert check.ssid == "NWAFU"
+    assert check.ssid == "CAMPUS"
 
 
 def test_ssid_match_is_case_insensitive(monkeypatch: pytest.MonkeyPatch) -> None:
-    """校园网 SSID 常被写成 NWAFU / nwafu 两种。"""
+    """校园网 SSID 常被写成 CAMPUS / campus 两种。"""
     monkeypatch.setattr(
         wifi_mod,
         "_run_netsh",
-        lambda args, timeout=8.0: (True, INTERFACES_ZH.replace("NWAFU", "nwafu")),
+        lambda args, timeout=8.0: (True, INTERFACES_ZH.replace("CAMPUS", "campus")),
     )
-    assert wifi_mod.ensure_campus_wifi(["NWAFU"]).ok is True
-    assert wifi_mod.ensure_campus_wifi(["nwafu"]).ok is True
+    assert wifi_mod.ensure_campus_wifi(["CAMPUS"]).ok is True
+    assert wifi_mod.ensure_campus_wifi(["campus"]).ok is True
 
 
 def test_ssid_match_is_substring(netsh_calls) -> None:  # noqa: ANN001
-    """SSID 常带后缀（NWAFU-5G），按包含匹配而不是全等。"""
-    assert wifi_mod.ensure_campus_wifi(["NWAFU"]).ok is True
+    """SSID 常带后缀（CAMPUS-5G），按包含匹配而不是全等。"""
+    assert wifi_mod.ensure_campus_wifi(["CAMPUS"]).ok is True
 
 
 def test_any_pattern_matches_passes(netsh_calls) -> None:  # noqa: ANN001
     """pattern 之间是「或」关系，命中任意一个即可。"""
-    check = wifi_mod.ensure_campus_wifi(["OTHER-NET", "NWAFU", "THIRD"])
+    check = wifi_mod.ensure_campus_wifi(["OTHER-NET", "CAMPUS", "THIRD"])
     assert check.ok is True
 
 
@@ -144,13 +144,13 @@ def test_hotspot_ssid_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         wifi_mod,
         "_run_netsh",
-        lambda args, timeout=8.0: (True, INTERFACES_ZH.replace("NWAFU", "MyPhone")),
+        lambda args, timeout=8.0: (True, INTERFACES_ZH.replace("CAMPUS", "MyPhone")),
     )
-    check = wifi_mod.ensure_campus_wifi(["NWAFU"])
+    check = wifi_mod.ensure_campus_wifi(["CAMPUS"])
     assert check.ok is False
     assert check.ssid == "MyPhone"
     assert "MyPhone" in check.detail
-    assert "NWAFU" in check.detail
+    assert "CAMPUS" in check.detail
 
 
 def test_rejected_check_never_raises(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -158,9 +158,9 @@ def test_rejected_check_never_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         wifi_mod,
         "_run_netsh",
-        lambda args, timeout=8.0: (True, INTERFACES_ZH.replace("NWAFU", "Guest")),
+        lambda args, timeout=8.0: (True, INTERFACES_ZH.replace("CAMPUS", "Guest")),
     )
-    result = wifi_mod.ensure_campus_wifi(["NWAFU"])
+    result = wifi_mod.ensure_campus_wifi(["CAMPUS"])
     assert isinstance(result, wifi_mod.WifiCheck)
     assert result.ok is False
 
@@ -183,9 +183,9 @@ def test_connect_to_invokes_netsh(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         wifi_mod, "_run_netsh", lambda args, timeout=8.0: (seen.append(list(args)) or (True, "ok"))
     )
-    ok, out = wifi_mod.connect_to("NWAFU")
+    ok, out = wifi_mod.connect_to("CAMPUS")
     assert (ok, out) == (True, "ok")
-    assert seen == [["netsh", "wlan", "connect", "name=NWAFU"]]
+    assert seen == [["netsh", "wlan", "connect", "name=CAMPUS"]]
 
 
 # ---------- CLI 暴露层 ----------
@@ -206,7 +206,7 @@ def test_show_ssid_does_not_touch_database(
     rc = cli_mod.main(["add", "--show-ssid"])
 
     assert rc == 0
-    assert "当前 Wi-Fi：NWAFU" in capsys.readouterr().out
+    assert "当前 Wi-Fi：CAMPUS" in capsys.readouterr().out
     assert not tmp_db.exists(), "--show-ssid 不该创建数据库"
 
 
@@ -241,7 +241,7 @@ def test_wifi_ssid_flag_lands_in_extra_fields(tmp_db: Path) -> None:
                 "--portal",
                 "http://10.0.0.1/eportal/portal/login",
                 "--wifi-ssid",
-                "NWAFU",
+                "CAMPUS",
                 "--username",
                 "20240001",
                 "--password",
@@ -253,7 +253,7 @@ def test_wifi_ssid_flag_lands_in_extra_fields(tmp_db: Path) -> None:
     from campusnet.storage import Store
 
     acc = Store(tmp_db).list_accounts()[0]
-    assert acc.extra_fields["wifi_ssid"] == "NWAFU"
+    assert acc.extra_fields["wifi_ssid"] == "CAMPUS"
 
 
 def test_explicit_extra_overrides_wifi_ssid_flag(tmp_db: Path) -> None:
@@ -269,7 +269,7 @@ def test_explicit_extra_overrides_wifi_ssid_flag(tmp_db: Path) -> None:
                 "--wifi-ssid",
                 "WRONG",
                 "--extra",
-                '{"wifi_ssid": "NWAFU"}',
+                '{"wifi_ssid": "CAMPUS"}',
                 "--username",
                 "20240001",
                 "--password",
@@ -281,4 +281,4 @@ def test_explicit_extra_overrides_wifi_ssid_flag(tmp_db: Path) -> None:
     from campusnet.storage import Store
 
     acc = Store(tmp_db).list_accounts()[0]
-    assert acc.extra_fields["wifi_ssid"] == "NWAFU"
+    assert acc.extra_fields["wifi_ssid"] == "CAMPUS"

@@ -80,7 +80,7 @@ def ensure_campus_wifi(ssid_patterns: list[str], connect_wait: float = CONNECT_W
     """确保连上校园网；ssid_patterns 为空时直接放行，不发任何命令。
 
     pattern 列表是「或」关系，全部不匹配才算走到别的网。
-    大小写不敏感——校园网 SSID 常写作 NWAFU / nwafu 两种。
+    大小写不敏感——校园网 SSID 常写作 CAMPUS / campus 两种。
 
     连不上不抛错也不阻断登录：调用方拿到 ok=False 后应记一条 warning
     再照常走认证流程。热点下认证必然失败，但那是门户该报的错，

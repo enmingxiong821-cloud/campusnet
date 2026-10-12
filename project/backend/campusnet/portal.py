@@ -33,7 +33,7 @@ CREDENTIAL_HINTS = ("user", "name", "account", "login", "dddd", "domain", "opera
 PASSWORD_HINTS = ("pass", "pwd", "password", "upass", "0mkkey", "upwd")
 
 # 已认证会话的标志：命中即说明这台机器本来就在线，不需要再登录。
-# srun_portal_success 是 H3C 新版门户的登录成功页（西北农林科大在用）。
+# srun_portal_success 是 H3C 新版门户的登录成功页（某高校科大在用）。
 # 门户按 IP 判定会话，用全新无 cookie 的浏览器打开也会直接落这里。
 ALREADY_AUTH_URL_MARKERS = (
     "srun_portal_success",
@@ -213,7 +213,7 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 class _NoProxy(urllib.request.ProxyHandler):
     """强制直连，不读 http_proxy 环境变量。
 
-    门户地址是内网 IP（实测西北农林科技大学门户在 172.26.0.0/16 段），系统代理根本到不了。
+    门户地址是内网 IP（实测某高校门户在 172.26.0.0/16 段），系统代理根本到不了。
     同类项目的通行做法：guet-drcom 加 `--noproxy '*'`，
     zju-web-login 用 `session.trust_env = False`。
     """
