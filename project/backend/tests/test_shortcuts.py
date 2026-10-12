@@ -71,12 +71,16 @@ def test_create_windows_calls_powershell(
 
     assert ok is True
     assert "快捷方式" in message
-    assert len(scripts) == 1
+    # 普通一组 + 需要提权的一组
+    assert len(scripts) == 2
     assert "WScript.Shell" in scripts[0]
     for item in shortcuts_mod.DEFAULT_SHORTCUTS:
         assert item.name + ".lnk" in scripts[0]
     # 交互式命令要包一层 cmd /k，否则双击后窗口一闪而过看不到报错
     assert "/k " in scripts[0]
+    # 需要管理员的那个快捷方式要能自我提权
+    assert "Start-Process -Verb RunAs" in scripts[1]
+    assert "需管理员" in scripts[1]
 
 
 def test_create_rejects_unknown_platform(tmp_path: Path) -> None:

@@ -38,6 +38,15 @@ DEFAULT_SHORTCUTS: tuple[Shortcut, ...] = (
     Shortcut("远程关机", ("power", "off"), "关机后需靠 WOL 或插座再开机"),
 )
 
+#: 需要提权的动作单独列出来，双击时会弹 UAC。
+ELEVATED_SHORTCUTS: tuple[Shortcut, ...] = (
+    Shortcut(
+        "注册开机自启-无需登录(需管理员)",
+        ("bootstart", "install", "--mode", "task"),
+        "双击后出现 UAC 提示，同意即可",
+    ),
+)
+
 
 def run_script() -> Path:
     return ROOT / "utils" / "run.py"
@@ -112,6 +121,43 @@ def create_windows(shortcuts: tuple[Shortcut, ...], directory: Path) -> tuple[bo
     return True, f"已创建 {len(shortcuts)} 个快捷方式：{directory}"
 
 
+def create_windows_elevated(
+    shortcuts: tuple[Shortcut, ...], directory: Path
+) -> tuple[bool, str]:
+    """生成会自我提权的快捷方式（双击弹 UAC），用于必须管理员权限的动作。"""
+    python = str(python_executable())
+    script = [
+        "$ErrorActionPreference = 'Stop';",
+        "$W = New-Object -ComObject WScript.Shell;",
+        f"$dir = {_ps_quote(str(directory))};",
+        "New-Item -ItemType Directory -Force -Path $dir | Out-Null;",
+    ]
+    for item in shortcuts:
+        command = subprocess.list2cmdline([python, str(run_script()), *item.args])
+        inner = (
+            "Start-Process -Verb RunAs -FilePath 'cmd.exe' -ArgumentList "
+            + _ps_quote("/k " + command)
+        )
+        script.append(
+            "$s = $W.CreateShortcut([IO.Path]::Combine($dir, "
+            + _ps_quote(item.name + ".lnk")
+            + "));"
+            + "$s.TargetPath = "
+            + _ps_quote("powershell.exe")
+            + ";$s.Arguments = "
+            + _ps_quote("-NoProfile -Command " + inner)
+            + ";$s.WorkingDirectory = "
+            + _ps_quote(str(ROOT))
+            + ";$s.Description = "
+            + _ps_quote(item.hint or item.name)
+            + ";$s.Save();"
+        )
+    ok, message = _run_powershell("".join(script))
+    if not ok:
+        return False, message
+    return True, f"已创建 {len(shortcuts)} 个需管理员的快捷方式：{directory}"
+
+
 def create_posix(
     shortcuts: tuple[Shortcut, ...], directory: Path, *, darwin: bool
 ) -> tuple[bool, str]:
@@ -152,7 +198,15 @@ def create(
     name = platform or platform_name()
     target = Path(directory).expanduser() if directory else desktop_dir()
     if name == "windows":
-        return create_windows(DEFAULT_SHORTCUTS, target)
+        ok, message = create_windows(DEFAULT_SHORTCUTS, target)
+        if not ok:
+            return ok, message
+        elevated_ok, elevated_message = create_windows_elevated(
+            ELEVATED_SHORTCUTS, target
+        )
+        if not elevated_ok:
+            return False, f"{message}；{elevated_message}"
+        return True, f"{message}；{elevated_message}"
     if name in ("darwin", "linux"):
         return create_posix(DEFAULT_SHORTCUTS, target, darwin=name == "darwin")
     return False, f"不支持的平台：{name}"

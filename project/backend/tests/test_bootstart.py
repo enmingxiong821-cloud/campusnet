@@ -523,6 +523,49 @@ def test_task_install_fails_without_password(
     assert "密码" in result.detail
 
 
+def test_task_install_explains_admin_requirement(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """非管理员账户注册这种任务会被系统拒绝，提示要能直接指导用户。"""
+    _force(monkeypatch, "windows")
+    monkeypatch.setattr(boot_mod, "verify_launch", lambda: (True, ""))
+    monkeypatch.setattr(
+        boot_mod,
+        "_run_powershell_script",
+        lambda script, env=None: (False, "Register-ScheduledTask : Access is denied."),
+    )
+
+    result = boot_mod.install(port=2268, mode="task", password="pw")
+
+    assert result.installed is False
+    assert "管理员权限" in result.detail
+    assert "bootstart install --mode task" in result.detail
+
+
+def test_task_password_never_lands_in_script(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """密码只能经环境变量传给子进程，不能出现在脚本或返回值里。"""
+    _force(monkeypatch, "windows")
+    captured: dict[str, object] = {}
+
+    def fake_run(script: str, env: dict[str, str] | None = None):
+        captured["script"] = script
+        captured["env"] = dict(env or {})
+        return True, ""
+
+    monkeypatch.setattr(boot_mod, "verify_launch", lambda: (True, ""))
+    monkeypatch.setattr(boot_mod, "_run_powershell_script", fake_run)
+
+    result = boot_mod.install(port=2268, mode="task", password="s3cret-pw")
+
+    assert result.installed is True
+    assert "s3cret-pw" not in str(captured["script"])
+    assert "$env:CAMPUSNET_TASK_PASSWORD" in str(captured["script"])
+    assert captured["env"].get("CAMPUSNET_TASK_PASSWORD") == "s3cret-pw"  # type: ignore[union-attr]
+    assert "s3cret-pw" not in result.detail
+
+
 def test_task_mode_is_windows_only(
     fake_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -136,15 +136,54 @@ def _ps_quote(text: str) -> str:
     return "'" + str(text).replace("'", "''") + "'"
 
 
-def _run_with_input(args: list[str], text: str) -> tuple[bool, str]:
-    """跑一条命令并把 text 从 stdin 送进去（用于不把密码暴露在命令行）。"""
+WINDOWS_PS_MODULES = r"C:\Windows\System32\WindowsPowerShell\v1.0\Modules"
+
+
+def _child_env_with_modules(base: dict[str, str] | None = None) -> dict[str, str]:
+    """补上 Windows PowerShell 自带的模块目录。
+
+    执行环境（例如打包好的运行时、或某些 IDE 终端）可能把 PSModulePath
+    指向别处，而 powershell.exe 不会再补自己的 $PSHOME\\Modules，
+    于是 ScheduledTasks / Microsoft.PowerShell.Security 这些自带模块会加载失败。
+    """
+    env = dict(os.environ if base is None else base)
+    current = env.get("PSModulePath", "")
+    if WINDOWS_PS_MODULES.lower() not in current.lower():
+        env["PSModulePath"] = (
+            f"{current};{WINDOWS_PS_MODULES}" if current else WINDOWS_PS_MODULES
+        )
+    return env
+
+
+def _run_powershell_script(
+    script: str, env: dict[str, str] | None = None
+) -> tuple[bool, str]:
+    """跑一段 PowerShell 脚本。
+
+    密码不走命令行（`-Command` 后面的字符串会出现在进程列表里），而是放进子进程
+    环境变量；也因此不能用 `-Command -` 从 stdin 读脚本——PowerShell 会把 stdin
+    整体当成脚本，密码那一行会被当成命令去执行（这里踩过一次）。
+    """
+    exe = shutil.which("powershell") or shutil.which("pwsh")
+    if not exe:
+        return False, "找不到 powershell，无法注册计划任务"
+    env = _child_env_with_modules(env)
+    kwargs: dict[str, object] = {}
+    if os.name == "nt":
+        kwargs["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
     try:
         proc = subprocess.run(
-            args, input=text, capture_output=True, text=True, timeout=30
+            [exe, "-NoProfile", "-NonInteractive", "-Command", script],
+            capture_output=True,
+            timeout=60,
+            env=env,
+            **kwargs,
         )
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         return False, f"{type(exc).__name__}: {exc}"
-    output = ((proc.stdout or "") + (proc.stderr or "")).strip()
+    output = ((proc.stdout or b"") + (proc.stderr or b"")).decode(
+        "utf-8", "replace"
+    ).strip()
     return proc.returncode == 0, output
 
 
@@ -170,15 +209,17 @@ def register_task(host: str, port: int, password: str) -> tuple[bool, str]:
     if not user:
         return False, "读不到当前 Windows 用户名，无法注册计划任务"
     account = f"{domain}\\{user}" if domain else user
-    powershell = shutil.which("powershell") or shutil.which("pwsh")
-    if not powershell:
-        return False, "找不到 powershell，无法注册计划任务"
-
     exe, args = task_action(host, port)
+    child_env = _child_env_with_modules()
+    child_env["CAMPUSNET_TASK_PASSWORD"] = password
     script = (
         "$ErrorActionPreference = 'Stop';"
-        "$plain = [Console]::In.ReadLine();"
-        "$sec = ConvertTo-SecureString $plain -AsPlainText -Force;"
+        # 用 .NET 直接构造 SecureString：不依赖任何需要自动加载的模块，
+        # 这样 PSModulePath 被改坏时也不会失败。
+        "$sec = New-Object System.Security.SecureString;"
+        "foreach ($ch in $env:CAMPUSNET_TASK_PASSWORD.ToCharArray())"
+        " { $sec.AppendChar($ch) };"
+        "$sec.MakeReadOnly();"
         f"$act = New-ScheduledTaskAction -Execute {_ps_quote(exe)}"
         f" -Argument {_ps_quote(args)};"
         "$trg = New-ScheduledTaskTrigger -AtStartup;"
@@ -186,13 +227,18 @@ def register_task(host: str, port: int, password: str) -> tuple[bool, str]:
         " -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)"
         " -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries;"
         f"Register-ScheduledTask -TaskName {_ps_quote(TASK_NAME)} -Action $act"
-        f" -Trigger $trg -Settings $set -UserId {_ps_quote(account)}"
+        # Windows PowerShell 5.1 的参数名是 -User（-UserId 属于 New-ScheduledTaskPrincipal）
+        f" -Trigger $trg -Settings $set -User {_ps_quote(account)}"
         " -Password $sec -Force | Out-Null;"
     )
-    return _run_with_input(
-        [powershell, "-NoProfile", "-NonInteractive", "-Command", "-"],
-        password + "\n" + script,
-    )
+    ok, message = _run_powershell_script(script, child_env)
+    if not ok and "access is denied" in message.lower():
+        return False, (
+            "需要管理员权限才能注册「开机触发、无需登录」的任务"
+            "（Windows 拒绝为该账户保存凭据）。请右键快捷方式选择「以管理员身份运行」，"
+            "或在管理员 PowerShell 里执行：python utils/run.py bootstart install --mode task"
+        )
+    return ok, message
 
 
 def delete_task() -> tuple[bool, str]:
