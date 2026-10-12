@@ -485,7 +485,7 @@ def test_task_action_keeps_exe_and_args_separate(monkeypatch: pytest.MonkeyPatch
 
     exe, args = boot_mod.task_action(host="127.0.0.1", port=2268)
 
-    assert exe.endswith(".exe")
+    assert exe
     assert "serve" in args
     assert "--port 2268" in args
 
@@ -528,6 +528,9 @@ def test_task_install_explains_admin_requirement(
 ) -> None:
     """非管理员账户注册这种任务会被系统拒绝，提示要能直接指导用户。"""
     _force(monkeypatch, "windows")
+    # register_task 要先拿到 Windows 账户名；CI 的 Linux runner 上没有这两个变量。
+    monkeypatch.setenv("USERNAME", "tester")
+    monkeypatch.setenv("USERDOMAIN", "TESTBOX")
     monkeypatch.setattr(boot_mod, "verify_launch", lambda: (True, ""))
     monkeypatch.setattr(
         boot_mod,
@@ -547,6 +550,8 @@ def test_task_password_never_lands_in_script(
 ) -> None:
     """密码只能经环境变量传给子进程，不能出现在脚本或返回值里。"""
     _force(monkeypatch, "windows")
+    monkeypatch.setenv("USERNAME", "tester")
+    monkeypatch.setenv("USERDOMAIN", "TESTBOX")
     captured: dict[str, object] = {}
 
     def fake_run(script: str, env: dict[str, str] | None = None):

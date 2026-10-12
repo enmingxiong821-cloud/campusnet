@@ -113,7 +113,6 @@ def test_cli_power_wake_requires_mac(capsys) -> None:  # noqa: ANN001
 
 def test_local_macs_parses_getmac(monkeypatch: pytest.MonkeyPatch) -> None:
     """Windows 上从 getmac 的 CSV 输出里取 MAC，统一成冒号大写形式。"""
-    monkeypatch.setattr(power.os, "name", "nt")
     monkeypatch.setattr(power.shutil, "which", lambda _name: "getmac")
     monkeypatch.setattr(
         power,
@@ -124,14 +123,13 @@ def test_local_macs_parses_getmac(monkeypatch: pytest.MonkeyPatch) -> None:
         ),
     )
 
-    assert power.local_macs() == ["AC:45:EF:49:B7:F4", "8C:32:23:61:A3:ED"]
+    assert power.local_macs("nt") == ["AC:45:EF:49:B7:F4", "8C:32:23:61:A3:ED"]
 
 
 def test_local_macs_returns_empty_when_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(power.os, "name", "nt")
     monkeypatch.setattr(power.shutil, "which", lambda _name: None)
 
-    assert power.local_macs() == []
+    assert power.local_macs("nt") == []
 
 
 def test_wake_info_carries_mac_command_and_notes(

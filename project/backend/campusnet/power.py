@@ -93,12 +93,14 @@ def _run_capture(args: list[str]) -> tuple[bool, str]:
     return proc.returncode == 0, text
 
 
-def local_macs() -> list[str]:
+def local_macs(platform: str | None = None) -> list[str]:
     """本机网卡 MAC（大写、冒号分隔）；取不到就返回空列表。
 
     WOL 必须填「目标网卡」的 MAC，用户最容易卡在这一步，所以直接给出来。
+    platform 参数供测试注入，避免为了测试去改全局的 os.name。
     """
-    if os.name == "nt":
+    name = platform or ("nt" if os.name == "nt" else "posix")
+    if name == "nt":
         exe = shutil.which("getmac")
         if not exe:
             return []
