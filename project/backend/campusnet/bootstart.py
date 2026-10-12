@@ -642,7 +642,13 @@ def status() -> BootStatus:
         return BootStatus(True, False, _linux_unit_path(), hint, True, effective=False)
     path = entry_path()
     if path.exists():
-        return BootStatus(True, True, path, "已注册开机自启动")
+        detail = "已注册开机自启动"
+        if name == "windows":
+            detail = (
+                "已注册开机自启动（启动文件夹，登录后才会拉起；"
+                "要「有电就连接、无需登录」，用 bootstart install --mode task）"
+            )
+        return BootStatus(True, True, path, detail)
     return BootStatus(True, False, path, "未安装开机自启动", True, effective=False)
 
 

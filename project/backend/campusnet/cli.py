@@ -183,6 +183,8 @@ def cmd_bootstart(args: argparse.Namespace) -> int:
     if args.bootstart_action == "status":
         result = bootstart_mod.status()
         print(bootstart_mod.activate(result))
+        if result.detail:
+            print(f"说明: {result.detail}")
         if result.path:
             print(f"启动项位置: {result.path}")
         return 0
