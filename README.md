@@ -27,7 +27,25 @@
 
 ## 快速开始
 
-### Windows
+### 方式一：一键配置（推荐）
+
+从 GitHub 下载仓库（或 Release 里的 zip），解压后：
+
+- **Windows**：双击 `install.bat`
+- **Linux / macOS**：`./install.sh`
+
+它会依次做四件事：检查 Python 版本 → 在桌面生成快捷方式 → 验证可选的浏览器登录依赖 →
+跑一遍自检，最后直接告诉你下一步（注册开机自启、添加账号、手机访问）。
+
+运行本体**只用 Python 标准库，不需要装任何依赖**；只有验证码 / CAS 类门户才需要浏览器模式，
+那时再跑 `python utils/run.py setup --with-browser`（会下载 Chromium，约几百 MB）。
+
+> 需要 Python 3.10 或更高版本。没有的话先装：
+> <https://www.python.org/downloads/>（Windows 安装时记得勾选 "Add python.exe to PATH"）。
+
+### 方式二：手动
+
+#### Windows
 
 ```
 git clone https://github.com/enmingxiong821-cloud/campusnet.git
@@ -38,7 +56,7 @@ python utils\run.py serve
 
 浏览器打开 <http://127.0.0.1:2268>。
 
-### Linux / macOS
+#### Linux / macOS
 
 ```
 git clone https://github.com/enmingxiong821-cloud/campusnet.git

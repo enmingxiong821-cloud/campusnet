@@ -43,7 +43,7 @@ jobs:
           echo "NAME=${NAME}" >> "$GITHUB_ENV"
           mkdir -p "dist/${NAME}"
           # 注意：cp -r 不受 .gitignore 约束，本地 *.log 会被一起带进来
-          cp -r project utils database/schema.sql database/config.example.yml README.md LICENSE "dist/${NAME}/"
+          cp -r project utils database/schema.sql database/config.example.yml README.md LICENSE install.bat install.sh "dist/${NAME}/"
           # 测试与可选依赖不进包
           rm -rf "dist/${NAME}/project/backend/tests"
           # 抓包/验证工作区必须排除：cp -r 不受 .gitignore 约束，

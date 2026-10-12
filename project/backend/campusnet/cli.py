@@ -451,6 +451,18 @@ def cmd_shortcut(args: argparse.Namespace) -> int:
     return 1
 
 
+def cmd_setup(args: argparse.Namespace) -> int:
+    """一键配置：检查环境、生成快捷方式、自检，并告诉你下一步。"""
+    stdout_ready()
+    from .setup_flow import run_setup
+
+    report = run_setup(
+        with_browser=args.with_browser, make_shortcuts=not args.no_shortcut
+    )
+    print(report.render())
+    return 0 if report.ok else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="campusnet", description="校园网自连：浏览器验证式自动重连工具"
@@ -619,6 +631,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--platform", default="", help="强制平台（测试用）：windows/darwin/linux"
     )
     p_shortcut.set_defaults(func=cmd_shortcut)
+
+    p_setup = sub.add_parser("setup", help="一键配置：环境检查 + 快捷方式 + 自检")
+    p_setup.add_argument(
+        "--with-browser",
+        action="store_true",
+        help="顺带安装 Playwright 与 Chromium（仅浏览器登录模式需要，约几百 MB）",
+    )
+    p_setup.add_argument(
+        "--no-shortcut", action="store_true", help="不生成桌面快捷方式"
+    )
+    p_setup.set_defaults(func=cmd_setup)
 
     return parser
 
