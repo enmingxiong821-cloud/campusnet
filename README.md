@@ -94,6 +94,26 @@ python utils/run.py events --limit 20
 # 自动发现本网络的门户（掉线状态下最有用）
 python utils/run.py discover
 
+# 一键自检：端口、数据库、令牌权限、开机自启动、探活结果
+python utils/run.py doctor
+
+# 桌面一键快捷方式（每种用法一个，双击即用）
+python utils/run.py shortcut
+
+# 手机 / 平板怎么连上这台电脑（地址 + 令牌一次列清）
+python utils/run.py access
+
+# 浏览器打开控制台 / 查看最近日志
+python utils/run.py console
+python utils/run.py logs --lines 40
+
+# 配好失败通知后，先发一条测试通知确认链路能通
+python utils/run.py notify
+
+# 换机 / 重装系统前导出账号（口令保护），新机器上再导入
+python utils/run.py cred export --out creds.json
+python utils/run.py cred import --file creds.json
+
 # 启动后台监控
 python utils/run.py serve
 ```
@@ -168,6 +188,17 @@ python utils/run.py bootstart install
 python utils/run.py bootstart uninstall
 ```
 
+上面这条默认注册的是「**登录后**自动拉起」。如果你的目标是**有电就自动连**——
+机器重启后停在登录界面也要完成认证（宿舍台式机远程使用就是这个场景），用计划任务模式：
+
+```
+python utils/run.py bootstart install --mode task
+```
+
+它会注册一个「开机触发、无论是否登录都运行」的 Windows 计划任务，执行时向你索取
+一次当前账户密码（只从标准输入交给任务计划程序保存，不进命令行、不进环境变量）。
+`status` 会告诉你当前生效的是哪种载体。
+
 Web 控制台的「设置」页也有对应开关。三种系统的落地载体：
 
 | 系统 | 载体 | 说明 |
@@ -179,6 +210,10 @@ Web 控制台的「设置」页也有对应开关。三种系统的落地载体�
 启动项写入用户级位置；是否允许注册取决于系统策略。这里实现的是**用户登录自启动**，
 不是三平台统一的无需登录开机服务。Linux 用户会话自启动不要求 linger；
 需要无需登录运行时可另行配置 `loginctl enable-linger $USER`，权限取决于系统策略。
+
+安装前会干跑一次「解释器 + 导入本体」自检，装不上时如实报失败，而不是留下一个
+起不来的启动项。`status` 会区分「已写入」与「在本机是否会生效」——没有桌面会话的
+XDG autostart、以及没开 systemd 的 WSL 环境，都会被明确标出来，而不是显示成「已开启」。
 
 手机和平板访问 PC 托管的控制台，不等于手机和平板已有原生后台自连服务。
 实际跨设备访问、系统重启启动及真实校园网掉线重连仍待实测。
@@ -193,6 +228,16 @@ Web 控制台的「设置」页也有对应开关。三种系统的落地载体�
 | 登录方式 | `srun` / `http` / `browser` / `manual` |
 
 **字段名留空会自动识别**，识别错了再手工指定。
+
+探测网址可以填**多个**，用空格、逗号或换行分隔，任一地址放行即视为在线：
+
+```
+http://www.msftconnecttest.com/connecttest.txt, http://captive.apple.com/hotspot-detect.html
+```
+
+只填一个地址时行为与以前完全一致。多写几个是为了挡住「单个检测页被 CDN 拦、
+被限速或被 DNS 劫持」造成的假掉线——那种情况下程序会反复报「在线未确认」，
+却既不重连也查不出原因。
 
 #### 网络身份检查（防手机热点）
 
@@ -299,6 +344,61 @@ python -m pip install -r utils/requirements-dev.txt
 
 ## 常见问题
 
+**它到底连上了没有 / 为什么没连上**
+
+先跑 `python utils/run.py doctor`：它逐项检查运行环境、数据库、实例锁、控制台令牌权限、
+开机自启动、服务端口和探活结果，并告诉你日志文件在哪。加 `--json` 便于脚本判断，
+加 `--no-probe` 可以只查本地状态、不发任何网络请求。
+
+运行日志按天写在 `database/logs/campusnet-YYYY-MM-DD.log`，默认保留 7 天，
+`serve` 的 `print` 输出、异常栈都会同时落进这份文件——机器在宿舍、人在外面时，
+这就是你唯一的现场证据。
+
+**不想记命令**
+
+`python utils/run.py shortcut` 会在桌面生成每一种用法的快捷方式：启动服务、打开控制台、
+立即检测、查看自检报告、查看多端访问、注册开机自启（无需登录）、查看日志、远程关机。
+双击即可，输出会留在窗口里，不会一闪而过。macOS/Linux 生成的是 `.command` / `.desktop`。
+
+**手机 / 平板怎么连上这台电脑**
+
+跑 `python utils/run.py access`：它会列出本机地址、局域网地址、Tailscale 地址和
+控制台令牌，照着填就行。手机端建议装 Tailscale（任何网络都能连），
+远程桌面用 RDP 客户端或 RustDesk。
+
+想让它主动找你，就在控制台设置页填一个**失败通知 Webhook**：连续失败达到阈值
+（默认 3 次）会推一条，恢复在线再推一条，中间不会反复轰炸。钉钉、企业微信的
+群机器人地址都能直接用；自建服务收到的是一份 JSON（同时带 `msgtype`/`text.content`
+和顶层 `content` 字段）。通知内容含账号名与状态，不含密码。
+
+**换了电脑 / 重装了系统，账号密码要重录吗**
+
+不用。`cred export` 导出一份口令保护的凭据文件，在新机器上 `cred import` 恢复：
+按「同名 + 同账号」覆盖，重复导入不会产生重复账号，加 `--dry-run` 可以先看它会做什么。
+Windows 上密码原本走 DPAPI（绑当前用户 + 这台机器），所以**只备份
+`database/campusnet.db` 是不够的**，换机后解不开。加 `--passphrase-file` 可以让
+脚本或无人值守方式执行，不必交互输入口令。
+
+**怎么用手机 / 平板远程开关机**
+
+「关」这半由程序负责：控制台「设置」页有**远程关机 / 远程重启**两个按钮，
+手机浏览器打开控制台就能点（需先把控制台暴露给手机——同一 Wi-Fi 下用
+`python utils/run.py serve --host 0.0.0.0` 并带上令牌，或两台设备都装 Tailscale）。
+命令行等价操作：`python utils/run.py power off` / `power reboot`。
+
+「开」这半任何软件都做不到（机器断电后没有程序在运行），三条路各有取舍：
+
+1. **BIOS 上电自启 + 智能插座**：主板设「断电恢复 = Power On」，插座用手机 App
+   断电几秒再上电，机器自己起来。注意插座自己也要有网——校园网要网页认证，
+   插座认证不了，所以要用 4G 版继电器，或挂在一个已经过认证的路由器下面。
+2. **WOL 魔术包**：手机装一个 WOL App，在同一网段直接唤醒（需要主板开启 WOL、
+   关掉 Windows 快速启动；校园网做了客户端隔离时可能不通）。
+3. **宿舍留一台常开设备**（树莓派/旧路由）：跑 `python utils/run.py power wake
+   --mac AA:BB:CC:DD:EE:FF` 替你按电源键——它同二层发包，比手机跨 VLAN 靠谱。
+
+连上之后怎么用：手机装 Tailscale + RDP 客户端（或 RustDesk），就能像在电脑前一样
+操作。认证成功、隧道上线这条链路不需要你干预。
+
 **控制台打不开 / 启动后没反应**
 端口被占。程序会在启动前检查并直接告诉你占用者：
 
@@ -341,6 +441,8 @@ python -m pip install -r utils/requirements-dev.txt
   本身无法加密，共用电脑或共享浏览器配置请勿使用插件形态。
 - **命令行添加账号时密码会进 shell 历史**。建议改用 Web 控制台添加，
   或在命令前加空格（`--password` 前）临时关闭该行为。
+- `cred export` 产出的凭据文件受你设置的口令保护，但它等价于一份明文口令：
+  迁移完请删除，不要放进网盘或聊天记录；POSIX 上程序会把文件权限收紧到 0600。
 - 本工具**只做你所在校园网的 Web 门户认证**，不涉及 802.1X 驱动层、
   不做 MAC 绑定绕过。请在你有权使用的网络环境下使用。
 
@@ -377,6 +479,8 @@ project/backend/campusnet/
   server.py         HTTP API + 静态托管
   lockfile.py       单实例互斥
   bootstart.py      开机自启动（Windows/Linux/macOS 三平台载体）
+  logging_setup.py  运行日志（按天落盘 + 保留策略 + print 双写）
+  doctor.py         一键自检
   cli.py            命令行入口
 project/frontend/
   index.html        Web 控制台

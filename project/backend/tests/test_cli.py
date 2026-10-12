@@ -58,6 +58,14 @@ def test_parser_exposes_all_commands() -> None:
         "events",
         "token",
         "bootstart",
+        "doctor",
+        "notify",
+        "cred",
+        "power",
+        "console",
+        "logs",
+        "access",
+        "shortcut",
     }
 
 

@@ -257,11 +257,23 @@
           <label><span class="lbl">服务启动时自动开监控</span>
             <select id="setAutostart"><option value="1">是</option><option value="0">否</option></select>
           </label>
+          <label><span class="lbl">失败通知 Webhook</span>
+            <input id="setNotifyUrl" placeholder="留空即关闭；钉钉/企业微信机器人的地址都行">
+          </label>
+          <label><span class="lbl">连续失败几次后通知</span>
+            <input type="number" id="setNotifyAfter" min="1" max="99" placeholder="3">
+          </label>
         </div>
         <div class="row">
           <button id="btnSaveSettings">保存设置</button>
           <button class="ghost" id="btnDetectPortal">检测门户地址</button>
           <span class="hint" id="detectResult"></span>
+        </div>
+        <div class="row" style="margin-top:14px">
+          <span class="lbl" style="min-width:96px">电源控制</span>
+          <button class="ghost danger" id="btnPowerOff">远程关机</button>
+          <button class="ghost" id="btnPowerReboot">远程重启</button>
+          <span class="hint" id="powerHint">关机后要靠 WOL 或智能插座才能再开机</span>
         </div>
         <label style="margin-top:18px"><span class="lbl">用于检测门户地址的探测网址</span>
           <input id="setDetectUrl" value="http://www.msftconnecttest.com/connecttest.txt">
@@ -698,6 +710,8 @@ async function loadSettings() {
     $('setInterval').value = settings.interval ?? 60;
     $('setHeadless').value = (settings.headless === false) ? '0' : '1';
     $('setAutostart').value = (settings.autostart === false) ? '0' : '1';
+    $('setNotifyUrl').value = settings.notify_url ?? '';
+    $('setNotifyAfter').value = settings.notify_after_failures ?? 3;
   } catch (e) { toast('加载设置失败: ' + e.message, 'err'); }
 }
 
@@ -708,6 +722,10 @@ async function saveSettings() {
     autostart: $('setAutostart').value === '1',
   };
   try {
+    await api('/api/settings', { method:'PUT', body: {
+      notify_url: $('setNotifyUrl').value.trim(),
+      notify_after_failures: +$('setNotifyAfter').value || 3,
+    }});
     await api('/api/monitor/start', { method:'POST', body });
     toast('设置已保存并应用', 'ok');
     refresh();
@@ -785,6 +803,22 @@ $('btnClearEvents').onclick = async () => {
   await api('/api/events/clear', { method:'POST', body:{} });
   loadEvents();
 };
+async function powerAction(action) {
+  const label = action === 'off' ? '关机' : '重启';
+  const extra = action === 'off' ? '\n\n关机后需要 WOL 或智能插座才能再开机。' : '';
+  if (!confirm(`确定要远程${label}这台电脑吗？${extra}`)) return;
+  try {
+    const r = await api('/api/power/' + action, { method:'POST', body:{ confirm:true } });
+    $('powerHint').textContent = '已下发' + label + '指令：' + (r.command || '');
+    toast('已下发' + label + '指令', 'ok');
+  } catch (e) {
+    $('powerHint').textContent = label + '失败: ' + e.message;
+    toast(label + '失败: ' + e.message, 'err');
+  }
+}
+
+$('btnPowerOff').onclick = () => powerAction('off');
+$('btnPowerReboot').onclick = () => powerAction('reboot');
 $('btnSaveSettings').onclick = saveSettings;
 $('btnBootInstall').onclick = () => setBootstart('install');
 $('btnBootUninstall').onclick = () => setBootstart('uninstall');

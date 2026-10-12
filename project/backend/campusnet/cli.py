@@ -14,8 +14,12 @@ from .storage import Account, Store
 
 
 def cmd_serve(args: argparse.Namespace) -> int:
+    from .logging_setup import setup_logging
     from .server import serve
 
+    target = setup_logging()
+    if target is not None:
+        print(f"运行日志：{target}")
     try:
         serve(
             host=args.host,
@@ -184,12 +188,21 @@ def cmd_bootstart(args: argparse.Namespace) -> int:
         return 0
 
     if args.bootstart_action == "install":
-        result = bootstart_mod.install(host=args.host, port=args.port)
+        password = ""
+        if args.mode == "task":
+            from getpass import getpass
+
+            password = getpass("输入当前 Windows 账户密码（只交给任务计划程序保存）：")
+        result = bootstart_mod.install(
+            host=args.host, port=args.port, mode=args.mode, password=password
+        )
         print(bootstart_mod.activate(result))
         if not result.installed:
             return 1
         if bootstart_mod.platform_name() == "linux" and result.path and result.path.suffix == ".service":
             print("提示：默认随用户会话启动；无需登录运行需另行配置 linger，并确认系统授权策略。")
+        if args.mode == "task":
+            print("提示：任务会在开机时运行，不需要任何人登录；密码只由任务计划程序保存。")
         return 0
 
     result = bootstart_mod.uninstall()
@@ -248,6 +261,192 @@ def cmd_discover(args: argparse.Namespace) -> int:
         extra = json.dumps(fields["extra_fields"], ensure_ascii=False)
         print(f"  追加：--extra '{extra}'")
     return 0
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    """一键自检：本地状态 +（默认）真实探活，用于人在外面排查。"""
+    stdout_ready()
+    from . import doctor as doctor_mod
+    from .logging_setup import setup_logging
+
+    setup_logging()
+    checks = doctor_mod.run(probe=not args.no_probe)
+    print(doctor_mod.render(checks, as_json=args.json))
+    return doctor_mod.exit_code(checks)
+
+
+def cmd_notify(args: argparse.Namespace) -> int:
+    """发一条测试通知，用来确认 webhook 配置真的能通。"""
+    stdout_ready()
+    from .notify import Notifier, send_test
+
+    notifier = Notifier.from_store(Store())
+    if args.url:
+        notifier.url = args.url.strip()
+    if not notifier.enabled:
+        print(
+            "未配置 webhook：请设置 notify_url（Web 控制台设置页），"
+            "或用 --url / CAMPUSNET_NOTIFY_URL 临时指定。"
+        )
+        return 2
+    ok = send_test(notifier)
+    print(("测试通知已发送：" if ok else "测试通知发送失败：") + notifier.url)
+    return 0 if ok else 1
+
+
+def _read_passphrase(path: str, prompt: str, *, confirm: bool = False) -> str:
+    """取口令：优先从文件读（脚本/无人值守用），否则交互输入。"""
+    from pathlib import Path
+
+    if path:
+        try:
+            # utf-8-sig：Windows 记事本/PowerShell 写出来的口令文件常带 BOM，
+            # 用 utf-8 读会把 BOM 当成口令的第一个字符，导致「口令不对」。
+            value = Path(path).read_text(encoding="utf-8-sig").strip()
+        except OSError as exc:
+            print(f"读不到口令文件 {path}：{exc}", file=sys.stderr)
+            raise SystemExit(2) from exc
+        if not value:
+            print(f"口令文件 {path} 是空的。", file=sys.stderr)
+            raise SystemExit(2)
+        return value
+
+    from getpass import getpass
+
+    first = getpass(prompt)
+    if not first:
+        print("口令不能为空，已取消。", file=sys.stderr)
+        raise SystemExit(2)
+    if confirm and getpass("再输一次确认：") != first:
+        print("两次输入不一致，已取消。", file=sys.stderr)
+        raise SystemExit(2)
+    return first
+
+
+def cmd_cred(args: argparse.Namespace) -> int:
+    """导出/导入账号凭据，用于换机或重装系统。"""
+    stdout_ready()
+    from pathlib import Path
+
+    from . import credentials as cred_mod
+
+    if args.cred_action == "export":
+        store = Store()
+        accounts = store.list_accounts()
+        if not accounts:
+            print("还没有账号，没什么可导出的。")
+            return 2
+        target = Path(args.out)
+        if target.exists() and not args.force:
+            print(f"{target} 已存在；确认覆盖请加 --force。", file=sys.stderr)
+            return 2
+        passphrase = _read_passphrase(
+            args.passphrase_file, "设置导出密码（迁移时要用它导入）：", confirm=True
+        )
+        try:
+            envelope = cred_mod.export_accounts(store, passphrase)
+            cred_mod.write_export(envelope, target)
+        except (cred_mod.ExportError, OSError) as exc:
+            print(f"导出失败：{exc}", file=sys.stderr)
+            return 2
+        print(f"已导出 {len(accounts)} 个账号到 {target}")
+        print("提示：该文件等价于明文口令，迁移完请删除或妥善保管。")
+        return 0
+
+    source = Path(args.file)
+    try:
+        envelope = cred_mod.read_export(source)
+    except cred_mod.ExportError as exc:
+        print(f"导入失败：{exc}", file=sys.stderr)
+        return 2
+    passphrase = _read_passphrase(args.passphrase_file, "输入导出时设置的口令：")
+    try:
+        report = cred_mod.import_accounts(
+            Store(), envelope, passphrase, dry_run=args.dry_run
+        )
+    except (cred_mod.ExportError, OSError) as exc:
+        print(f"导入失败：{exc}", file=sys.stderr)
+        return 2
+    print(report.summary())
+    return 0
+
+
+def cmd_power(args: argparse.Namespace) -> int:
+    """关机 / 重启 / 发 WOL 唤醒包。"""
+    stdout_ready()
+    from . import power as power_mod
+
+    try:
+        if args.power_action == "wake":
+            if not args.mac:
+                print("唤醒需要 --mac，例如 --mac AA:BB:CC:DD:EE:FF", file=sys.stderr)
+                return 2
+            target = power_mod.wake(args.mac, args.broadcast, args.port)
+            print(f"已向 {target} 发送唤醒包（需同一二层内的设备执行才有效）")
+            return 0
+        if args.power_action == "off":
+            verb = "关机"
+            command = power_mod.shutdown(args.delay, dry_run=args.dry_run)
+        else:
+            verb = "重启"
+            command = power_mod.reboot(args.delay, dry_run=args.dry_run)
+    except power_mod.PowerError as exc:
+        print(f"操作失败：{exc}", file=sys.stderr)
+        return 1
+    prefix = "[试运行] 将执行" if args.dry_run else "已下发"
+    print(f"{prefix}{verb}指令：{command}")
+    return 0
+
+
+def cmd_console(args: argparse.Namespace) -> int:
+    """在默认浏览器里打开控制台。"""
+    stdout_ready()
+    import webbrowser
+
+    url = f"http://{args.host}:{args.port}"
+    opened = webbrowser.open(url)
+    print(f"已在浏览器打开 {url}" if opened else f"未能自动打开，请手动访问 {url}")
+    return 0
+
+
+def cmd_logs(args: argparse.Namespace) -> int:
+    """打印运行日志的位置与最近若干行。"""
+    stdout_ready()
+    from .logging_setup import log_path
+
+    target = log_path()
+    print(f"日志文件：{target}")
+    if not target.exists():
+        print("还没有日志文件；跑过 serve 之后才会有。")
+        return 0
+    lines = target.read_text(encoding="utf-8", errors="replace").splitlines()
+    print("\n".join(lines[-max(1, int(args.lines)) :]))
+    return 0
+
+
+def cmd_access(args: argparse.Namespace) -> int:
+    """打印手机 / 平板访问控制台需要的信息。"""
+    stdout_ready()
+    from . import access as access_mod
+
+    for line in access_mod.report(host=args.host, port=args.port):
+        print(line)
+    return 0
+
+
+def cmd_shortcut(args: argparse.Namespace) -> int:
+    """在桌面生成每种用法的快捷方式。"""
+    stdout_ready()
+    from . import shortcuts as shortcuts_mod
+
+    ok, message = shortcuts_mod.create(
+        args.dir or None, platform=args.platform or None
+    )
+    if ok:
+        print(message)
+        return 0
+    print(f"创建快捷方式失败：{message}", file=sys.stderr)
+    return 1
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -340,9 +539,84 @@ def build_parser() -> argparse.ArgumentParser:
     p_boot_install = boot_sub.add_parser("install", help="注册开机自启动")
     p_boot_install.add_argument("--host", default=API_HOST)
     p_boot_install.add_argument("--port", type=int, default=API_PORT)
+    p_boot_install.add_argument(
+        "--mode",
+        choices=["auto", "task"],
+        default="auto",
+        help=(
+            "auto=平台默认载体（Windows 为「登录后」启动）；"
+            "task=Windows 计划任务（开机触发，无需登录即可认证）"
+        ),
+    )
     p_boot_install.set_defaults(func=cmd_bootstart)
     p_boot_uninstall = boot_sub.add_parser("uninstall", help="移除开机自启动")
     p_boot_uninstall.set_defaults(func=cmd_bootstart)
+
+    p_doctor = sub.add_parser(
+        "doctor", help="一键自检：端口、数据库、令牌、自启动、探活"
+    )
+    p_doctor.add_argument(
+        "--no-probe", action="store_true", help="跳过真实探活，只查本地状态"
+    )
+    p_doctor.add_argument("--json", action="store_true", help="输出 JSON，便于脚本判断")
+    p_doctor.set_defaults(func=cmd_doctor)
+
+    p_notify = sub.add_parser("notify", help="发送一条测试通知（校验 webhook 配置）")
+    p_notify.add_argument("--url", default="", help="临时覆盖配置里的 webhook 地址")
+    p_notify.set_defaults(func=cmd_notify)
+
+    p_cred = sub.add_parser("cred", help="导出/导入账号凭据（换机、重装系统用）")
+    cred_sub = p_cred.add_subparsers(dest="cred_action", required=True)
+    p_cred_export = cred_sub.add_parser("export", help="导出口令保护的凭据文件")
+    p_cred_export.add_argument("--out", default="campusnet-credentials.json")
+    p_cred_export.add_argument("--force", action="store_true", help="覆盖已存在的文件")
+    p_cred_export.add_argument(
+        "--passphrase-file", default="", help="从文件读口令（脚本/无人值守用）"
+    )
+    p_cred_export.set_defaults(func=cmd_cred)
+    p_cred_import = cred_sub.add_parser("import", help="从凭据文件恢复账号")
+    p_cred_import.add_argument("--file", required=True)
+    p_cred_import.add_argument(
+        "--dry-run", action="store_true", help="只报告会做什么，不写数据库"
+    )
+    p_cred_import.add_argument("--passphrase-file", default="")
+    p_cred_import.set_defaults(func=cmd_cred)
+
+    p_power = sub.add_parser("power", help="关机 / 重启 / 发送 WOL 唤醒包")
+    power_sub = p_power.add_subparsers(dest="power_action", required=True)
+    for action, action_help in (("off", "关机"), ("reboot", "重启")):
+        p_power_action = power_sub.add_parser(action, help=action_help)
+        p_power_action.add_argument("--delay", type=int, default=0, help="延迟秒数")
+        p_power_action.add_argument(
+            "--dry-run", action="store_true", help="只打印将要执行的命令"
+        )
+        p_power_action.set_defaults(func=cmd_power)
+    p_power_wake = power_sub.add_parser("wake", help="发送 WOL 魔术包唤醒另一台机器")
+    p_power_wake.add_argument("--mac", default="", help="目标网卡 MAC")
+    p_power_wake.add_argument("--broadcast", default="255.255.255.255")
+    p_power_wake.add_argument("--port", type=int, default=9)
+    p_power_wake.set_defaults(func=cmd_power)
+
+    p_console = sub.add_parser("console", help="在默认浏览器里打开控制台")
+    p_console.add_argument("--host", default="127.0.0.1")
+    p_console.add_argument("--port", type=int, default=API_PORT)
+    p_console.set_defaults(func=cmd_console)
+
+    p_logs = sub.add_parser("logs", help="查看运行日志的位置与最近内容")
+    p_logs.add_argument("--lines", type=int, default=20)
+    p_logs.set_defaults(func=cmd_logs)
+
+    p_access = sub.add_parser("access", help="查看手机 / 平板访问控制台需要的信息")
+    p_access.add_argument("--host", default=API_HOST)
+    p_access.add_argument("--port", type=int, default=API_PORT)
+    p_access.set_defaults(func=cmd_access)
+
+    p_shortcut = sub.add_parser("shortcut", help="在桌面生成每种用法的快捷方式")
+    p_shortcut.add_argument("--dir", default="", help="输出目录（默认桌面）")
+    p_shortcut.add_argument(
+        "--platform", default="", help="强制平台（测试用）：windows/darwin/linux"
+    )
+    p_shortcut.set_defaults(func=cmd_shortcut)
 
     return parser
 
