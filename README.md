@@ -298,6 +298,8 @@ python utils/run.py portal-report --url http://<门户地址>/eportal/portal/log
 学号、手机号、内网地址与长令牌），并当场打印识别结果。把这份文件贴到 issue / PR 里，
 就能帮你补一条规则。已有 fixture 用 `portal-report --replay <文件>` 可以离线查看
 识别结果（不联网）；`--from-file` 则用于处理你手工保存下来的 HTML。
+投稿的 fixture 可以直接放进 `project/backend/tests/fixtures/`（里面已有一个示例），
+回放测试会自动跑它，识别退化时立刻报红。
 
 | 厂商 | 登录方式 | 密码编码 | 备注 |
 |---|---|---|---|
@@ -395,6 +397,11 @@ python -m pip install -r utils/requirements-dev.txt
 `python utils/run.py shortcut` 会在桌面生成每一种用法的快捷方式：启动服务、打开控制台、
 立即检测、查看自检报告、查看多端访问、注册开机自启（无需登录）、查看日志、远程关机。
 双击即可，输出会留在窗口里，不会一闪而过。macOS/Linux 生成的是 `.command` / `.desktop`。
+
+**怎么知道有没有新版本**
+
+`python utils/run.py doctor` 在联网时会顺带对比 GitHub 上的最新 Release：有新版本会
+提示去 Releases 下载；连不上就静默跳过，不会因此把自检搞成失败。
 
 **手机 / 平板怎么连上这台电脑**
 

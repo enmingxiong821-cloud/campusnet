@@ -157,6 +157,69 @@ def _probe_checks(store: Any) -> list[Check]:
     return checks
 
 
+UPDATE_API = (
+    "https://api.github.com/repos/enmingxiong821-cloud/campusnet/releases/latest"
+)
+
+
+def compare_versions(local: str, latest: str) -> str:
+    """返回 "same" / "newer" / "older"，只比数字段，避免预发布后缀误判。"""
+
+    def parts(text: str) -> tuple[int, ...]:
+        items: list[int] = []
+        for chunk in str(text).lstrip("v").split("."):
+            digits = "".join(ch for ch in chunk if ch.isdigit())
+            items.append(int(digits) if digits else 0)
+        return tuple(items)
+
+    left, right = parts(local), parts(latest)
+    # 补齐位数再比较：1.1 与 1.1.0 是同一个版本，不该被判成「旧」。
+    width = max(len(left), len(right))
+    left = left + (0,) * (width - len(left))
+    right = right + (0,) * (width - len(right))
+    if left == right:
+        return "same"
+    return "older" if left < right else "newer"
+
+
+def _update_check(enabled: bool = True) -> Check:
+    """对比本地版本与 GitHub 最新 Release。
+
+    联网失败一律当成「没检查」：检查更新只是锦上添花，
+    绝不能因为它把 doctor 搞成红叉。
+    """
+    if not enabled:
+        return Check("版本", OK, f"当前 {__version__}（未联网检查更新）")
+    import json
+    import urllib.request
+
+    try:
+        request = urllib.request.Request(
+            UPDATE_API,
+            headers={
+                "Accept": "application/vnd.github+json",
+                "User-Agent": "campusnet",
+            },
+        )
+        with urllib.request.urlopen(request, timeout=4) as response:
+            payload = json.loads(response.read().decode("utf-8", "replace"))
+        latest = str(payload.get("tag_name", "")).strip()
+    except Exception:  # noqa: BLE001 - 检查更新失败不影响自检结论
+        return Check("版本", OK, f"当前 {__version__}（没能获取最新版本，已忽略）")
+    if not latest:
+        return Check("版本", OK, f"当前 {__version__}（没能获取最新版本，已忽略）")
+    relation = compare_versions(__version__, latest)
+    if relation == "older":
+        return Check(
+            "版本",
+            WARN,
+            f"有新版本 {latest}（当前 {__version__}，可到 Releases 下载）",
+        )
+    if relation == "same":
+        return Check("版本", OK, f"当前 {__version__}（已是最新）")
+    return Check("版本", OK, f"当前 {__version__}（比最新发布还新）")
+
+
 def _notify_check(store: Any | None) -> Check:
     if store is None:
         return Check("失败通知", WARN, "数据库打不开，无法读取通知配置")
@@ -194,6 +257,7 @@ def run(
             _port_check(host, port),
             _log_check(),
             _notify_check(store),
+            _update_check(enabled=probe),
         ]
     )
     if probe and store is not None:

@@ -86,6 +86,51 @@ def test_doctor_reports_notify_configuration(store) -> None:  # noqa: ANN001
     assert _by_name(doctor_mod.run(probe=False))["失败通知"].status == doctor_mod.OK
 
 
+def test_compare_versions_handles_prefixes() -> None:
+    assert doctor_mod.compare_versions("1.1.0", "v1.1.0") == "same"
+    assert doctor_mod.compare_versions("1.1.0", "1.2.0") == "older"
+    assert doctor_mod.compare_versions("1.2.0", "1.1.9") == "newer"
+    assert doctor_mod.compare_versions("1.1", "1.1.0") == "same"
+
+
+def test_update_check_skips_network_when_disabled() -> None:
+    check = doctor_mod._update_check(enabled=False)
+
+    assert check.status == doctor_mod.OK
+    assert "未联网" in check.detail
+
+
+def test_update_check_reports_newer_release(monkeypatch) -> None:  # noqa: ANN001
+    class FakeResponse:
+        def read(self) -> bytes:
+            return '{"tag_name": "v9.9.9"}'.encode("utf-8")
+
+        def __enter__(self) -> "FakeResponse":
+            return self
+
+        def __exit__(self, *_exc: object) -> bool:
+            return False
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda *a, **k: FakeResponse())
+
+    check = doctor_mod._update_check()
+
+    assert check.status == doctor_mod.WARN
+    assert "9.9.9" in check.detail
+
+
+def test_update_check_survives_network_error(monkeypatch) -> None:  # noqa: ANN001
+    def boom(*_a: object, **_k: object) -> None:
+        raise OSError("no network")
+
+    monkeypatch.setattr("urllib.request.urlopen", boom)
+
+    check = doctor_mod._update_check()
+
+    assert check.status == doctor_mod.OK
+    assert "已忽略" in check.detail
+
+
 def test_doctor_fails_when_bootstart_would_not_apply(store, monkeypatch) -> None:  # noqa: ANN001
     """「装了但不会生效」必须报 FAIL：这正是用户重启后才发现没网的场景。"""
     from pathlib import Path

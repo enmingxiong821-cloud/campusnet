@@ -167,11 +167,32 @@ def parse_forms(page_html: str) -> list[LoginForm]:
     return forms
 
 
-def pick_login_form(forms: list[LoginForm]) -> LoginForm | None:
-    """优先挑带密码框、字段最多的表单。"""
+def pick_login_form(
+    forms: list[LoginForm], profile: object | None = None
+) -> LoginForm | None:
+    """优先挑带密码框、字段最多的表单。
+
+    传了 profile（门户规则）时，先看哪个表单含规则里写明的字段候选——
+    有些门户页里同时有搜索框和登录框，字段名又都叫 user 之类，光靠
+    「哪个像密码框」会挑错；规则给的名字比启发式可靠。
+    """
     candidates = [f for f in forms if f.fields]
     if not candidates:
         return None
+    wanted = {
+        str(name).lower()
+        for name in (
+            *getattr(profile, "username_fields", ()),
+            *getattr(profile, "password_fields", ()),
+        )
+    }
+    if wanted:
+        for form in candidates:
+            names = {key.lower() for key in form.fields}
+            if names & wanted and any(
+                hint in key.lower() for key in form.fields for hint in PASSWORD_HINTS
+            ):
+                return form.classify()
     scored = sorted(
         candidates,
         key=lambda f: (
@@ -326,6 +347,20 @@ def classify_response(body: str, status: int, final_url: str) -> LoginResult:
     return LoginResult("error", f"门户返回异常状态 {status}", f"status={status} url={final_url}")
 
 
+def _field_from_profile(
+    profile: object | None, fields: dict[str, str], candidates: tuple[str, ...]
+) -> str:
+    """把规则里的字段候选映射到页面上真实存在的字段名。"""
+    if not profile:
+        return ""
+    lowered = {name.lower(): name for name in fields}
+    for candidate in candidates:
+        hit = lowered.get(str(candidate).lower())
+        if hit:
+            return hit
+    return ""
+
+
 def http_login(
     account: Account,
     timeout: float = 10.0,
@@ -358,8 +393,11 @@ def http_login(
         return LoginResult("error", f"打开门户失败 HTTP {status}", f"url={final_url}")
 
     emit("parse", f"门户已响应（HTTP {status}），正在识别登录表单")
+    from . import profiles as profiles_mod
+
+    profile, _ = profiles_mod.identify(page, final_url or portal)
     forms = parse_forms(page)
-    form = pick_login_form(forms)
+    form = pick_login_form(forms, profile)
     if form is None:
         return LoginResult(
             "error",
@@ -367,8 +405,20 @@ def http_login(
             f"forms={len(forms)}",
         )
 
-    user_field = account.username_field or form.username_field
-    pass_field = account.password_field or form.password_field
+    user_field = (
+        account.username_field
+        or form.username_field
+        or _field_from_profile(
+            profile, form.fields, profile.username_fields if profile else ()
+        )
+    )
+    pass_field = (
+        account.password_field
+        or form.password_field
+        or _field_from_profile(
+            profile, form.fields, profile.password_fields if profile else ()
+        )
+    )
     if not user_field or not pass_field:
         return LoginResult(
             "error",

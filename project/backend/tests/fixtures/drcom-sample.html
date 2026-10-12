@@ -1,0 +1,17 @@
+<!-- 校园网自连门户 fixture（已脱敏）
+     来源: http://10.1.2.3/eportal/portal/login
+     已删除: 输入值、脚本与样式正文、注释、URL 查询串、学号、手机号、内网地址、长令牌
+     用途: 离线回放识别厂商与字段；可直接贴到 issue / PR
+     说明: 这是随仓库提供的示例夹具（合成数据），真实投稿请用
+           python utils/run.py portal-report --url <门户地址> 生成 -->
+<html><head><title>校园网用户认证</title></head>
+<body>
+<form name="frmLogin" method="post" action="/eportal/portal/login">
+  <input name="DDDDD" id="DDDDD" type="text" placeholder="请输入学号">
+  <input name="upass" id="upass" type="password" placeholder="请输入密码">
+  <input name="0MKKey" type="hidden">
+  <input name="user_ip" type="hidden">
+  <input name="user_mac" type="hidden">
+  <input name="submit" type="submit" class="btn">
+</form>
+</body></html>

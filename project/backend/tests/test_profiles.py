@@ -116,3 +116,53 @@ def test_cli_profiles_lists_rules(capsys) -> None:  # noqa: ANN001
     assert cli_mod.main(["profiles"]) == 0
 
     assert "深澜 SRUN" in capsys.readouterr().out
+
+
+DECOY_PAGE = """
+<html><body>
+<form action="/search">
+  <input name="kw" type="text">
+  <input name="pwd" type="password">
+  <input name="extra1" type="text">
+  <input name="extra2" type="text">
+</form>
+<form action="/eportal/portal/login">
+  <input name="DDDDD" type="text">
+  <input name="upass" type="password">
+  <input name="0MKKey" type="hidden">
+</form>
+</body></html>
+"""
+
+
+def test_pick_login_form_prefers_profile_fields() -> None:
+    """页面里有两个都像登录的表单时，规则里写明的字段名优先。"""
+    from campusnet import portal
+
+    profile, _ = profiles_mod.identify(DECOY_PAGE, "http://10.1.2.3/eportal/portal/login")
+    assert profile is not None and profile.id == "drcom"
+    forms = portal.parse_forms(DECOY_PAGE)
+
+    heuristic = portal.pick_login_form(forms)
+    with_profile = portal.pick_login_form(forms, profile)
+
+    # 光靠启发式会挑字段更多、也带 password 的那个搜索表单
+    assert heuristic is not None and "pwd" in heuristic.fields
+    assert with_profile is not None
+    assert "DDDDD" in with_profile.fields
+    assert "upass" in with_profile.fields
+
+
+def test_field_from_profile_maps_candidates() -> None:
+    from campusnet import portal
+
+    profile, _ = profiles_mod.identify("<html>srun_bx1</html>", "http://x/")
+    assert profile is not None
+    fields = {"DDDDD": "", "upass": "", "0MKKey": ""}
+
+    assert (
+        portal._field_from_profile(profile, fields, profile.username_fields) == "DDDDD"
+    )
+    assert portal._field_from_profile(profile, fields, profile.password_fields) == "upass"
+    assert portal._field_from_profile(None, fields, ("x",)) == ""
+    assert portal._field_from_profile(profile, fields, ("missing",)) == ""

@@ -118,3 +118,17 @@ def test_cli_portal_report_requires_source(capsys) -> None:  # noqa: ANN001
     assert cli_mod.main(["portal-report"]) == 2
 
     assert "请给出 --url" in capsys.readouterr().err
+
+
+def test_replay_bundled_fixture() -> None:
+    """投稿来的 fixture 固化在 tests/fixtures 下，回放一次防识别退化。"""
+    from pathlib import Path
+
+    path = Path(__file__).parent / "fixtures" / "drcom-sample.html"
+
+    info = fixtures_mod.replay(path)
+
+    assert info["vendor"] == "Dr.COM"
+    assert info["username_field"] == "DDDDD"
+    assert info["password_field"] == "upass"
+    assert "0MKKey" in info["hidden_fields"]  # type: ignore[operator]
