@@ -1,0 +1,6 @@
+# 要分发到 Linux 的配置文件强制 LF。
+#
+# 本仓库在 Windows 上开发，core.autocrlf=true 会在检出时把换行改成 CRLF，
+# 而 systemd 单元文件里的 CR 可能被当成值的一部分。与其去赌目标平台是否
+# 容忍，不如让它在仓库里就一直是 LF。
+packaging/*.service text eol=lf

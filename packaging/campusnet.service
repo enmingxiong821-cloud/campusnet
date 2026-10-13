@@ -1,0 +1,69 @@
+# 校园网自连 · 系统级 systemd 单元（开机即连，不需要登录）
+#
+# 和 `campusnet bootstart install` 生成的那个不是一回事，两者可以并存：
+#   用户级  ~/.config/systemd/user/campusnet.service   「登录后」才起来
+#   系统级  /etc/systemd/system/campusnet.service      「开机后」就起来  ← 本文件
+# 想做到「电脑有电就连上」，要的是后者：没人登录也得跑。
+#
+# 装上（需 root）：
+#   sudo useradd --system --home-dir /opt/campusnet --shell /usr/sbin/nologin campusnet
+#   sudo install -d -o campusnet -g campusnet /opt/campusnet
+#   sudo cp -r project utils database /opt/campusnet/          # 或把单文件放进去
+#   sudo install -m 0644 packaging/campusnet.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now campusnet
+#
+# 注意 install.sh 的默认落点是当前用户的 ~/.local/share/campusnet，
+# 那是给「登录后自启」用的；系统级服务跑在独立的 campusnet 账号下，
+# 读不到别的用户的家目录，所以这里一律用 /opt/campusnet。
+
+[Unit]
+Description=校园网自连（开机自动认证与掉线重连）
+Documentation=https://github.com/enmingxiong821-cloud/campusnet
+# network-online 而不是 network：认证要真的能出网才谈得上，
+# 网卡 up 但还没拿到地址时启动，第一次检测必然白跑一遍。
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=campusnet
+Group=campusnet
+WorkingDirectory=/opt/campusnet
+Environment=PYTHONIOENCODING=utf-8
+Environment=PYTHONUTF8=1
+# 下面是冻结版（单文件）的写法。
+# 源码安装改成：/usr/bin/python3 /opt/campusnet/utils/run.py serve --host 127.0.0.1 --port 2268
+#
+# 这里是 127.0.0.1：默认只有本机能访问控制台。要从手机连，
+# 把 --host 换成 0.0.0.0，并先确认控制台令牌已设好。
+ExecStart=/opt/campusnet/campusnet serve --host 127.0.0.1 --port 2268
+# 只负责进程被异常终止后拉起来；门户登录的重试由程序自己的监控循环做，
+# 不把单次认证失败当成进程退出，免得触发 systemd 的启动频率限制。
+Restart=on-failure
+RestartSec=10
+# 进程不需要再提权。远程关机走 polkit（见文末），不靠 setuid。
+NoNewPrivileges=yes
+
+[Install]
+# 系统级单元用 multi-user.target：这是「机器起来」而不是「用户登录」的语义。
+WantedBy=multi-user.target
+
+# ── 远程开关机需要额外授权 ────────────────────────────────────────────
+# power off / reboot 实际执行的是 systemctl poweroff|reboot，非 root 会被
+# polkit 拒掉。两种给法，任选其一：
+#
+#   1) 最小授权（推荐）：只放行开关机，进程本身仍是普通账号。
+#      新建 /etc/polkit-1/rules.d/49-campusnet.rules：
+#        polkit.addRule(function(action, subject) {
+#          if ((action.id == "org.freedesktop.login1.power-off" ||
+#               action.id == "org.freedesktop.login1.reboot") &&
+#              subject.user == "campusnet") {
+#            return polkit.Result.YES;
+#          }
+#        });
+#      然后 systemctl restart polkit
+#
+#   2) 省事但权限大：把上面的 User=/Group= 改成 root 并去掉这两行。
+#      控制台是有令牌认证的网络入口，以 root 跑等于把这个入口的
+#      任何绕过都放大成整机沦陷，能用方案 1 就别用这个。
