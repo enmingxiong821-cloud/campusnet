@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  校园网自连 · 系统级 LaunchDaemon（开机即连，不需要登录）
+
+  和 `campusnet bootstart install` 生成的那个不是一回事，两者可以并存：
+    LaunchAgent  ~/Library/LaunchAgents/com.campusnet.autostart.plist  「登录后」才起来
+    LaunchDaemon /Library/LaunchDaemons/com.campusnet.daemon.plist     「开机后」就起来 ← 本文件
+  想做到「电脑有电就连上」，要的是后者。
+
+  装上（需 root）：
+    sudo dscl . -create /Users/campusnet
+    sudo dscl . -create /Users/campusnet UserShell /usr/bin/false
+    sudo dscl . -create /Users/campusnet UniqueID 420
+    sudo dscl . -create /Users/campusnet PrimaryGroupID 420
+    sudo install -d -o campusnet -g campusnet /opt/campusnet
+    sudo cp -r project utils database /opt/campusnet/
+    sudo install -m 0644 packaging/com.campusnet.daemon.plist /Library/LaunchDaemons/
+    sudo launchctl load -w /Library/LaunchDaemons/com.campusnet.daemon.plist
+
+  install.sh 的默认落点是 ~/Library/Application Support/campusnet，那是给
+  「登录后自启」用的；LaunchDaemon 跑在独立账号下，读不到用户家目录，
+  所以这里一律用 /opt/campusnet。
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.campusnet.daemon</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <!-- 冻结版（单文件）。源码安装改成 /usr/bin/python3 加 utils/run.py 两个元素。 -->
+        <string>/opt/campusnet/campusnet</string>
+        <string>serve</string>
+        <!-- 127.0.0.1 表示默认只有本机能访问控制台；要从手机连，换成 0.0.0.0。 -->
+        <string>--host</string>
+        <string>127.0.0.1</string>
+        <string>--port</string>
+        <string>2268</string>
+    </array>
+
+    <key>UserName</key>
+    <string>campusnet</string>
+    <key>GroupName</key>
+    <string>campusnet</string>
+
+    <key>WorkingDirectory</key>
+    <string>/opt/campusnet</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- 只负责进程异常退出后拉起，和 systemd 单元的 Restart=on-failure 对齐。
+         登录失败的重试由程序自己的监控循环做，不把单次认证失败当进程退出。
+         SuccessfulExit=false 就是「正常退出不管，异常退出才重启」。 -->
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <!-- 守护进程没有家目录，输出只能落到 /var/log；database/ 下的
+         autostart.log 仍由程序自己写。 -->
+    <key>StandardOutPath</key>
+    <string>/var/log/campusnet.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/log/campusnet.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PYTHONIOENCODING</key>
+        <string>utf-8</string>
+        <key>PYTHONUTF8</key>
+        <string>1</string>
+    </dict>
+</dict>
+</plist>
