@@ -55,33 +55,140 @@ def _post(url: str, payload: dict[str, Any]) -> bool:
         return False
 
 
+def _send(url: str, method: str = "POST", body: bytes | None = None) -> bool:
+    """按方法发请求；body 为 None 时走 GET（如 Server酱）。"""
+    headers = {"Content-Type": "application/json"} if body is not None else {}
+    request = urllib.request.Request(url, data=body, method=method, headers=headers)
+    try:
+        with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
+            return 200 <= int(response.status) < 300
+    except Exception:  # noqa: BLE001
+        return False
+
+
+# 渠道预设：选渠道 + 填 key，就不必手拼每个平台的 webhook URL。
+CHANNELS: dict[str, str] = {
+    "generic": "通用 Webhook",
+    "bark": "Bark",
+    "serverchan": "Server酱",
+    "wecom": "企业微信机器人",
+    "dingtalk": "钉钉机器人",
+    "telegram": "Telegram Bot",
+    "ntfy": "ntfy",
+}
+
+
+def channel_url(channel: str, key: str) -> str:
+    """按渠道把 key 拼成最终 URL；generic 返回空串（走 notify_url）。"""
+    key = (key or "").strip()
+    if channel == "bark":
+        return f"https://api.day.app/{key}"
+    if channel == "serverchan":
+        return f"https://sctapi.ftqq.com/{key}.send"
+    if channel == "wecom":
+        return f"https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key={key}"
+    if channel == "dingtalk":
+        return f"https://oapi.dingtalk.com/robot/send?access_token={key}"
+    if channel == "ntfy":
+        return f"https://ntfy.sh/{key}"
+    if channel == "telegram":
+        token = key.partition("/")[0]  # key 形如 "<bot_token>/<chat_id>"
+        return f"https://api.telegram.org/bot{token}/sendMessage"
+    return ""
+
+
+def build_channel_request(
+    channel: str, key: str, text: str, title: str = ""
+) -> tuple[str, str, bytes | None]:
+    """构造一次通知请求，返回 (URL, HTTP方法, 请求体或 None)，不真正发送。
+
+    每个渠道的负载形状在这里定义，测试据此断言 payload 形状，不必真发网络请求。
+    """
+    url = channel_url(channel, key)
+    if channel == "serverchan":
+        from urllib.parse import urlencode
+
+        query = urlencode({"title": title or "校园网自连", "desp": text})
+        return f"{url}?{query}", "GET", None
+    if channel == "bark":
+        body = json.dumps(
+            {"title": title or "校园网自连", "body": text}, ensure_ascii=False
+        ).encode("utf-8")
+        return url, "POST", body
+    if channel in ("wecom", "dingtalk"):
+        body = json.dumps(
+            {"msgtype": "text", "text": {"content": text}}, ensure_ascii=False
+        ).encode("utf-8")
+        return url, "POST", body
+    if channel == "telegram":
+        chat_id = key.partition("/")[2]
+        body = json.dumps(
+            {"chat_id": chat_id, "text": text}, ensure_ascii=False
+        ).encode("utf-8")
+        return url, "POST", body
+    if channel == "ntfy":
+        return url, "POST", text.encode("utf-8")
+    return "", "POST", None  # generic 走 notify_url
+
+
 class Notifier:
-    """按账号跟踪连续失败次数，只在恢复与达阈值时各发一条。"""
+    """按账号跟踪连续失败次数，只在恢复与达阈值时各发一条；支持多渠道与事件开关。"""
 
     def __init__(
-        self, url: str = "", after_failures: int = DEFAULT_AFTER_FAILURES
+        self,
+        url: str = "",
+        after_failures: int = DEFAULT_AFTER_FAILURES,
+        channel: str = "generic",
+        key: str = "",
+        events: list[str] | None = None,
     ) -> None:
         self.url = (url or "").strip()
         self.after_failures = max(1, int(after_failures))
+        self.channel = channel if channel in CHANNELS else "generic"
+        self.key = (key or "").strip()
+        # 默认只发「掉线 / 恢复在线」，与旧行为一致；其余分类要显式打开。
+        self.events = set(events) if events else {"recovered", "failing"}
         self._failures: dict[int, int] = {}
         self._notified: set[int] = set()
         self._lock = threading.Lock()
 
     @property
     def enabled(self) -> bool:
-        return bool(self.url)
+        if self.channel == "generic":
+            return bool(self.url)
+        return bool(self.key)
 
     @classmethod
     def from_store(cls, store: Any) -> "Notifier":
+        channel = str(store.get_setting("notify_channel", "generic") or "").strip().lower()
+        if channel not in CHANNELS:
+            channel = "generic"
         url = os.environ.get("CAMPUSNET_NOTIFY_URL", "").strip()
         if not url:
             url = str(store.get_setting("notify_url", "") or "").strip()
+        key = str(store.get_setting("notify_key", "") or "").strip()
         raw = store.get_setting("notify_after_failures", DEFAULT_AFTER_FAILURES)
         try:
             after = int(raw)
         except (TypeError, ValueError):
             after = DEFAULT_AFTER_FAILURES
-        return cls(url, after)
+        raw_events = store.get_setting("notify_events", None)
+        events = [str(e) for e in raw_events] if isinstance(raw_events, list) else None
+        return cls(url, after, channel, key, events)
+
+    def event_enabled(self, category: str) -> bool:
+        return category in self.events
+
+    @staticmethod
+    def _title(kind: str) -> str:
+        return {
+            "failing": "掉线",
+            "recovered": "恢复在线",
+            "power": "电源动作",
+            "pair": "配对",
+            "auth": "认证",
+            "test": "测试",
+        }.get(kind, kind)
 
     def observe(
         self,
@@ -104,6 +211,8 @@ class Notifier:
                 self._notified.discard(account_id)
                 if not interrupted:
                     return ""
+                if not self.event_enabled("recovered"):
+                    return ""
                 kind = "recovered"
                 text = f"✅ {account_name} 已恢复在线（{message or state}）"
             else:
@@ -112,6 +221,8 @@ class Notifier:
                 if count < self.after_failures or account_id in self._notified:
                     return ""
                 self._notified.add(account_id)
+                if not self.event_enabled("failing"):
+                    return ""
                 kind = "failing"
                 text = f"⚠️ {account_name} 连续 {count} 次未连上（{message or state}）"
         self.send(kind, text, account=account_name, state=state)
@@ -122,7 +233,22 @@ class Notifier:
     ) -> bool:
         if not self.enabled:
             return False
-        return _post(self.url, build_payload(text, kind, account, state))
+        if self.channel == "generic":
+            return _post(self.url, build_payload(text, kind, account, state))
+        url, method, body = build_channel_request(
+            self.channel, self.key, text, title=self._title(kind)
+        )
+        return _send(url, method, body)
+
+    def send_event(self, category: str, text: str, state: str = "") -> bool:
+        """按事件分类发一条通知，受 notify_events 开关控制。
+
+        用于「电源动作」「配对」这类独立事件——不像 observe 那样要跟踪
+        连续失败状态，只需判断该分类是否开启。
+        """
+        if not self.event_enabled(category):
+            return False
+        return self.send(category, text, state=state)
 
 
 def send_test(notifier: Notifier) -> bool:
@@ -142,8 +268,17 @@ def refresh(notifier: "Notifier | None", store: Any) -> "Notifier":
         return notifier or Notifier()
     if notifier is None:
         return current
-    same = (current.url, current.after_failures) == (
+    same = (
+        current.url,
+        current.after_failures,
+        current.channel,
+        current.key,
+        current.events,
+    ) == (
         notifier.url,
         notifier.after_failures,
+        notifier.channel,
+        notifier.key,
+        notifier.events,
     )
     return notifier if same else current

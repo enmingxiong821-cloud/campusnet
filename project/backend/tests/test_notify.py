@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from campusnet import notify
@@ -108,3 +110,77 @@ def test_refresh_reuses_object_until_config_changes(store) -> None:  # noqa: ANN
 
     assert third is not first
     assert third.url == "http://other/x"
+
+
+def test_channel_url_maps_key_to_endpoint() -> None:
+    assert notify.channel_url("bark", "abc") == "https://api.day.app/abc"
+    assert notify.channel_url("serverchan", "sk") == "https://sctapi.ftqq.com/sk.send"
+    assert notify.channel_url("wecom", "wk") == "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=wk"
+    assert notify.channel_url("dingtalk", "dt") == "https://oapi.dingtalk.com/robot/send?access_token=dt"
+    assert notify.channel_url("ntfy", "topic") == "https://ntfy.sh/topic"
+    assert notify.channel_url("telegram", "bot123/456") == "https://api.telegram.org/botbot123/sendMessage"
+    assert notify.channel_url("generic", "x") == ""
+
+
+def test_bark_payload_shape() -> None:
+    url, method, body = notify.build_channel_request("bark", "key", "正文", title="标题")
+
+    assert url == "https://api.day.app/key"
+    assert method == "POST"
+    data = json.loads(body)
+    assert data["body"] == "正文"
+    assert data["title"] == "标题"
+
+
+def test_wecom_and_dingtalk_payload_shape() -> None:
+    for channel in ("wecom", "dingtalk"):
+        url, method, body = notify.build_channel_request(channel, "key", "正文")
+
+        assert method == "POST"
+        data = json.loads(body)
+        assert data["msgtype"] == "text"
+        assert data["text"]["content"] == "正文"
+
+
+def test_serverchan_uses_get_with_query() -> None:
+    url, method, body = notify.build_channel_request("serverchan", "key", "正文", title="标题")
+
+    assert method == "GET"
+    assert body is None
+    assert "title=" in url
+    assert "desp=" in url
+
+
+def test_telegram_payload_shape() -> None:
+    url, method, body = notify.build_channel_request("telegram", "bot/456", "正文")
+
+    assert method == "POST"
+    assert url == "https://api.telegram.org/botbot/sendMessage"
+    data = json.loads(body)
+    assert data["chat_id"] == "456"
+    assert data["text"] == "正文"
+
+
+def test_ntfy_sends_plain_text() -> None:
+    url, method, body = notify.build_channel_request("ntfy", "topic", "正文")
+
+    assert method == "POST"
+    assert url == "https://ntfy.sh/topic"
+    assert body == "正文".encode("utf-8")
+
+
+def test_channel_notifier_enabled_by_key() -> None:
+    assert notify.Notifier("", channel="bark").enabled is False
+    assert notify.Notifier("", channel="bark", key="k").enabled is True
+
+
+def test_send_event_respects_event_toggle(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list = []
+    monkeypatch.setattr(
+        notify, "_send", lambda url, method="POST", body=None: calls.append(url) or True
+    )
+    notifier = notify.Notifier("", channel="bark", key="k", events=["power"])
+
+    assert notifier.send_event("power", "关机了") is True
+    assert notifier.send_event("pair", "配对了") is False  # pair 未开启
+    assert len(calls) == 1

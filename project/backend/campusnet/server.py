@@ -30,6 +30,16 @@ class ApiError(Exception):
         self.message = message
 
 
+def _notify_event(store: Store, category: str, text: str) -> None:
+    """尽力发一条事件通知（电源动作/配对等）；失败绝不影响主流程。"""
+    try:
+        from .notify import Notifier
+
+        Notifier.from_store(store).send_event(category, text)
+    except Exception:  # noqa: BLE001 - 通知只是旁路
+        pass
+
+
 def _account_from_payload(
     payload: dict[str, Any], existing: Account | None = None
 ) -> Account:
@@ -600,6 +610,7 @@ def routes_system(store: Store) -> dict[tuple[str, str], Handler]:
         store.add_event(
             f"收到远程{label}指令：{command}", level="warning", stage="power"
         )
+        _notify_event(store, "power", f"🔌 收到远程{label}指令：{command}")
         h._send(HTTPStatus.OK, {"ok": True, "action": action, "command": command})
 
     def doctor_power(_: dict[str, Any], h: ApiHandler) -> None:
@@ -622,6 +633,25 @@ def routes_system(store: Store) -> dict[tuple[str, str], Handler]:
         store.add_event("电源体检执行了自动修复", level="warning", stage="power")
         h._send(HTTPStatus.OK, {"ok": True, "items": [i.as_dict() for i in items]})
 
+    def notify_channels(_: dict[str, Any], h: ApiHandler) -> None:
+        """可选通知渠道（供前端下拉框）。"""
+        from .notify import CHANNELS
+
+        h._send(HTTPStatus.OK, {"ok": True, "channels": CHANNELS})
+
+    def notify_test(_: dict[str, Any], h: ApiHandler) -> None:
+        """按当前配置发一条测试通知，用于确认链路能通。"""
+        from .notify import Notifier, send_test
+
+        notifier = Notifier.from_store(store)
+        if not notifier.enabled:
+            raise ApiError(
+                HTTPStatus.BAD_REQUEST, "未配置通知渠道（先选渠道并填 key / URL）"
+            )
+        if not send_test(notifier):
+            raise ApiError(HTTPStatus.BAD_GATEWAY, "测试通知发送失败，请检查 key/URL")
+        h._send(HTTPStatus.OK, {"ok": True})
+
     return {
         ("GET", "/api/health"): health,
         ("GET", "/healthz"): healthz,
@@ -634,6 +664,8 @@ def routes_system(store: Store) -> dict[tuple[str, str], Handler]:
         ("GET", "/api/power/info"): power_info,
         ("GET", "/api/doctor/power"): doctor_power,
         ("POST", "/api/doctor/power/fix"): doctor_power_fix,
+        ("GET", "/api/notify/channels"): notify_channels,
+        ("POST", "/api/notify/test"): notify_test,
     }
 
 
@@ -825,6 +857,7 @@ def routes_pair(
         user_agent = h.headers.get("User-Agent", "")
         store.mark_pair_code_used(chash, user_agent)
         store.add_event("扫码配对成功", level="info", stage="pair")
+        _notify_event(store, "pair", "📱 有设备通过配对码登录了控制台")
         if auth is not None:
             session = auth.issue_session()
             h._send(
