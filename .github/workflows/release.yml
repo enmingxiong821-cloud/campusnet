@@ -224,7 +224,7 @@ jobs:
       # 多架构镜像必须在一次构建里直接推送：buildx 没法把异架构产物 --load
       # 到本地（只有本机架构那份能加载），所以不能先构建再单独推。
       - name: 构建并推送
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           platforms: linux/amd64,linux/arm64
