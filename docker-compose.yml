@@ -1,0 +1,49 @@
+# 校园网自连 · 用 compose 起一份
+#
+#   docker compose up -d                                        起
+#   docker compose logs -f campusnet                            看认证日志
+#   docker compose exec campusnet python utils/run.py doctor    体检
+#
+# 容器里能做的：门户认证、掉线自动重连、监控、控制台、事件记录。
+# 容器里做不到的两件事，别指望它：
+#
+#   1. 远程关机。`systemctl poweroff` 在容器里关掉的是容器，不是宿主机。
+#      要远程开关机就用宿主机上的 systemd 单元（packaging/campusnet.service），
+#      别把镜像跑成 --privileged 去够那点权限。
+#   2. 按 Wi-Fi 名判定身份 / 发 WOL 魔术包。容器看不到宿主机的无线网卡，
+#      广播包也出不了 docker 网桥。WOL 需要 network_mode: host，见文件末尾。
+
+# 显式指定项目名。不写的话 compose 取目录名当项目名，而本仓库目录名是
+# 「校园网自连」——消毒之后变成空串，`docker compose up` 会直接报
+# "project name must not be empty"。顺带也让卷名不随目录名变。
+name: campusnet
+
+services:
+  campusnet:
+    build: .
+    image: ghcr.io/enmingxiong821-cloud/campusnet:latest
+    restart: unless-stopped
+    # 绑到 127.0.0.1：控制台令牌是唯一门禁，写成 "2268:2268" 等于把默认的
+    # 0.0.0.0 映射打开，整个局域网都能来试令牌。
+    # 手机要连就看 docker-compose.tailscale.yml（走 tailnet，不开局域网口）。
+    ports:
+      - "127.0.0.1:2268:2268"
+    volumes:
+      # 账号、事件、控制台令牌、实例锁都在 database/ 下，卷一挂就带得走。
+      - campusnet-data:/app/database
+
+volumes:
+  campusnet-data:
+
+# ── 需要 WOL 的时候 ──────────────────────────────────────────────────
+# 把上面 campusnet 服务里的 ports: 整段去掉，换成 network_mode: host，
+# 让它直接用宿主机的网络栈：
+#
+#   services:
+#     campusnet:
+#       network_mode: host
+#       # ports: 必须删掉——自己拥有网络栈时不能再做端口映射，compose 会直接报错
+#
+# 代价是 2268 会真的监听在宿主机所有网卡上（Dockerfile 里 CMD 用的是
+# --host 0.0.0.0），所以这时务必先确认控制台令牌已设好，
+# 或者防火墙只放行你信得过的网段。
