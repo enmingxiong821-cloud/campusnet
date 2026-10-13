@@ -1,0 +1,43 @@
+# 构建上下文是仓库根，所以「绝不能进镜像层」的东西要在这里挨个点名。
+#
+# .dockerignore 和 .gitignore 是两回事：config.json 虽然在 .gitignore 里，
+# 但只要这里不挡住，`COPY` 照样会把它烤进镜像层——而镜像层是分发给别人的。
+
+# 真实凭据与运行数据
+config.json
+*.api-token
+*.key
+.campusnet_obf.key
+database/*.db
+database/*.db-shm
+database/*.db-wal
+database/backup/
+database/logs/
+
+# 抓包 / 验证工作区：里面有明文账号口令，以及从门户抓下来的第三方 JS
+_tmp/
+utils/_tmp/
+utils/tmp/
+交付文件/
+
+# 开发与测试（运行时不读测试，也不读覆盖率产物）
+project/backend/tests/
+.pytest_cache/
+.ruff_cache/
+.coverage
+*.log
+nul
+
+# 版本控制与 CI
+.git/
+.github/
+.gitignore
+.gitattributes
+
+# 文档与本地构建产物
+doc/
+dist/
+build/
+prototype/
+*.zip
+*.sha256

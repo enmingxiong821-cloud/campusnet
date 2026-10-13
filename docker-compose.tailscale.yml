@@ -1,0 +1,58 @@
+# 校园网自连 + Tailscale sidecar
+#
+# 目的：让手机在外面也能打开控制台，但不在局域网上开 2268 端口。
+# campusnet 复用 tailscale 容器的网络命名空间，于是访问路径变成
+# 「手机 → tailnet（加密 + 身份） → campusnet」，少一个对外的暴露面。
+#
+# 用法（这是一份独立文件，不要和 docker-compose.yml 叠加 -f）：
+#   export TS_AUTHKEY=tskey-auth-xxxx        # Tailscale 后台生成，一次性
+#   docker compose -f docker-compose.tailscale.yml up -d
+#   docker compose -f docker-compose.tailscale.yml exec tailscale tailscale status
+#   docker compose -f docker-compose.tailscale.yml exec tailscale tailscale ip -4
+# 最后那个 100.x.y.z 就是手机上要访问的地址（手机需登录同一个 tailnet）。
+
+# 显式指定项目名：不写就取目录名，而本仓库目录名「校园网自连」消毒后是空串，
+# `docker compose up` 会报 "project name must not be empty"。两份 compose
+# 用同一个项目名，卷和网络才不会被拆成两套。
+name: campusnet
+
+services:
+  tailscale:
+    image: tailscale/tailscale:latest
+    hostname: campusnet
+    restart: unless-stopped
+    environment:
+      # 一次性授权密钥。登录成功后这台机器就记在 state 卷里了，
+      # 之后可以把这个变量删掉（别把它写进任何入库的文件）。
+      TS_AUTHKEY: ${TS_AUTHKEY:?请先 export TS_AUTHKEY=tskey-auth-...}
+      TS_STATE_DIR: /var/lib/tailscale
+      # 走内核 TUN 而不是用户态网络：用户态下只有 tailscale 自己那套代理能用，
+      # 同 tailnet 的设备直连 2268 会连不上。
+      TS_USERSPACE: "false"
+    volumes:
+      # 登录状态存这里；删了这个卷就得重新授权。
+      - tailscale-state:/var/lib/tailscale
+      - /dev/net/tun:/dev/net/tun
+    cap_add:
+      # 建隧道与改路由表要的能力，只给这两个，不要 --privileged。
+      - NET_ADMIN
+      - SYS_MODULE
+
+  campusnet:
+    build: .
+    image: ghcr.io/enmingxiong821-cloud/campusnet:latest
+    restart: unless-stopped
+    # 关键一行：复用 tailscale 的网络命名空间。
+    # 于是 2268 只出现在 tailnet 和 compose 内部网桥上，不会映射到宿主机端口，
+    # 局域网上的其他设备扫不到它。
+    # 代价：这里不能再写 ports: —— 端口归 tailscale 那个命名空间所有，
+    # 写了 compose 会直接报错。Dockerfile 里 CMD 的 --host 0.0.0.0 保持不动。
+    network_mode: "service:tailscale"
+    depends_on:
+      - tailscale
+    volumes:
+      - campusnet-data:/app/database
+
+volumes:
+  tailscale-state:
+  campusnet-data:
