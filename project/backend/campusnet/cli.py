@@ -466,10 +466,14 @@ def cmd_logs(args: argparse.Namespace) -> int:
 
 
 def cmd_access(args: argparse.Namespace) -> int:
-    """打印手机 / 平板访问控制台需要的信息。"""
+    """打印手机 / 平板访问控制台需要的信息，或输出远程接入三步向导。"""
     stdout_ready()
     from . import access as access_mod
 
+    if args.guide:
+        for line in access_mod.guide(host=args.host, port=args.port):
+            print(line)
+        return 0
     for line in access_mod.report(host=args.host, port=args.port):
         print(line)
     return 0
@@ -785,6 +789,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_access = sub.add_parser("access", help="查看手机 / 平板访问控制台需要的信息")
     p_access.add_argument("--host", default=API_HOST)
     p_access.add_argument("--port", type=int, default=API_PORT)
+    p_access.add_argument(
+        "--guide",
+        action="store_true",
+        help="输出远程接入三步向导（含 Tailscale 状态检测）",
+    )
     p_access.set_defaults(func=cmd_access)
 
     p_shortcut = sub.add_parser("shortcut", help="在桌面生成每种用法的快捷方式")

@@ -6,9 +6,11 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 import socket
 import subprocess
+from typing import Any
 
 from .auth import ApiAuth
 from .paths import API_HOST, API_PORT
@@ -66,4 +68,107 @@ def report(host: str = API_HOST, port: int = API_PORT) -> list[str]:
             "提示            服务当前只监听本机，手机访问不了："
             "改用 --host 0.0.0.0 启动，或让两台设备都进同一个 Tailscale 网络"
         )
+    return lines
+
+
+def tailscale_status() -> dict[str, Any]:
+    """Tailscale 的安装 / 运行 / 登录状态与对端数量。
+
+    用 `tailscale status --json` 拿结构化信息（Self 的 DNSName / TailscaleIPs、
+    Peer 数量）。任何一步失败都降级成「没检测到」，不让向导崩掉。
+    """
+    empty = {
+        "installed": False,
+        "running": False,
+        "logged_in": False,
+        "tailnet": "",
+        "hostname": "",
+        "ip": "",
+        "peers": 0,
+    }
+    exe = shutil.which("tailscale")
+    if not exe:
+        return empty
+    try:
+        proc = subprocess.run([exe, "status", "--json"], capture_output=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return {"installed": True, "running": False, "logged_in": False,
+                "tailnet": "", "hostname": "", "ip": "", "peers": 0}
+    if proc.returncode != 0:
+        return {"installed": True, "running": False, "logged_in": False,
+                "tailnet": "", "hostname": "", "ip": "", "peers": 0}
+    try:
+        data = json.loads((proc.stdout or b"").decode("utf-8", "replace"))
+    except json.JSONDecodeError:
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    self_info = data.get("Self") or {}
+    if not isinstance(self_info, dict):
+        self_info = {}
+    peers = data.get("Peer") or {}
+    ips = self_info.get("TailscaleIPs") or []
+    ipv4 = next((str(ip) for ip in ips if ":" not in str(ip)), "")
+    return {
+        "installed": True,
+        "running": True,
+        "logged_in": True,
+        "tailnet": _tailnet_name(data),
+        "hostname": str(self_info.get("HostName", "")),
+        "ip": ipv4,
+        "peers": len(peers) if isinstance(peers, (dict, list)) else 0,
+    }
+
+
+def _tailnet_name(data: dict[str, Any]) -> str:
+    current = data.get("CurrentTailnet") or {}
+    name = str(current.get("Name", "")) if isinstance(current, dict) else ""
+    if name.endswith(".ts.net"):
+        name = name[: -len(".ts.net")]
+    if name:
+        return name
+    dns = str((data.get("Self") or {}).get("DNSName", ""))
+    parts = dns.split(".")
+    return parts[1] if len(parts) >= 3 else ""
+
+
+def guide(host: str = API_HOST, port: int = API_PORT) -> list[str]:
+    """远程接入三步向导：装 Tailscale → 装远程桌面 → 手机怎么点。"""
+    status = tailscale_status()
+    lines = ["远程接入三步走（只检测与指引，不改网络配置）：", ""]
+
+    if not status["installed"]:
+        lines += [
+            "① 装 Tailscale —— 缺这一步（本机没检测到 tailscale）",
+            "   目的：人不在宿舍时，任何网络下都能连回这台电脑",
+            "   Windows: winget install tailscale.tailscale",
+            "   macOS:   brew install --cask tailscale",
+            "   Linux:   curl -fsSL https://tailscale.com/install.sh | sh",
+            "   下载页：https://tailscale.com/download ；装完跑 `tailscale up` 登录",
+        ]
+    elif not status["logged_in"]:
+        lines.append("① Tailscale 已安装但未登录/未运行 —— 跑 `tailscale up` 登录")
+    else:
+        lines.append(
+            f"① Tailscale 已登录：tailnet={status['tailnet'] or '?'}"
+            f"，对端 {status['peers']} 台"
+        )
+
+    lines += [
+        "",
+        "② 装远程桌面（RustDesk 优先，国产网络友好）",
+        "   下载 https://rustdesk.com/zh/ ，电脑和手机都装；记下电脑那台的「ID + 密码」",
+        "",
+        "③ 手机端访问控制台",
+    ]
+    if status["ip"]:
+        lines.append(f"   Tailscale 地址：http://{status['ip']}:{port}")
+    ip = lan_ip()
+    if ip:
+        lines.append(f"   局域网地址（同一 Wi-Fi 下）：http://{ip}:{port}")
+    if not status["ip"] and not ip:
+        lines.append("   先装好 ① 的 Tailscale，这里才会有手机能用的地址")
+    if host in ("127.0.0.1", "localhost", "::1"):
+        lines.append("   提示：服务当前只监听本机，手机访问需以 --host 0.0.0.0 启动")
+    lines.append("   打开后点「添加到主屏幕」，之后能一键看状态 / 关机 / 唤醒")
     return lines
