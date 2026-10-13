@@ -24,10 +24,33 @@ def test_doctor_without_accounts_warns(store) -> None:  # noqa: ANN001
 
 
 def test_doctor_detects_live_lock_holder(store, tmp_path, monkeypatch) -> None:  # noqa: ANN001
-    helper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(10)"])
+    """有别的进程真的持着锁时，doctor 要报 WARN 并说出持有者 PID。
+
+    判定以内核文件锁为准：光写一个 PID 文件不算「持有」（PID 会被系统复用，
+    那种判法会把服务永久挡在门外），所以这里必须让子进程真的去 acquire。
+    """
+    import textwrap
+    from pathlib import Path
+
+    backend = Path(__file__).resolve().parents[1]  # project/backend，campusnet 可导入
+    lock_path = tmp_path / "held.lock"
+    helper_code = textwrap.dedent(
+        """
+        import sys, time
+        sys.path.insert(0, sys.argv[1])
+        from campusnet.lockfile import SingleInstance
+        lock = SingleInstance(sys.argv[2])
+        print('ACQUIRED' if lock.acquire() else 'BLOCKED', flush=True)
+        time.sleep(30)
+        """
+    )
+    helper = subprocess.Popen(
+        [sys.executable, "-c", helper_code, str(backend), str(lock_path)],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
     try:
-        lock_path = tmp_path / "held.lock"
-        lock_path.write_text(f"{helper.pid}\n", encoding="utf-8")
+        assert helper.stdout.readline().strip() == "ACQUIRED"
         monkeypatch.setenv("CAMPUSNET_INSTANCE_LOCK_FILE", str(lock_path))
 
         check = _by_name(doctor_mod.run(probe=False))["实例锁"]
@@ -35,7 +58,7 @@ def test_doctor_detects_live_lock_holder(store, tmp_path, monkeypatch) -> None: 
         assert check.status == doctor_mod.WARN
         assert str(helper.pid) in check.detail
     finally:
-        helper.kill()
+        helper.terminate()
         helper.wait(timeout=10)
 
 

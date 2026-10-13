@@ -220,10 +220,29 @@ class LoginResult:
     state: str
     message: str
     detail: str = ""
+    # terminal=True 表示「再试也白试」——典型是密码错、账号被停用这类凭据被门户拒绝。
+    # 网络不通、门户暂时抽风这类可能自己好的失败仍留 False，交给退避重试。
+    terminal: bool = False
 
     @property
     def ok(self) -> bool:
         return self.state in ("success", "already_online")
+
+
+_CREDENTIAL_FAILURE_HINTS = (
+    "密码错误",
+    "密码不正确",
+    "passworderror",
+    "wrongpassword",
+    "invalidpassword",
+    "userdeny",
+)
+
+
+def _is_credential_failure(message: str) -> bool:
+    """凭据被门户拒绝（重试不会改结果），需要冷却而不是退避。"""
+    low = (message or "").lower()
+    return any(hint.lower() in low for hint in _CREDENTIAL_FAILURE_HINTS)
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -325,9 +344,12 @@ def classify_response(body: str, status: int, final_url: str) -> LoginResult:
 
     for token in ("passworderror", "密码错误", "密码不正确", "wrongpassword", "invalidpassword"):
         if token in low:
-            return LoginResult("failed", "门户提示密码错误", token)
+            return LoginResult("failed", "门户提示密码错误", token, terminal=True)
 
-    for token in ('"result":0', '"success":false', "登录失败", "认证失败", "userdeny"):
+    if "userdeny" in low:
+        return LoginResult("failed", "门户拒绝（账号被禁用或凭据无效）", "userdeny", terminal=True)
+
+    for token in ('"result":0', '"success":false', "登录失败", "认证失败"):
         if token.replace(" ", "") in low.replace(" ", ""):
             return LoginResult("failed", "门户返回登录失败", token)
 
@@ -826,7 +848,7 @@ def srun_login(account: Account, on_progress: ProgressCallback | None = None) ->
         return LoginResult("error", str(exc), "")
 
     if not ok:
-        return LoginResult("failed", reason, f"ip={ip}")
+        return LoginResult("failed", reason, f"ip={ip}", terminal=_is_credential_failure(reason))
 
     check = probe_mod.probe(account.probe_url)
     if check.online:

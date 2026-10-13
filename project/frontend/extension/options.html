@@ -97,6 +97,17 @@
   </div>
 
   <div class="card">
+    <h2>本地服务联动</h2>
+    <label><span>控制台令牌（可留空）</span>
+      <input id="apiToken" type="text" placeholder="留空即可，服务绑到局域网时才需要填">
+      <div class="hint">装了本项目的 Python 版后，检测会优先交给它（GBK 页面、SRUN、CAS 那些坑它都处理过）。
+        服务只监听 <code>127.0.0.1</code> 时留空即可；只有绑到局域网
+        （<code>python utils/run.py serve --host 0.0.0.0</code>）才要填令牌，
+        在电脑上跑 <code>python utils/run.py token</code> 可以看到。</div>
+    </label>
+  </div>
+
+  <div class="card">
     <h2>维护</h2>
     <div class="row">
       <button id="btnSave">保存设置</button>
@@ -125,6 +136,7 @@ const DEFAULTS = {
     'http://connectivitycheck.gstatic.com/generate_204',
   ],
   enabled: false,
+  apiToken: '',
 };
 
 function toast(msg, kind = '') {
@@ -146,6 +158,7 @@ async function loadSettings() {
   $('extraFields').value = s.extraFieldsRaw || '';
   $('intervalMinutes').value = s.intervalMinutes || 1;
   $('probeUrls').value = (s.probeUrls || []).join('\n');
+  $('apiToken').value = s.apiToken || '';
 }
 
 function parseExtra() {
@@ -183,6 +196,7 @@ async function saveSettings() {
     extraFieldsRaw: $('extraFields').value.trim(),
     intervalMinutes: Math.max(0.25, parseFloat($('intervalMinutes').value) || 1),
     probeUrls,
+    apiToken: $('apiToken').value.trim(),
   });
   toast('设置已保存');
   await sendEnabledRefresh();

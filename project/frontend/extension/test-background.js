@@ -609,12 +609,14 @@ function probeWith(fetchImpl) {
     {
       const storage = { data: { enabled: true, portalUrl: 'http://portal/login' } };
       const calls = [];
-      const { api } = loadBackground(storage, async (url) => {
+      let checkOptions = null;
+      const { api } = loadBackground(storage, async (url, options = {}) => {
         calls.push(url);
         if (url.endsWith('/api/health')) {
           return { ok: true, status: 200, json: async () => ({ ok: true, version: '1.4.0' }) };
         }
         if (url.endsWith('/api/check')) {
+          checkOptions = options;
           return {
             ok: true,
             status: 200,
@@ -632,6 +634,44 @@ function probeWith(fetchImpl) {
         eq(result.online, true);
         truthy(calls.some(u => u.endsWith('/api/check')), '调用了 /api/check');
         eq(storage.data.__state.online, true);
+      });
+      // 默认配置（服务只在 127.0.0.1）不该带令牌：服务端按「扩展来源 + 回环」放行。
+      // 带上多余的头只会让排查问题时更难看清是谁在拦。
+      check('未配置令牌时不带 X-CampusNet-Token', () => {
+        const headers = (checkOptions && checkOptions.headers) || {};
+        eq(headers['X-CampusNet-Token'], undefined, '令牌头');
+        eq(headers['Content-Type'], 'application/json', '内容类型');
+      });
+    }
+
+    // 服务绑到局域网（serve --host 0.0.0.0）时 /api/check 要求显式令牌，必须带上
+    {
+      const storage = {
+        data: {
+          enabled: true,
+          portalUrl: 'http://portal/login',
+          apiToken: 'tok-abcdefghijklmnop',
+        },
+      };
+      let checkOptions = null;
+      const { api } = loadBackground(storage, async (url, options = {}) => {
+        if (url.endsWith('/api/health')) {
+          return { ok: true, status: 200, json: async () => ({ ok: true }) };
+        }
+        if (url.endsWith('/api/check')) {
+          checkOptions = options;
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({ ok: true, results: [{ online: true, state: 'online' }] }),
+          };
+        }
+        return { status: 302, headers: { get: () => 'http://portal/login' } };
+      });
+      await api.checkOnce();
+      check('配置了令牌就给 /api/check 带上令牌头', () => {
+        const headers = (checkOptions && checkOptions.headers) || {};
+        eq(headers['X-CampusNet-Token'], 'tok-abcdefghijklmnop', '令牌头');
       });
     }
 

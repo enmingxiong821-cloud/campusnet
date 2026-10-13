@@ -83,6 +83,27 @@ class ApiAuth:
     def check_token(self, candidate: str) -> bool:
         return bool(candidate) and hmac.compare_digest(candidate, self._token)
 
+    @staticmethod
+    def _token_from_headers(headers: object) -> str:
+        """从请求头取出「显式令牌」；取不到返回空串。"""
+        get = getattr(headers, "get", None)
+        if get is None:
+            return ""
+        authorization = str(get("Authorization", "") or "")
+        if authorization.lower().startswith("bearer "):
+            return authorization[7:].strip()
+        return str(get("X-CampusNet-Token", "") or "").strip()
+
+    def explicit_token_ok(self, headers: object) -> bool:
+        """只认显式令牌，不认会话 Cookie。
+
+        同源校验的豁免必须用它，不能用 authenticated()：Cookie 由浏览器自动附带，
+        正是 CSRF 的成因；而 Authorization / X-CampusNet-Token 这类自定义头，跨站页
+        既读不到、真要发也会先触发 CORS 预检（本服务的预检不放行跨站来源），
+        所以「令牌有效」才配当豁免依据。注意是校验**有效性**，不是「带了头就放行」。
+        """
+        return self.check_token(self._token_from_headers(headers))
+
     def _session_from_headers(self, headers: object) -> str:
         get = getattr(headers, "get", None)
         if get is None:
@@ -97,16 +118,9 @@ class ApiAuth:
         return morsel.value if morsel else ""
 
     def authenticated(self, headers: object) -> bool:
-        get = getattr(headers, "get", None)
-        if get is None:
+        if getattr(headers, "get", None) is None:
             return False
-        authorization = str(get("Authorization", "") or "")
-        candidate = ""
-        if authorization.lower().startswith("bearer "):
-            candidate = authorization[7:].strip()
-        if not candidate:
-            candidate = str(get("X-CampusNet-Token", "") or "").strip()
-        if self.check_token(candidate):
+        if self.check_token(self._token_from_headers(headers)):
             return True
 
         session = self._session_from_headers(headers)

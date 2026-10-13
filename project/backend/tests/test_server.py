@@ -44,6 +44,32 @@ def api(store: Store):  # noqa: ANN001
     assert not thread.is_alive()
 
 
+@pytest.fixture()
+def auth_api(store: Store):  # noqa: ANN001
+    """启用鉴权的服务，即绑到局域网时的形态（写接口要求显式令牌）。"""
+    from campusnet.auth import ApiAuth
+
+    manager = MonitorManager()
+    auth = ApiAuth(token="t" * 43)
+    handler = server_mod.build_handler(
+        store, manager, auth=auth, auth_required=True
+    )
+    server_mod._install_dispatch(handler)
+    from http.server import ThreadingHTTPServer
+
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    httpd.daemon_threads = True
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    out = _Api(f"http://127.0.0.1:{httpd.server_address[1]}")
+    out.manager = manager
+    yield out
+    httpd.shutdown()
+    httpd.server_close()
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+
+
 def call(url: str, method: str = "GET", body: dict | None = None) -> tuple[int, dict]:  # noqa: ANN001
     data = json.dumps(body).encode("utf-8") if body is not None else None
     req = urllib.request.Request(url, data=data, method=method)
@@ -83,6 +109,104 @@ def test_write_routes_reject_foreign_origin(api, method, path):
     with pytest.raises(urllib.error.HTTPError) as error:
         urllib.request.urlopen(request, timeout=5)
     assert error.value.code == 403
+    error.value.close()
+
+
+EXTENSION_ORIGIN = "chrome-extension://abcdefghijklmnopabcdefghijklmnop"
+
+
+def test_write_allows_extension_origin_on_loopback(api) -> None:  # noqa: ANN001
+    """浏览器扩展的写请求必须放行，否则「优先交给本地服务」永远不会生效。
+
+    MV3 的 service worker 发非 GET 请求时浏览器会附上扩展来源
+    （w3c/webextensions#777），它的 netloc 永远不等于 Host，因此之前必然 403；
+    而扩展收到非 2xx 就静默回落——用户看到的是「插件运行正常」，
+    实际上本地服务从来没被用过一次。
+    """
+    request = urllib.request.Request(
+        f"{api}/api/events/clear",
+        data=b"{}",
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "Origin": EXTENSION_ORIGIN,
+            "Sec-Fetch-Site": "cross-site",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=5) as response:
+        assert response.status == 200
+
+
+def test_write_rejects_extension_origin_from_remote_host(api) -> None:  # noqa: ANN001
+    """扩展来源只在 Host 是回环时放行：跨机访问仍然必须带令牌。"""
+    request = urllib.request.Request(
+        f"{api}/api/events/clear",
+        data=b"{}",
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "Host": "10.0.0.9:2268",
+            "Origin": EXTENSION_ORIGIN,
+        },
+    )
+    with pytest.raises(urllib.error.HTTPError) as error:
+        urllib.request.urlopen(request, timeout=5)
+    assert error.value.code == 403
+    error.value.close()
+
+
+def test_write_allows_valid_token_from_foreign_origin(auth_api) -> None:  # noqa: ANN001
+    """显式令牌有效时跳过同源校验：令牌不是浏览器自动附带的，跨站页伪造不出来。"""
+    request = urllib.request.Request(
+        f"{auth_api}/api/settings",
+        data=b"{}",
+        method="PUT",
+        headers={
+            "Content-Type": "application/json",
+            "Origin": "https://evil.example",
+            "X-CampusNet-Token": "t" * 43,
+        },
+    )
+    with urllib.request.urlopen(request, timeout=5) as response:
+        assert response.status == 200
+
+
+def test_invalid_token_is_rejected_before_origin_check(auth_api) -> None:  # noqa: ANN001
+    """豁免必须是「令牌有效」，不能退化成「带了头就放行」。
+
+    无效令牌在鉴权那一层就被挡下（401），根本走不到同源校验——顺序本身就是
+    一道保障：伪造的令牌不会因为「同源豁免」而拿到写权限。
+    """
+    request = urllib.request.Request(
+        f"{auth_api}/api/settings",
+        data=b"{}",
+        method="PUT",
+        headers={
+            "Content-Type": "application/json",
+            "Origin": "https://evil.example",
+            "X-CampusNet-Token": "wrong-" + "t" * 38,
+        },
+    )
+    with pytest.raises(urllib.error.HTTPError) as error:
+        urllib.request.urlopen(request, timeout=5)
+    assert error.value.code == 401
+    error.value.close()
+
+
+def test_extension_origin_still_needs_token_when_auth_required(auth_api) -> None:  # noqa: ANN001
+    """绑到局域网时扩展必须带令牌——同源豁免不构成绕开鉴权的后门。"""
+    request = urllib.request.Request(
+        f"{auth_api}/api/events/clear",
+        data=b"{}",
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "Origin": EXTENSION_ORIGIN,
+        },
+    )
+    with pytest.raises(urllib.error.HTTPError) as error:
+        urllib.request.urlopen(request, timeout=5)
+    assert error.value.code == 401
     error.value.close()
 
 
