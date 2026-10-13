@@ -775,3 +775,43 @@ def test_notifier_exception_does_not_break_check(store, account, online_probe, m
     assert outcome.online is True
     events = [item["message"] for item in store.list_events(limit=10)]
     assert any("通知发送异常" in item for item in events)
+
+
+def test_dispatch_wake_plans_fires_due(store: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+    """到点的计划发一次 WOL 并记录，当天不再重复发。"""
+    from campusnet import wakeplan
+    from campusnet.storage import WakePlan
+
+    plan_id = store.add_wake_plan(
+        WakePlan(name="每天开机", mac="AA:BB:CC:DD:EE:FF", schedule="00:00")
+    )
+    sent: list[str] = []
+    monkeypatch.setattr(
+        wakeplan, "send_wol", lambda mac, broadcast, port: sent.append(mac) or "ok"
+    )
+
+    Monitor(store, interval=10)._dispatch_wake_plans()
+
+    assert sent == ["AA:BB:CC:DD:EE:FF"]
+    assert store.list_wake_plans()[0].last_run_at is not None
+
+    sent.clear()
+    Monitor(store, interval=10)._dispatch_wake_plans()
+    assert sent == []
+
+
+def test_dispatch_wake_plans_skips_disabled(store: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+    from campusnet import wakeplan
+    from campusnet.storage import WakePlan
+
+    store.add_wake_plan(
+        WakePlan(name="停用计划", mac="AA:BB:CC:DD:EE:FF", schedule="00:00", enabled=False)
+    )
+    sent: list[str] = []
+    monkeypatch.setattr(
+        wakeplan, "send_wol", lambda mac, broadcast, port: sent.append(mac) or "ok"
+    )
+
+    Monitor(store, interval=10)._dispatch_wake_plans()
+
+    assert sent == []

@@ -7,6 +7,7 @@ import sqlite3
 import threading
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable, Iterator
 
@@ -14,7 +15,7 @@ from . import crypto
 from .paths import SCHEMA_PATH, db_path as db_path_default
 
 _WRITE_LOCK = threading.Lock()
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 STATE_UNKNOWN = "unknown"
 STATE_ONLINE = "online"
@@ -91,6 +92,75 @@ class Account:
             last_state=row["last_state"],
             last_checked_at=row["last_checked_at"],
             last_ok_at=row["last_ok_at"],
+        )
+
+
+@dataclass
+class WakePlan:
+    """唤醒计划：每天/每周几点发一个 WOL 魔术包到指定 MAC。"""
+
+    id: int = 0
+    name: str = ""
+    mac: str = ""
+    broadcast: str = "255.255.255.255"
+    port: int = 9
+    schedule: str = ""
+    enabled: bool = True
+    last_run_at: str | None = None
+
+    def public(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "mac": self.mac,
+            "broadcast": self.broadcast,
+            "port": self.port,
+            "schedule": self.schedule,
+            "enabled": self.enabled,
+            "last_run_at": self.last_run_at,
+        }
+
+    @classmethod
+    def from_row(cls, row: sqlite3.Row) -> "WakePlan":
+        return cls(
+            id=row["id"],
+            name=row["name"],
+            mac=row["mac"],
+            broadcast=row["broadcast"],
+            port=row["port"],
+            schedule=row["schedule"],
+            enabled=bool(row["enabled"]),
+            last_run_at=row["last_run_at"],
+        )
+
+
+@dataclass
+class Device:
+    """可唤醒设备清单：名称 + MAC + 备注，一键发 WOL。"""
+
+    id: int = 0
+    name: str = ""
+    mac: str = ""
+    note: str = ""
+    created_at: str = ""
+
+    def public(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "mac": self.mac,
+            "note": self.note,
+            "created_at": self.created_at,
+        }
+
+    @classmethod
+    def from_row(cls, row: sqlite3.Row) -> "Device":
+        return cls(
+            id=row["id"],
+            name=row["name"],
+            mac=row["mac"],
+            note=row["note"] or "",
+            created_at=row["created_at"],
         )
 
 
@@ -352,6 +422,64 @@ class Store:
             except json.JSONDecodeError:
                 out[row["key"]] = row["value"]
         return out
+
+    # ---------- wake plans ----------
+    def list_wake_plans(self, enabled_only: bool = False) -> list[WakePlan]:
+        sql = "SELECT * FROM wake_plans"
+        if enabled_only:
+            sql += " WHERE enabled = 1"
+        sql += " ORDER BY id"
+        with self._connection() as conn:
+            return [WakePlan.from_row(r) for r in conn.execute(sql)]
+
+    def add_wake_plan(self, plan: WakePlan) -> int:
+        with _WRITE_LOCK, self._connection() as conn:
+            cur = conn.execute(
+                "INSERT INTO wake_plans (name, mac, broadcast, port, schedule, enabled) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    plan.name,
+                    plan.mac,
+                    plan.broadcast,
+                    plan.port,
+                    plan.schedule,
+                    1 if plan.enabled else 0,
+                ),
+            )
+            rowid = cur.lastrowid
+            return int(rowid) if rowid is not None else 0
+
+    def delete_wake_plan(self, plan_id: int) -> bool:
+        with _WRITE_LOCK, self._connection() as conn:
+            cur = conn.execute("DELETE FROM wake_plans WHERE id = ?", (plan_id,))
+            return cur.rowcount > 0
+
+    def mark_wake_plan_run(self, plan_id: int, when: datetime) -> None:
+        with _WRITE_LOCK, self._connection() as conn:
+            conn.execute(
+                "UPDATE wake_plans SET last_run_at = ? WHERE id = ?",
+                (when.strftime("%Y-%m-%d %H:%M:%S"), plan_id),
+            )
+
+    # ---------- devices ----------
+    def list_devices(self) -> list[Device]:
+        with self._connection() as conn:
+            rows = conn.execute("SELECT * FROM devices ORDER BY id").fetchall()
+        return [Device.from_row(r) for r in rows]
+
+    def add_device(self, device: Device) -> int:
+        with _WRITE_LOCK, self._connection() as conn:
+            cur = conn.execute(
+                "INSERT INTO devices (name, mac, note) VALUES (?, ?, ?)",
+                (device.name, device.mac, device.note),
+            )
+            rowid = cur.lastrowid
+            return int(rowid) if rowid is not None else 0
+
+    def delete_device(self, device_id: int) -> bool:
+        with _WRITE_LOCK, self._connection() as conn:
+            cur = conn.execute("DELETE FROM devices WHERE id = ?", (device_id,))
+            return cur.rowcount > 0
 
 
 def accounts_to_rows(accounts: Iterable[Account]) -> list[dict[str, Any]]:

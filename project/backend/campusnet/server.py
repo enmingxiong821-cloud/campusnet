@@ -16,7 +16,7 @@ from .auth import ApiAuth
 from .lockfile import SingleInstance
 from .monitor import MonitorManager
 from .paths import API_HOST, API_PORT, FRONTEND_DIR, instance_lock_path, stdout_ready
-from .storage import Account, Store
+from .storage import Account, Device, Store, WakePlan
 
 Handler = Callable[[dict[str, Any], "ApiHandler"], Any]
 MAX_REQUEST_BODY = 1024 * 1024
@@ -635,6 +635,138 @@ def routes_system(store: Store) -> dict[tuple[str, str], Handler]:
     }
 
 
+def routes_wake(store: Store) -> dict[tuple[str, str], Handler]:
+    """唤醒计划与设备清单：远程开机的一半（WOL 是二层广播，只对局域网有效）。"""
+
+    def _mac_valid(mac: str) -> bool:
+        from . import power
+
+        try:
+            power.magic_packet(mac)
+            return True
+        except power.PowerError:
+            return False
+
+    def _plan_from_payload(payload: dict[str, Any]) -> WakePlan:
+        name = str(payload.get("name", "")).strip()
+        mac = str(payload.get("mac", "")).strip()
+        schedule = str(payload.get("schedule", "")).strip()
+        if not name or not mac or not schedule:
+            raise ApiError(HTTPStatus.BAD_REQUEST, "唤醒计划需要 name / mac / schedule")
+        if not _mac_valid(mac):
+            raise ApiError(HTTPStatus.BAD_REQUEST, f"MAC 地址格式不对：{mac}")
+        from . import wakeplan
+
+        if wakeplan.parse_schedule(schedule) is None:
+            raise ApiError(
+                HTTPStatus.BAD_REQUEST,
+                f"时间表格式不对：{schedule}（形如 07:30 或 mon-fri 07:30）",
+            )
+        broadcast = str(payload.get("broadcast", "")).strip() or "255.255.255.255"
+        try:
+            port = int(payload.get("port", 9))
+        except (TypeError, ValueError):
+            raise ApiError(HTTPStatus.BAD_REQUEST, "port 必须是整数") from None
+        return WakePlan(
+            name=name,
+            mac=mac,
+            broadcast=broadcast,
+            port=port,
+            schedule=schedule,
+            enabled=bool(payload.get("enabled", True)),
+        )
+
+    def _path_id(ctx: dict[str, Any], label: str) -> int:
+        raw = (ctx.get("params") or {}).get("id")
+        if raw is None:
+            raise ApiError(HTTPStatus.BAD_REQUEST, f"缺少{label} ID")
+        try:
+            return int(raw)
+        except ValueError as exc:
+            raise ApiError(HTTPStatus.BAD_REQUEST, f"{label} ID 非法：{raw}") from exc
+
+    # ---------- 唤醒计划 ----------
+    def list_wake_plans(_: dict[str, Any], h: ApiHandler) -> None:
+        h._send(
+            HTTPStatus.OK,
+            {"ok": True, "plans": [p.public() for p in store.list_wake_plans()]},
+        )
+
+    def create_wake_plan(_: dict[str, Any], h: ApiHandler) -> None:
+        plan = _plan_from_payload(h._read_body())
+        new_id = store.add_wake_plan(plan)
+        plan.id = new_id
+        store.add_event(
+            f"新增唤醒计划 {plan.name}（{plan.schedule}）", level="info", stage="wake"
+        )
+        h._send(HTTPStatus.CREATED, {"ok": True, "id": new_id, "plan": plan.public()})
+
+    def delete_wake_plan(ctx: dict[str, Any], h: ApiHandler) -> None:
+        plan_id = _path_id(ctx, "计划")
+        if not store.delete_wake_plan(plan_id):
+            raise ApiError(HTTPStatus.NOT_FOUND, f"计划 {plan_id} 不存在")
+        store.add_event(f"删除唤醒计划 #{plan_id}", level="warning", stage="wake")
+        h._send(HTTPStatus.OK, {"ok": True})
+
+    # ---------- 设备清单 ----------
+    def _device_from_payload(payload: dict[str, Any]) -> Device:
+        name = str(payload.get("name", "")).strip()
+        mac = str(payload.get("mac", "")).strip()
+        if not name or not mac:
+            raise ApiError(HTTPStatus.BAD_REQUEST, "设备需要 name / mac")
+        if not _mac_valid(mac):
+            raise ApiError(HTTPStatus.BAD_REQUEST, f"MAC 地址格式不对：{mac}")
+        return Device(name=name, mac=mac, note=str(payload.get("note", "")).strip())
+
+    def list_devices(_: dict[str, Any], h: ApiHandler) -> None:
+        h._send(
+            HTTPStatus.OK,
+            {"ok": True, "devices": [d.public() for d in store.list_devices()]},
+        )
+
+    def create_device(_: dict[str, Any], h: ApiHandler) -> None:
+        device = _device_from_payload(h._read_body())
+        new_id = store.add_device(device)
+        device.id = new_id
+        store.add_event(
+            f"新增唤醒设备 {device.name}（{device.mac}）", level="info", stage="wake"
+        )
+        h._send(HTTPStatus.CREATED, {"ok": True, "id": new_id, "device": device.public()})
+
+    def delete_device(ctx: dict[str, Any], h: ApiHandler) -> None:
+        device_id = _path_id(ctx, "设备")
+        if not store.delete_device(device_id):
+            raise ApiError(HTTPStatus.NOT_FOUND, f"设备 {device_id} 不存在")
+        store.add_event(f"删除唤醒设备 #{device_id}", level="warning", stage="wake")
+        h._send(HTTPStatus.OK, {"ok": True})
+
+    def wake_device(ctx: dict[str, Any], h: ApiHandler) -> None:
+        from . import power
+
+        device_id = _path_id(ctx, "设备")
+        device = next((d for d in store.list_devices() if d.id == device_id), None)
+        if device is None:
+            raise ApiError(HTTPStatus.NOT_FOUND, f"设备 {device_id} 不存在")
+        try:
+            target = power.wake(device.mac)
+        except power.PowerError as exc:
+            raise ApiError(HTTPStatus.BAD_REQUEST, f"发送失败：{exc}") from exc
+        store.add_event(
+            f"一键唤醒 {device.name}（{device.mac}）", level="info", stage="wake"
+        )
+        h._send(HTTPStatus.OK, {"ok": True, "mac": device.mac, "target": target})
+
+    return {
+        ("GET", "/api/wake-plans"): list_wake_plans,
+        ("POST", "/api/wake-plans"): create_wake_plan,
+        ("DELETE", "/api/wake-plans/{id}"): delete_wake_plan,
+        ("GET", "/api/devices"): list_devices,
+        ("POST", "/api/devices"): create_device,
+        ("DELETE", "/api/devices/{id}"): delete_device,
+        ("POST", "/api/devices/{id}/wake"): wake_device,
+    }
+
+
 def routes_auth(auth: ApiAuth | None) -> dict[tuple[str, str], Handler]:
     """认证入口公开，业务 API 由分发层统一保护。"""
 
@@ -699,6 +831,7 @@ def build_handler(
         routes_monitor(store, manager),
         routes_events(store),
         routes_system(store),
+        routes_wake(store),
         routes_auth(auth),
     ):
         routes.update(group)

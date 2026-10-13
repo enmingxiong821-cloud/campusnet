@@ -40,6 +40,26 @@ CREATE TABLE IF NOT EXISTS settings (
     value TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS wake_plans (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT    NOT NULL,
+    mac         TEXT    NOT NULL,
+    broadcast   TEXT    NOT NULL DEFAULT '255.255.255.255',
+    port        INTEGER NOT NULL DEFAULT 9,
+    schedule    TEXT    NOT NULL,
+    enabled     INTEGER NOT NULL DEFAULT 1,
+    last_run_at TEXT,
+    created_at  TEXT    NOT NULL DEFAULT (datetime('now','localtime'))
+);
+
+CREATE TABLE IF NOT EXISTS devices (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT    NOT NULL,
+    mac         TEXT    NOT NULL,
+    note        TEXT,
+    created_at  TEXT    NOT NULL DEFAULT (datetime('now','localtime'))
+);
+
 CREATE INDEX IF NOT EXISTS idx_events_ts     ON events (ts DESC);
 CREATE INDEX IF NOT EXISTS idx_events_acc    ON events (account_id, ts DESC);
 CREATE INDEX IF NOT EXISTS idx_accounts_name ON accounts (name);
