@@ -54,6 +54,7 @@ L2 / L3 解决的是「机器有电但关着」，别当成 L1 的替代品。
 - [常见问题](#常见问题)
 - [安全说明](#安全说明)
 - [开发](#开发)
+- [更新日志](CHANGELOG.md)
 
 ---
 
@@ -566,6 +567,10 @@ python -m pytest project/backend/tests -q
 # 扩展测试（改了 background.js 后必跑，MV3 无法在 Node 直接跑）
 node project/frontend/extension/test-background.js
 ```
+
+合并前，把「用户能感知到的变化」补进 [CHANGELOG.md](CHANGELOG.md) 的 `## 未发布`
+一节；打 tag 时再整体挪到新版本号下。提交与 PR 的约定见
+[CONTRIBUTING.md](CONTRIBUTING.md)。
 
 ### 架构
 
