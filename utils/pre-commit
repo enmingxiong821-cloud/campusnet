@@ -1,0 +1,30 @@
+#!/bin/sh
+# 校园网自连 · 提交前检查：敏感内容扫描 + 空白错误。
+#
+# 安装（二选一）：
+#   1) 单仓库：cp utils/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
+#   2) 全局钩子目录：git config core.hooksPath .githooks，再把本文件放 .githooks/pre-commit
+#
+# 为什么复用 check_distribution.py：发布与提交守同一套敏感串规则，
+# 避免「本地放过、CI 才炸」。命中只报文件名与规则名，不打印凭据原文。
+
+repo_root=$(git rev-parse --show-toplevel) || exit 0
+
+# 1) 敏感内容扫描：凭据 / 学号 / 手机号 / 密钥文件名，任何命中都拦下。
+if command -v python >/dev/null 2>&1; then
+    if ! python "$repo_root/utils/check_distribution.py" --repo "$repo_root"; then
+        echo "❌ 提交被拦截：检测到疑似敏感内容（凭据 / 学号 / 密钥等）。" >&2
+        echo "   请先移除或脱敏；确属误报可在 utils/local_sensitive.txt 里调整规则。" >&2
+        exit 1
+    fi
+else
+    echo "⚠️  未找到 python，跳过敏感内容扫描；请勿在无法扫描时提交凭据。" >&2
+fi
+
+# 2) 空白错误：尾随空格 / 冲突标记（<<<<<<< ======= >>>>>>>）。
+if ! git diff --cached --check; then
+    echo "❌ 提交被拦截：存在尾随空格或冲突标记。" >&2
+    exit 1
+fi
+
+exit 0
