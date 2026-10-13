@@ -125,6 +125,29 @@ async function probeAll(urls) {
 
 /* ------------------------------------------------------------------ 登录 */
 
+/**
+ * 用 fetch 直接向门户提交登录表单，绕开「打开页面 + 填表单 + 点提交」那条路。
+ *
+ * 之所以能在后台完成：校园网门户绝大多数就是普通表单 POST，拿到响应体
+ * 就能判断成败，不需要真的渲染页面。失败时调用方会退回 openPortalForManual，
+ * 让用户手动点一次——总比什么都不做要好。
+ *
+ * 表单字段拼装的三个约定，顺序不能变：
+ * 1. `fields` 里除了 usernameField / passwordField 两个「说明性键」以外，
+ *    其余键值对（隐藏域、运营商选择等）原样带上，门户靠它们区分线路；
+ * 2. 账号字段名默认 username、密码字段名默认 password，门户预设可以覆盖；
+ * 3. 密码要按 mode 编码后再提交，且必须 append 在最后——有些门户按出现
+ *    顺序解析，把密码插到中间会串位。
+ *
+ * 密码经 encodePassword 处理后进请求体，不会落进 DOM 或地址栏。
+ *
+ * @param {string} portal 提交地址（登录表单的 action）
+ * @param {string} username 账号
+ * @param {string} password 明文密码，本函数内编码
+ * @param {object} fields 表单字段表，含 usernameField / passwordField 两个元键
+ * @param {string} mode 密码编码方式（plain / base64）
+ * @returns {Promise<{state: string, message: string, url?: string}>} classify 的结果
+ */
 async function loginByFetch(portal, username, password, fields, mode) {
   const body = new URLSearchParams();
   // 只提交真正的表单字段，跳过 usernameField/passwordField 这两个说明性键
@@ -148,6 +171,24 @@ async function loginByFetch(portal, username, password, fields, mode) {
   return classify(text, resp.status, resp.url);
 }
 
+/**
+ * 按门户要求编码密码。
+ *
+ * 空密码提前原样返回，不能走 base64 分支：`btoa('')` 得到空串，看着一样，
+ * 但一旦以后加了别的编码方式（比如 md5），空串就会被编码成非空值提交上去，
+ * 反而把「没填密码」变成一个像模像样的错误密码。
+ *
+ * `unescape(encodeURIComponent(x))` 是标准库里唯一能把 UTF-8 字符串转成
+ * 逐字节 Latin-1 的老写法，`btoa` 只吃 Latin-1。密码含中文时不这么转会抛
+ * InvalidCharacterError。
+ *
+ * plain 走 default 分支而不是 case 'plain'：配置里写了没见过的值（旧版本残留、
+ * 手改 storage）时按最保守的明文处理，而不是静默失败。
+ *
+ * @param {string} password 明文密码
+ * @param {string} mode 'base64' 编码，其余一律明文
+ * @returns {string} 待提交的密码串
+ */
 function encodePassword(password, mode) {
   if (!password) return password;
   switch (mode) {
@@ -158,6 +199,28 @@ function encodePassword(password, mode) {
   }
 }
 
+/**
+ * 从门户响应体里判成败——只能靠文本匹配，没有别的办法。
+ *
+ * 校园网门户五花八门：有的返回 JSON（`{"result":1}`），有的返回一句中文，
+ * 有的干脆 200 + 空 body。所以判断顺序是「先找明确的成功标记，再找明确的
+ * 失败标记，最后什么都不匹配时按 HTTP 状态兜底」：
+ *
+ * - 成功标记放最前：某些门户成功页里也夹着「登录失败」的脚本模板或提示文案，
+ *   先匹配失败标记会把成功判成失败；
+ * - `"result":1` / `"success":true` 都带引号：去掉引号会误命中页面里的
+ *   `result:0` 这类 JS 变量赋值；
+ * - `userdeny` 是 SRUN 系的固定标记，中文门户里不会出现，留着不冲突；
+ * - 兜底那条是**故意宽松**的：2xx/3xx 且没有任何失败标记时记成功。门户文案
+ *   改版（比如换了句「认证通过」）时，宁可让它按成功走、由随后的探活复核，
+ *   也不要误报失败——探活失败自然会再登录一次，而误报失败会让用户白点。
+ *
+ * @param {string} text 响应体文本
+ * @param {number} status HTTP 状态码
+ * @param {string} url 最终响应地址（重定向后），仅失败时带出，方便排查
+ * @returns {{state: string, message: string, url?: string}} state ∈
+ *   success / already_online / failed / error
+ */
 function classify(text, status, url) {
   const low = (text || '').toLowerCase();
   if (low.includes('"result":1') || low.includes('"success":true')) {

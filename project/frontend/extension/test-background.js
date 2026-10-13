@@ -17,13 +17,36 @@ const SRC = fs.readFileSync(path.join(__dirname, 'background.js'), 'utf8');
 let passed = 0;
 const failures = [];
 
+/* ---------------- 分组 ---------------- */
+
+/**
+ * 三组是按「被测对象的依赖层级」分的，不是为了排版好看：
+ *   ① 纯函数        —— 不碰 chrome 也不碰网络，挂了必定是逻辑错
+ *   ② 探活与登录    —— 只依赖 fetch，是「没装 Python」时扩展自己的主线
+ *   ③ 状态与消息    —— 依赖 chrome.storage / alarms / runtime，管的是跨轮次状态
+ *
+ * 分组名存在 currentGroup 上，check() 顺手把计数记进当前组，跑完按组汇总：
+ * 某组整片挂掉时能立刻判断是哪一层塌了，而不是只看到一个总数。
+ */
+let currentGroup = '(未分组)';
+const groupStats = new Map();
+
+function describe(name) {
+  currentGroup = name;
+  if (!groupStats.has(name)) groupStats.set(name, { passed: 0, failed: 0 });
+  console.log(`\n━━━ ${name} ━━━`);
+}
+
 function check(name, fn) {
+  const stats = groupStats.get(currentGroup);
   try {
     fn();
     passed += 1;
+    if (stats) stats.passed += 1;
     console.log(`  PASS  ${name}`);
   } catch (err) {
     failures.push({ name, message: err.message });
+    if (stats) stats.failed += 1;
     console.log(`  FAIL  ${name}: ${err.message}`);
   }
 }
@@ -143,6 +166,8 @@ console.log('\n=== 扩展后台逻辑测试 ===\n');
 
 const { api: probeApi } = loadBackground({ data: {} }, async () => ({}));
 
+describe('① 纯函数：响应分类与密码编码');
+
 console.log('[classify 响应分类]');
 const cases = [
   ['门户 result:1 判成功', '{"result":1}', 200, '/', 'success'],
@@ -173,6 +198,8 @@ check('base64 编码 ASCII', () => eq(probeApi.encodePassword('abc', 'base64'), 
 check('base64 编码中文走 UTF-8', () =>
   eq(probeApi.encodePassword('中文', 'base64'), Buffer.from('中文', 'utf8').toString('base64')));
 check('空密码不编码', () => eq(probeApi.encodePassword('', 'base64'), ''));
+
+describe('② 探活与登录');
 
 console.log('\n[probeOnce 探活判定]');
 
@@ -397,6 +424,120 @@ function probeWith(fetchImpl) {
       });
     }
 
+    console.log('\n[登录表单提交]');
+    {
+      const storage = {
+        data: {
+          enabled: true,
+          portalUrl: 'http://p/login',
+          username: '20240001',
+          password: 'secret',
+          passwordMode: 'base64',
+          probeUrls: ['http://probe.test/x'],
+          fields: { usernameField: 'DDDDD', passwordField: 'upass', '0MKKey': '1' },
+        },
+      };
+      let captured = null;
+      const { api } = loadBackground(storage, async (url, opts) => {
+        if (url === 'http://p/login') {
+          captured = { url, body: opts.body, method: opts.method };
+          return { ok: true, status: 200, text: async () => '{"result":1}' };
+        }
+        return { status: 302, headers: { get: () => 'http://p/login' } };
+      });
+      await api.checkOnce();
+      check('字段名与隐藏域都进了请求体', () => {
+        truthy(captured, '捕获到 POST');
+        eq(captured.url, 'http://p/login', '提交地址');
+        eq(captured.method, 'POST', '提交方法');
+        truthy(captured.body.includes('DDDDD=20240001'), captured.body);
+        truthy(captured.body.includes('0MKKey=1'), captured.body);
+        truthy(
+          captured.body.includes('upass=' + Buffer.from('secret', 'binary').toString('base64')),
+          captured.body,
+        );
+      });
+    }
+
+    // fields 里只写了字段名说明、没带任何实际参数时应有的样子
+    {
+      const storage = {
+        data: {
+          enabled: true,
+          portalUrl: 'http://p/login',
+          username: 'u1',
+          password: 'p1',
+          probeUrls: ['http://probe.test/x'],
+          fields: { usernameField: 'DDDDD', passwordField: 'upass' },
+        },
+      };
+      let captured = null;
+      const { api } = loadBackground(storage, async (url, opts) => {
+        if (url === 'http://p/login') {
+          captured = opts.body;
+          return { ok: true, status: 200, text: async () => '{"result":1}' };
+        }
+        return { status: 302, headers: { get: () => 'http://p/login' } };
+      });
+      await api.checkOnce();
+      check('两个说明性键本身不提交给门户', () => {
+        truthy(captured, '捕获到 POST');
+        eq(captured.includes('usernameField'), false, 'usernameField 不该出现在请求体里');
+        eq(captured.includes('passwordField'), false, 'passwordField 不该出现在请求体里');
+        truthy(captured.includes('DDDDD=u1'), captured);
+        truthy(captured.includes('upass=p1'), captured);
+      });
+    }
+
+    // fields 整个缺失（老版本 storage 里没这个键）：退回默认键名，不能崩
+    {
+      const storage = {
+        data: {
+          enabled: true,
+          portalUrl: 'http://p/login',
+          username: 'u2',
+          password: 'p2',
+          probeUrls: ['http://probe.test/x'],
+        },
+      };
+      let captured = null;
+      const { api } = loadBackground(storage, async (url, opts) => {
+        if (url === 'http://p/login') {
+          captured = opts.body;
+          return { ok: true, status: 200, text: async () => '{"result":1}' };
+        }
+        return { status: 302, headers: { get: () => 'http://p/login' } };
+      });
+      await api.checkOnce();
+      check('fields 缺失时用默认 username/password 键名', () => {
+        truthy(captured, '捕获到 POST');
+        truthy(captured.includes('username=u2'), captured);
+        truthy(captured.includes('password=p2'), captured);
+      });
+    }
+
+    console.log('\n[并发保护]');
+    {
+      const storage = { data: { enabled: true } };
+      let inflight = 0;
+      let maxInflight = 0;
+      const { api } = loadBackground(storage, async () => {
+        inflight += 1;
+        maxInflight = Math.max(maxInflight, inflight);
+        await new Promise(r => setTimeout(r, 20));
+        inflight -= 1;
+        return { ok: true, status: 200 };
+      });
+      const [a, b] = await Promise.all([api.checkOnce(), api.checkOnce()]);
+      check('并发调用不会重复探活', () => {
+        eq(maxInflight, 1, '最大并发数');
+        eq(b.skipped, true, '第二次被跳过');
+        truthy(a.online);
+      });
+    }
+
+    describe('③ 状态、通知、消息通道与本地服务');
+
     console.log('\n[setEnabled 开关与闹钟]');
     {
       const storage = { data: {} };
@@ -513,61 +654,6 @@ function probeWith(fetchImpl) {
 
       await call({ type: 'clearEvents' });
       check('clearEvents 清空日志', () => eq(storage.data.events.length, 0));
-    }
-
-    console.log('\n[登录表单提交]');
-    {
-      const storage = {
-        data: {
-          enabled: true,
-          portalUrl: 'http://p/login',
-          username: '20240001',
-          password: 'secret',
-          passwordMode: 'base64',
-          probeUrls: ['http://probe.test/x'],
-          fields: { usernameField: 'DDDDD', passwordField: 'upass', '0MKKey': '1' },
-        },
-      };
-      let captured = null;
-      const { api } = loadBackground(storage, async (url, opts) => {
-        if (url === 'http://p/login') {
-          captured = { url, body: opts.body, method: opts.method };
-          return { ok: true, status: 200, text: async () => '{"result":1}' };
-        }
-        return { status: 302, headers: { get: () => 'http://p/login' } };
-      });
-      await api.checkOnce();
-      check('字段名与隐藏域都进了请求体', () => {
-        truthy(captured, '捕获到 POST');
-        eq(captured.url, 'http://p/login', '提交地址');
-        eq(captured.method, 'POST', '提交方法');
-        truthy(captured.body.includes('DDDDD=20240001'), captured.body);
-        truthy(captured.body.includes('0MKKey=1'), captured.body);
-        truthy(
-          captured.body.includes('upass=' + Buffer.from('secret', 'binary').toString('base64')),
-          captured.body,
-        );
-      });
-    }
-
-    console.log('\n[并发保护]');
-    {
-      const storage = { data: { enabled: true } };
-      let inflight = 0;
-      let maxInflight = 0;
-      const { api } = loadBackground(storage, async () => {
-        inflight += 1;
-        maxInflight = Math.max(maxInflight, inflight);
-        await new Promise(r => setTimeout(r, 20));
-        inflight -= 1;
-        return { ok: true, status: 200 };
-      });
-      const [a, b] = await Promise.all([api.checkOnce(), api.checkOnce()]);
-      check('并发调用不会重复探活', () => {
-        eq(maxInflight, 1, '最大并发数');
-        eq(b.skipped, true, '第二次被跳过');
-        truthy(a.online);
-      });
     }
 
     console.log('\n[Worker 状态恢复]');
@@ -705,6 +791,12 @@ function probeWith(fetchImpl) {
     }
 
     console.log(`\n=== 结果：${passed} 通过，${failures.length} 失败 ===\n`);
+    for (const [name, s] of groupStats) {
+      const mark = s.failed === 0 ? 'OK  ' : 'FAIL';
+      const bad = s.failed ? `，${s.failed} 失败` : '';
+      console.log(`  ${mark}  ${name}：${s.passed} 通过${bad}`);
+    }
+    console.log('');
     if (failures.length) {
       for (const f of failures) console.log(`  - ${f.name}: ${f.message}`);
       process.exit(1);
