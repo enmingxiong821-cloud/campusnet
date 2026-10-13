@@ -273,6 +273,14 @@ def cmd_discover(args: argparse.Namespace) -> int:
 def cmd_doctor(args: argparse.Namespace) -> int:
     """一键自检：本地状态 +（默认）真实探活，用于人在外面排查。"""
     stdout_ready()
+
+    if args.power:
+        from . import powerprep as powerprep_mod
+
+        items = powerprep_mod.run(fix=False)
+        print(powerprep_mod.render(items, as_json=args.json))
+        return powerprep_mod.exit_code(items)
+
     from . import doctor as doctor_mod
     from .logging_setup import setup_logging
 
@@ -379,8 +387,34 @@ def cmd_cred(args: argparse.Namespace) -> int:
 
 
 def cmd_power(args: argparse.Namespace) -> int:
-    """关机 / 重启 / 发 WOL 唤醒包。"""
+    """关机 / 重启 / 发 WOL 唤醒包 / 电源体检。"""
     stdout_ready()
+
+    if args.power_action == "prep":
+        from . import powerprep as powerprep_mod
+
+        if args.fix and not args.yes:
+            # 会改系统设置（注册表 / powercfg），先只读预览再要一句确认。
+            preview = powerprep_mod.run(fix=False)
+            pending = [
+                item
+                for item in preview
+                if item.fixable
+                and item.status in (powerprep_mod.WARN, powerprep_mod.MANUAL)
+            ]
+            if not pending:
+                print(powerprep_mod.render(preview, as_json=args.json))
+                return powerprep_mod.exit_code(preview)
+            print("将尝试自动修复：")
+            for item in pending:
+                print(f"  - {item.name}：{item.detail}")
+            if input("确认执行？[y/N] ").strip().lower() not in ("y", "yes"):
+                print("已取消，未做任何修改。")
+                return 0
+        items = powerprep_mod.run(fix=args.fix, yes=args.yes)
+        print(powerprep_mod.render(items, as_json=args.json))
+        return powerprep_mod.exit_code(items)
+
     from . import power as power_mod
 
     try:
@@ -687,6 +721,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_doctor.add_argument(
         "--no-probe", action="store_true", help="跳过真实探活，只查本地状态"
     )
+    p_doctor.add_argument(
+        "--power", action="store_true", help="改为电源体检（远程开关机前置条件）"
+    )
     p_doctor.add_argument("--json", action="store_true", help="输出 JSON，便于脚本判断")
     p_doctor.set_defaults(func=cmd_doctor)
 
@@ -725,6 +762,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_power_wake.add_argument("--broadcast", default="255.255.255.255")
     p_power_wake.add_argument("--port", type=int, default=9)
     p_power_wake.set_defaults(func=cmd_power)
+
+    p_power_prep = power_sub.add_parser(
+        "prep", help="电源体检：远程开关机的前置条件逐项检查"
+    )
+    p_power_prep.add_argument("--fix", action="store_true", help="尝试自动修复可修复项")
+    p_power_prep.add_argument(
+        "--yes", action="store_true", help="配合 --fix，跳过确认直接执行"
+    )
+    p_power_prep.add_argument("--json", action="store_true", help="输出 JSON，便于脚本判断")
+    p_power_prep.set_defaults(func=cmd_power)
 
     p_console = sub.add_parser("console", help="在默认浏览器里打开控制台")
     p_console.add_argument("--host", default="127.0.0.1")
