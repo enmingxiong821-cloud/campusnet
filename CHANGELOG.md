@@ -55,11 +55,17 @@
 ### 内部
 
 - 覆盖率治理：补齐锁、日志、自启动、菜单、快捷键、加密、电源、权限、接入等模块的
-  降级分支与跨平台分支用例，整体覆盖率 90% → 92%。
+  降级分支与跨平台分支用例，整体覆盖率 90% → 92%；随后给 `server.py` 补 37 条
+  边界与失败分支用例（87% → 100%），CI 挂上 `--cov-fail-under=90` 门禁。
 - 扩展侧补 `loginByFetch` / `encodePassword` / `classify` 的模块级注释，
   测试按「纯函数 / 探活与登录 / 状态与消息」分三组汇总。
 - 提交前钩子、Dependabot、CodeQL。
 - README 命令冒烟测试，防止文档与代码漂移。
+- HTTPS 上下文收敛到 `tls.portal_context`：探活 / 门户 / 深澜 / 门户发现四处原先
+  各建一份，`check_hostname` 与 `verify_mode` 的先后顺序只在一处把关。
+- `cli.py` 按主题拆成 `cli/` 包（account / net / power / service / system），
+  解析器与入口留在包内 `__init__`，各子命令的 `--help` 输出逐行不变；
+  菜单与快捷方式共用的提权命令行构造收进 `shortcuts.elevate_command_line`。
 
 ## [1.6.0] - 2026-10-12
 
