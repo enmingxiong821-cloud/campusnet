@@ -746,3 +746,450 @@ def test_verify_without_task_is_not_confirmed(
 
     assert ok is False
     assert "mode task" in detail
+
+
+# ---------- 平台推断、打包形态与容错分支（F2）----------
+
+
+def test_platform_name_falls_back_to_sys_platform(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """没有 CAMPUSNET_FORCE_PLATFORM 时按 os.name / sys.platform 判断。
+
+    伪装 os.name 是为了让 darwin / 未知平台两条分支在 Windows 上也能走到，
+    否则覆盖率会随跑测平台漂移。
+    """
+    monkeypatch.delenv("CAMPUSNET_FORCE_PLATFORM", raising=False)
+    monkeypatch.setattr(boot_mod.os, "name", "posix")
+
+    monkeypatch.setattr(boot_mod.sys, "platform", "darwin")
+    assert boot_mod.platform_name() == "darwin"
+
+    monkeypatch.setattr(boot_mod.sys, "platform", "linux5.15.0")
+    assert boot_mod.platform_name() == "linux"
+
+    monkeypatch.setattr(boot_mod.sys, "platform", "freebsd12")
+    assert boot_mod.platform_name() == "freebsd12"
+
+
+def test_is_wsl_reads_proc_version(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """没有 WSL_DISTRO_NAME 时要看 /proc/version 里有没有 microsoft 字样。"""
+    monkeypatch.delenv("WSL_DISTRO_NAME", raising=False)
+    monkeypatch.setattr(boot_mod.sys, "platform", "linux")
+    fake = tmp_path / "version"
+    real_path = boot_mod.Path
+
+    def patched(value):  # noqa: ANN001, ANN202
+        return fake if value == "/proc/version" else real_path(value)
+
+    monkeypatch.setattr(boot_mod, "Path", patched)
+
+    fake.write_text("Linux version 5.15.0-microsoft-standard-WSL2\n", encoding="utf-8")
+    assert boot_mod.is_wsl() is True
+
+    fake.write_text("Linux version 5.15.0-generic\n", encoding="utf-8")
+    assert boot_mod.is_wsl() is False
+
+    fake.unlink()  # 读不到 /proc/version（非 Linux 或沙箱里）也当不是 WSL
+    assert boot_mod.is_wsl() is False
+
+
+def test_verify_launch_uses_frozen_binary(monkeypatch: pytest.MonkeyPatch) -> None:
+    """打包成单文件后没有解释器可用，直接问可执行文件 --version。"""
+    monkeypatch.setattr(boot_mod, "frozen_prefix", lambda: ["/opt/campusnet"])
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        boot_mod, "_run_quiet", lambda args: (calls.append(list(args)) or (True, ""))
+    )
+
+    assert boot_mod.verify_launch() == (True, "")
+    assert calls == [["/opt/campusnet", "--version"]]
+
+    monkeypatch.setattr(boot_mod, "_run_quiet", lambda args: (False, ""))
+    ok, detail = boot_mod.verify_launch()
+    assert ok is False
+    assert "无法运行" in detail
+
+
+def test_task_action_uses_frozen_binary(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(boot_mod, "frozen_prefix", lambda: ["C:/opt/campusnet.exe"])
+
+    exe, args = boot_mod.task_action(port=2268)
+
+    assert exe == "C:/opt/campusnet.exe"
+    assert args
+
+
+def test_run_powershell_script_without_exe(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(boot_mod.shutil, "which", lambda _name: None)
+
+    ok, detail = boot_mod._run_powershell_script("echo 1")
+
+    assert ok is False
+    assert "找不到 powershell" in detail
+
+
+def test_run_powershell_script_merges_output_and_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """两条流都要收，并把 PowerShell 自带模块目录补进子进程环境。"""
+    monkeypatch.setattr(boot_mod.shutil, "which", lambda name: f"/usr/bin/{name}")
+    seen: dict = {}
+
+    class Result:
+        stdout = "已注册\n".encode("utf-8")
+        stderr = "警告".encode("utf-8")
+
+        def __init__(self, code: int) -> None:
+            self.returncode = code
+
+    def run(args, **kwargs):  # noqa: ANN001, ANN202
+        seen["args"] = list(args)
+        seen["env"] = kwargs["env"]
+        seen["timeout"] = kwargs["timeout"]
+        return Result(seen.get("code", 0))
+
+    monkeypatch.setattr(boot_mod.subprocess, "run", run)
+
+    ok, output = boot_mod._run_powershell_script("Get-Date")
+
+    assert ok is True
+    assert "已注册" in output and "警告" in output
+    assert seen["args"][1] == "-NoProfile"
+    assert seen["args"][3] == "-Command"
+    assert boot_mod.WINDOWS_PS_MODULES in seen["env"]["PSModulePath"]
+    assert seen["timeout"] == 60  # 不能无限等，否则自启动会卡死
+
+    seen["code"] = 1
+    ok, _ = boot_mod._run_powershell_script("Get-Date")
+    assert ok is False
+
+
+def test_run_powershell_script_wraps_spawn_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(boot_mod.shutil, "which", lambda name: f"/usr/bin/{name}")
+
+    def boom(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        raise OSError("spawn failed")
+
+    monkeypatch.setattr(boot_mod.subprocess, "run", boom)
+
+    ok, detail = boot_mod._run_powershell_script("echo 1")
+
+    assert ok is False
+    assert "OSError" in detail
+
+
+def test_task_registered_false_without_schtasks(monkeypatch: pytest.MonkeyPatch) -> None:
+    _force(monkeypatch, "windows")
+    monkeypatch.setattr(boot_mod.shutil, "which", lambda _name: None)
+
+    assert boot_mod.task_registered() is False
+
+
+def test_register_task_without_username(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("USERNAME", raising=False)
+
+    ok, detail = boot_mod.register_task("127.0.0.1", 2268, "pw")
+
+    assert ok is False
+    assert "用户名" in detail
+
+
+def test_delete_task_invokes_schtasks(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        boot_mod, "_run_quiet", lambda args: (calls.append(list(args)) or (True, ""))
+    )
+
+    assert boot_mod.delete_task() == (True, "")
+    assert calls[0][:2] == ["schtasks", "/Delete"]
+    assert "/F" in calls[0]  # 不交互确认，否则无人值守时永远删不掉
+
+
+def test_run_quiet_wraps_spawn_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        raise OSError("找不到可执行文件")
+
+    monkeypatch.setattr(boot_mod.subprocess, "run", boom)
+
+    ok, detail = boot_mod._run_quiet(["nope"])
+
+    assert ok is False
+    assert "OSError" in detail
+
+
+def test_linux_install_reports_enable_failure_after_reload(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """daemon-reload 成功但 enable 失败：单元文件已落盘却没生效，必须如实说。"""
+    _force(monkeypatch, "linux")
+    monkeypatch.setattr(boot_mod.shutil, "which", lambda _name: "/usr/bin/systemctl")
+    monkeypatch.setattr(boot_mod, "verify_launch", lambda: (True, ""))
+    monkeypatch.setattr(
+        boot_mod,
+        "_run_quiet",
+        lambda args, **kwargs: (False, "无法连接 bus") if "enable" in args else (True, ""),
+    )
+
+    result = boot_mod.install(port=2268)
+
+    assert result.installed is False
+    assert result.path is not None  # 单元文件确实写下去了
+    assert "enable 失败" in result.detail
+
+
+def test_linux_install_on_wsl_with_systemd_mentions_linger(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """WSL 里 systemd 要手动开、还要 linger 才无人登录启动，必须提示。"""
+    _force(monkeypatch, "linux")
+    monkeypatch.setattr(boot_mod.shutil, "which", lambda _name: "/usr/bin/systemctl")
+    monkeypatch.setattr(boot_mod, "_run_quiet", lambda args, **kwargs: (True, ""))
+    monkeypatch.setattr(boot_mod, "verify_launch", lambda: (True, ""))
+    monkeypatch.setattr(boot_mod, "is_wsl", lambda: True)
+
+    result = boot_mod.install(port=2268)
+
+    assert result.success and result.installed
+    assert "linger" in result.detail
+
+
+def test_linux_install_wraps_write_error(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """磁盘满 / 权限不足时给出可读原因，而不是抛栈。"""
+    _force(monkeypatch, "linux")
+    monkeypatch.setattr(boot_mod.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(boot_mod, "verify_launch", lambda: (True, ""))
+
+    def boom(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        raise OSError("磁盘已满")
+
+    monkeypatch.setattr(boot_mod, "_write_entry", boom)
+
+    result = boot_mod.install(port=2268)
+
+    assert result.success is False
+    assert "写入失败" in result.detail
+
+
+def test_windows_uninstall_reports_task_delete_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _force(monkeypatch, "windows")
+    monkeypatch.setattr(boot_mod, "task_registered", lambda: True)
+    monkeypatch.setattr(boot_mod, "delete_task", lambda: (False, "拒绝访问"))
+
+    result = boot_mod.uninstall()
+
+    assert result.installed is True  # 没删掉就不能说卸干净了
+    assert "删除计划任务失败" in result.detail
+
+
+def test_linux_uninstall_reports_disable_failure(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _force(monkeypatch, "linux")
+    unit = boot_mod._linux_unit_path()
+    unit.parent.mkdir(parents=True, exist_ok=True)
+    unit.write_text("[Unit]\n", encoding="utf-8")
+    monkeypatch.setattr(boot_mod.shutil, "which", lambda _name: "/usr/bin/systemctl")
+    monkeypatch.setattr(boot_mod, "_run_quiet", lambda args, **kwargs: (False, "bus 挂了"))
+
+    result = boot_mod.uninstall()
+
+    assert result.installed is True
+    assert "disable 失败" in result.detail
+
+
+def test_linux_uninstall_reports_delete_failure(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _force(monkeypatch, "linux")
+    desktop = boot_mod._linux_desktop_path()
+    desktop.parent.mkdir(parents=True, exist_ok=True)
+    desktop.write_text("[Desktop Entry]\n", encoding="utf-8")
+    monkeypatch.setattr(boot_mod.shutil, "which", lambda _name: None)
+
+    def boom(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003, ANN202
+        raise OSError("文件被占用")
+
+    monkeypatch.setattr(Path, "unlink", boom)
+
+    result = boot_mod.uninstall()
+
+    assert result.installed is True
+    assert "删除失败" in result.detail
+
+
+def test_linux_status_without_systemctl_reports_unknown(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """有单元却问不到状态时不能说「已安装」，只能说无法确认。"""
+    _force(monkeypatch, "linux")
+    unit = boot_mod._linux_unit_path()
+    unit.parent.mkdir(parents=True, exist_ok=True)
+    unit.write_text("[Unit]\n", encoding="utf-8")
+    monkeypatch.setattr(boot_mod.shutil, "which", lambda _name: None)
+
+    result = boot_mod.status()
+
+    assert result.installed is False
+    assert result.effective is False
+    assert "未找到 systemctl" in result.detail
+
+
+def test_verify_windows_without_powershell(monkeypatch: pytest.MonkeyPatch) -> None:
+    _force(monkeypatch, "windows")
+    monkeypatch.setattr(boot_mod, "task_registered", lambda: True)
+    monkeypatch.setattr(boot_mod.shutil, "which", lambda _name: None)
+
+    ok, detail = boot_mod.verify()
+
+    assert ok is False
+    assert "找不到 powershell" in detail
+
+
+def test_verify_windows_reports_unreadable_history(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """读不到运行记录就说没证实，不能默认成功。"""
+    _force(monkeypatch, "windows")
+    monkeypatch.setattr(boot_mod, "task_registered", lambda: True)
+    monkeypatch.setattr(boot_mod.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(
+        boot_mod, "_run_powershell_script", lambda script, env=None: (True, "")
+    )
+
+    ok, detail = boot_mod.verify()
+
+    assert ok is False
+    assert "读取运行记录失败" in detail
+
+
+def test_verify_windows_reports_unparsable_times(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _force(monkeypatch, "windows")
+    monkeypatch.setattr(boot_mod, "task_registered", lambda: True)
+    monkeypatch.setattr(boot_mod.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(
+        boot_mod,
+        "_run_powershell_script",
+        lambda script, env=None: (True, "BOOT=2026-10-13T01:00:00Z"),
+    )
+
+    ok, detail = boot_mod.verify()
+
+    assert ok is False
+    assert "时间格式不对" in detail
+
+
+def test_verify_linux_without_unit(fake_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _force(monkeypatch, "linux")
+
+    ok, detail = boot_mod.verify()
+
+    assert ok is False
+    assert "未安装 systemd 单元" in detail
+
+
+def test_verify_linux_without_loginctl(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _force(monkeypatch, "linux")
+    unit = boot_mod._linux_unit_path()
+    unit.parent.mkdir(parents=True, exist_ok=True)
+    unit.write_text("[Unit]\n", encoding="utf-8")
+    monkeypatch.setattr(boot_mod.shutil, "which", lambda _name: None)
+
+    ok, detail = boot_mod.verify()
+
+    assert ok is False
+    assert "loginctl" in detail
+
+
+def test_verify_linux_reads_linger_state(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """linger 才是「未登录也运行」的前提，开着和没开着必须分开报。"""
+    _force(monkeypatch, "linux")
+    unit = boot_mod._linux_unit_path()
+    unit.parent.mkdir(parents=True, exist_ok=True)
+    unit.write_text("[Unit]\n", encoding="utf-8")
+    monkeypatch.setattr(boot_mod.shutil, "which", lambda _name: "/usr/bin/loginctl")
+    monkeypatch.setenv("USER", "dorm")
+
+    monkeypatch.setattr(boot_mod, "_run_quiet", lambda args: (True, "Linger=yes"))
+    ok, detail = boot_mod.verify()
+    assert ok is True
+    assert "linger" in detail
+
+    monkeypatch.setattr(boot_mod, "_run_quiet", lambda args: (True, "Linger=no"))
+    ok, detail = boot_mod.verify()
+    assert ok is False
+    assert "enable-linger" in detail
+
+
+def test_verify_darwin_reports_launchagent_limits(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """LaunchAgent 只活在图形会话里，不能假装等同于 LaunchDaemon。"""
+    _force(monkeypatch, "darwin")
+    plist = boot_mod._macos_plist_path()
+    plist.parent.mkdir(parents=True, exist_ok=True)
+    plist.write_text("<plist/>", encoding="utf-8")
+
+    ok, detail = boot_mod.verify()
+    assert ok is False
+    assert "LaunchDaemon" in detail
+
+    plist.unlink()
+    ok, detail = boot_mod.verify()
+    assert ok is False
+    assert "未安装自启动" in detail
+
+
+def test_verify_unknown_platform(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(boot_mod, "platform_name", lambda: "freebsd")
+
+    ok, detail = boot_mod.verify()
+
+    assert ok is False
+    assert "freebsd" in detail
+
+
+def test_activate_without_path_omits_the_hint() -> None:
+    """没装过时没有路径可给，不能拼出一个空括号。"""
+    result = boot_mod.BootStatus(True, False, None, "未安装开机自启动", True)
+
+    assert boot_mod.activate(result) == "开机自启动未开启：未安装开机自启动"
+
+
+def test_launch_command_uses_frozen_binary(monkeypatch: pytest.MonkeyPatch) -> None:
+    """冻结成单文件后没有 utils/run.py，让 exe 自己 serve。"""
+    monkeypatch.setattr(boot_mod, "frozen_prefix", lambda: ["/opt/campusnet"])
+
+    command = boot_mod.launch_command(port=2268)
+
+    assert command[:2] == ["/opt/campusnet", "serve"]
+    assert command[-1] == "2268"
+
+
+def test_launch_command_line_prefers_frozen_binary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """自启动脚本与快捷方式共用同一段命令拼接。"""
+    monkeypatch.setattr(boot_mod, "frozen_prefix", lambda: ["/opt/campusnet"])
+    frozen_line = boot_mod.launch_command_line(["serve", "--port", "2268"])
+    assert frozen_line.split()[0] == "/opt/campusnet"
+    assert "2268" in frozen_line
+
+    monkeypatch.setattr(boot_mod, "frozen_prefix", lambda: None)
+    source_line = boot_mod.launch_command_line(["serve", "--port", "2268"])
+    assert "run.py" in source_line
+    assert source_line != frozen_line

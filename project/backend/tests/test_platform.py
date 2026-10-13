@@ -379,3 +379,303 @@ def test_cross_process_blocking(tmp_path) -> None:  # noqa: ANN001
         timeout=30,
     )
     assert done.stdout.strip().startswith("GOT")
+
+
+# ---------- 锁的两条平台分支：两边都要走到（F2）----------
+# 不这么写的话，Windows 上只覆盖 msvcrt、Linux 上只覆盖 fcntl，
+# 覆盖率随跑测平台漂移，CI 双矩阵下门禁就会时红时绿。
+# 做法：把 os.name 伪装成另一边，并把缺失的那个模块（fcntl / msvcrt / ctypes.windll）
+# 伪造进 sys.modules。注意必须先建好 Path / SingleInstance 再改 os.name ——
+# 反过来 pathlib 会按伪装后的平台去实例化，在真实平台上直接 UnsupportedOperation。
+
+
+def _boom(*_args, **_kwargs):  # noqa: ANN202
+    raise OSError("模拟系统调用失败")
+
+
+@pytest.fixture()
+def fake_fcntl(monkeypatch):  # noqa: ANN001, ANN201
+    """假的 fcntl：让 POSIX 的 flock 分支在 Windows 上也能跑。"""
+    import sys
+    import types
+
+    module = types.ModuleType("fcntl")
+    module.LOCK_EX, module.LOCK_NB, module.LOCK_UN = 2, 4, 8
+    module.calls = []
+    module.flock = lambda fd, op: module.calls.append(op)
+    monkeypatch.setitem(sys.modules, "fcntl", module)
+    return module
+
+
+@pytest.fixture()
+def fake_msvcrt(monkeypatch):  # noqa: ANN001, ANN201
+    """假的 msvcrt：让 Windows 的 locking 分支在 Linux 上也能跑。"""
+    import sys
+    import types
+
+    module = types.ModuleType("msvcrt")
+    module.LK_NBLCK, module.LK_UNLCK = 2, 0
+    module.calls = []
+    module.locking = lambda fd, mode, size: module.calls.append(mode)
+    monkeypatch.setitem(sys.modules, "msvcrt", module)
+    return module
+
+
+@pytest.fixture()
+def fake_kernel32(monkeypatch):  # noqa: ANN001, ANN201
+    """假的 ctypes.windll.kernel32：让 Windows 进程探测在 Linux 上也能跑。"""
+    import ctypes
+    from types import SimpleNamespace
+
+    class Kernel:
+        def __init__(self) -> None:
+            self.handle = 1
+            self.exit_ok = True
+            self.exit_code = 259  # STILL_ACTIVE
+            self.closed: list[int] = []
+
+        def OpenProcess(self, _access, _inherit, _pid):  # noqa: ANN001, ANN202
+            return self.handle
+
+        def GetExitCodeProcess(self, _handle, ref):  # noqa: ANN001, ANN202
+            ref.value = self.exit_code
+            return self.exit_ok
+
+        def CloseHandle(self, handle: int) -> None:
+            self.closed.append(handle)
+
+    kernel = Kernel()
+    monkeypatch.setattr(
+        ctypes, "windll", SimpleNamespace(kernel32=kernel), raising=False
+    )
+    # ctypes.byref 返回的 CArgObject 不让写 .value，让假 kernel32 直接拿到 c_ulong
+    monkeypatch.setattr(ctypes, "byref", lambda obj: obj, raising=False)
+    return kernel
+
+
+def _open_as(monkeypatch, path, platform):  # noqa: ANN001, ANN202
+    """先按真实平台开好 fd（Path 已建好），再把 os.name 伪装过去。"""
+    fd = os.open(path, os.O_CREAT | os.O_RDWR)
+    monkeypatch.setattr(lockfile.os, "name", platform)
+    return fd
+
+
+def test_lock_fd_posix_uses_flock(monkeypatch, fake_fcntl, tmp_path) -> None:  # noqa: ANN001
+    fd = _open_as(monkeypatch, tmp_path / "p.lock", "posix")
+    try:
+        assert lockfile._lock_fd(fd) is True
+        lockfile._unlock_fd(fd)
+    finally:
+        os.close(fd)
+
+    assert fake_fcntl.calls == [
+        fake_fcntl.LOCK_EX | fake_fcntl.LOCK_NB,
+        fake_fcntl.LOCK_UN,
+    ]
+
+
+def test_lock_fd_posix_reports_contention(monkeypatch, fake_fcntl, tmp_path) -> None:  # noqa: ANN001
+    """别的进程占着锁时返回 False，而不是把异常抛给调用方。"""
+    fd = _open_as(monkeypatch, tmp_path / "p.lock", "posix")
+    fake_fcntl.flock = _boom
+    try:
+        assert lockfile._lock_fd(fd) is False
+        lockfile._unlock_fd(fd)  # 解锁失败也只是吞掉
+    finally:
+        os.close(fd)
+
+
+def test_lock_fd_windows_uses_msvcrt(monkeypatch, fake_msvcrt, tmp_path) -> None:  # noqa: ANN001
+    fd = _open_as(monkeypatch, tmp_path / "w.lock", "nt")
+    try:
+        assert lockfile._lock_fd(fd) is True
+        lockfile._unlock_fd(fd)
+    finally:
+        os.close(fd)
+
+    assert fake_msvcrt.calls == [fake_msvcrt.LK_NBLCK, fake_msvcrt.LK_UNLCK]
+
+
+def test_pid_alive_posix_kill_outcomes(monkeypatch) -> None:  # noqa: ANN001
+    """POSIX 分支的几种结果：存活 / 不存在 / 无权限 / 其余异常。"""
+    seen: list[tuple] = []
+
+    def alive(pid, sig):  # noqa: ANN001, ANN202
+        seen.append((pid, sig))
+
+    def raiser(exc):  # noqa: ANN001, ANN202
+        def kill(_pid, _sig):  # noqa: ANN001, ANN202
+            raise exc
+        return kill
+
+    monkeypatch.setattr(lockfile.os, "name", "posix")
+    monkeypatch.setattr(lockfile.os, "kill", alive)
+    assert lockfile.pid_alive(1234) is True
+    # 信号必须传 0：只做存在性探测，真发信号会杀掉目标进程
+    assert seen == [(1234, 0)]
+
+    monkeypatch.setattr(lockfile.os, "kill", raiser(ProcessLookupError()))
+    assert lockfile.pid_alive(1234) is False
+
+    monkeypatch.setattr(lockfile.os, "kill", raiser(PermissionError()))
+    assert lockfile.pid_alive(1234) is True
+
+    for exc in (ValueError(), OverflowError(), OSError("EINVAL")):
+        monkeypatch.setattr(lockfile.os, "kill", raiser(exc))
+        assert lockfile.pid_alive(1234) is False
+
+
+def test_pid_alive_windows_missing_handle(monkeypatch, fake_kernel32) -> None:  # noqa: ANN001
+    """OpenProcess 拿不到句柄 = 进程不存在。"""
+    fake_kernel32.handle = 0
+    monkeypatch.setattr(lockfile.os, "name", "nt")
+
+    assert lockfile.pid_alive(5678) is False
+    assert fake_kernel32.closed == []
+
+
+def test_pid_alive_windows_exit_code_query_failed(monkeypatch, fake_kernel32) -> None:  # noqa: ANN001
+    """查不到退出码时保守判为存活，宁可让 doctor 说「有人占着」。"""
+    fake_kernel32.exit_ok = False
+    monkeypatch.setattr(lockfile.os, "name", "nt")
+
+    assert lockfile.pid_alive(5678) is True
+    assert fake_kernel32.closed == [1]
+
+
+def test_pid_alive_windows_reads_exit_code(monkeypatch, fake_kernel32) -> None:  # noqa: ANN001
+    fake_kernel32.exit_code = 259  # STILL_ACTIVE
+    monkeypatch.setattr(lockfile.os, "name", "nt")
+    assert lockfile.pid_alive(5678) is True
+
+    fake_kernel32.exit_code = 0
+    assert lockfile.pid_alive(5678) is False
+    assert fake_kernel32.closed == [1, 1]
+
+
+def test_lock_still_maps_to_path_windows_shortcut(monkeypatch, tmp_path) -> None:  # noqa: ANN001
+    """Windows 上占用中的文件删不掉，这层竞态不存在，直接放行。"""
+    lock = lockfile.SingleInstance(tmp_path / "m.lock")
+    path = lock.path
+    fd = os.open(path, os.O_CREAT | os.O_RDWR)
+    monkeypatch.setattr(lockfile.os, "name", "nt")
+    try:
+        assert lock._lock_still_maps_to_path(fd) is True
+    finally:
+        os.close(fd)
+
+
+def test_lock_still_maps_to_path_detects_swap(monkeypatch, tmp_path) -> None:  # noqa: ANN001
+    """上锁后路径被别人换掉（旧持锁者 unlink 又新建）必须判失败。
+
+    判失败才不会出现两个持有者，这里不真去 unlink —— Windows 上打开着的文件
+    删不掉，换成「路径指向别的 inode / 路径已不存在」两种等价情形。
+    """
+    lock = lockfile.SingleInstance(tmp_path / "a.lock")
+    other = tmp_path / "b.lock"
+    other.write_text("", encoding="utf-8")
+    fd = os.open(lock.path, os.O_CREAT | os.O_RDWR)
+    monkeypatch.setattr(lockfile.os, "name", "posix")
+    try:
+        assert lock._lock_still_maps_to_path(fd) is True
+
+        lock.path = other  # 路径还在，但已经是另一个 inode
+        assert lock._lock_still_maps_to_path(fd) is False
+
+        lock.path = tmp_path / "gone.lock"  # 路径已不存在
+        assert lock._lock_still_maps_to_path(fd) is False
+    finally:
+        os.close(fd)
+
+
+def test_acquire_fails_when_lock_is_taken(monkeypatch, tmp_path) -> None:  # noqa: ANN001
+    lock = lockfile.SingleInstance(tmp_path / "t.lock")
+    monkeypatch.setattr(lockfile, "_lock_fd", lambda fd: False)
+
+    assert lock.acquire() is False
+    assert lock.acquired is False
+    assert lock._fd is None
+
+
+def test_acquire_fails_when_inode_changed(monkeypatch, tmp_path) -> None:  # noqa: ANN001
+    lock = lockfile.SingleInstance(tmp_path / "t.lock")
+    monkeypatch.setattr(lockfile, "_lock_fd", lambda fd: True)
+    monkeypatch.setattr(
+        lockfile.SingleInstance, "_lock_still_maps_to_path", lambda self, fd: False
+    )
+
+    assert lock.acquire() is False
+    assert lock.acquired is False
+
+
+def test_holder_pid_survives_read_error(monkeypatch, tmp_path) -> None:  # noqa: ANN001
+    lock = lockfile.SingleInstance(tmp_path / "r.lock")
+    lock.path.write_text(str(os.getpid()) + "\n", encoding="utf-8")
+    monkeypatch.setattr(lockfile.os, "read", _boom)
+
+    assert lock.holder_pid() is None
+
+
+def test_release_swallows_close_error(monkeypatch, tmp_path) -> None:  # noqa: ANN001
+    lock = lockfile.SingleInstance(tmp_path / "c.lock")
+    assert lock.acquire() is True
+    real_close = os.close
+    failed: list[int] = []
+
+    def close_then_fail(fd):  # noqa: ANN001, ANN202
+        real_close(fd)
+        # 只让第一次关失败；release 之后还会读锁文件里的 PID，那边也调 os.close，
+        # 一起抛出去就测不成「release 吞掉关闭异常」了。
+        if not failed:
+            failed.append(fd)
+            raise OSError("已经关过了")
+
+    monkeypatch.setattr(lockfile.os, "close", close_then_fail)
+
+    lock.release()  # 不该抛
+    assert lock.acquired is False
+    assert failed
+
+
+def test_safe_unlink_swallows_error(monkeypatch, tmp_path) -> None:  # noqa: ANN001
+    lock = lockfile.SingleInstance(tmp_path / "u.lock")
+    assert lock.acquire() is True
+    monkeypatch.setattr(type(lock.path), "unlink", _boom)
+
+    lock.release()  # 删不掉也只是留着，不该抛
+    assert lock.acquired is False
+
+
+def test_acquire_twice_in_same_process_is_allowed(tmp_path) -> None:  # noqa: ANN001
+    """同进程重复 acquire 拿到的是同一把内核锁，直接算成功。"""
+    lock = lockfile.SingleInstance(tmp_path / "again.lock")
+    assert lock.acquire() is True
+    try:
+        assert lock.acquire() is True
+    finally:
+        lock.release()
+
+
+def test_acquire_fails_when_touching_file_fails(monkeypatch, tmp_path) -> None:  # noqa: ANN001
+    """写 PID / 撑大文件失败时返回 False，不把 OSError 抛给调用方。"""
+    lock = lockfile.SingleInstance(tmp_path / "f.lock")
+    monkeypatch.setattr(lockfile.os, "ftruncate", _boom)
+
+    assert lock.acquire() is False
+    assert lock.acquired is False
+
+
+def test_is_held_by_other_process_on_missing_file(tmp_path) -> None:  # noqa: ANN001
+    """锁文件不存在 = 没人持锁，不是「未知」。"""
+    assert (
+        lockfile.SingleInstance(tmp_path / "nope.lock").is_held_by_other_process()
+        is False
+    )
+
+
+def test_is_held_by_other_process_when_file_is_free(tmp_path) -> None:  # noqa: ANN001
+    """文件在但没人上锁（上次是被 kill 掉的），也要放行。"""
+    path = tmp_path / "free.lock"
+    path.write_text("", encoding="utf-8")
+
+    assert lockfile.SingleInstance(path).is_held_by_other_process() is False
