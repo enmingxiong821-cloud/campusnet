@@ -268,17 +268,14 @@ def refresh(notifier: "Notifier | None", store: Any) -> "Notifier":
         return notifier or Notifier()
     if notifier is None:
         return current
-    same = (
-        current.url,
-        current.after_failures,
-        current.channel,
-        current.key,
-        current.events,
-    ) == (
-        notifier.url,
-        notifier.after_failures,
-        notifier.channel,
-        notifier.key,
-        notifier.events,
-    )
-    return notifier if same else current
+
+    def _cfg(instance: Any) -> tuple:
+        return (
+            getattr(instance, "url", ""),
+            getattr(instance, "after_failures", DEFAULT_AFTER_FAILURES),
+            getattr(instance, "channel", "generic"),
+            getattr(instance, "key", ""),
+            getattr(instance, "events", {"recovered", "failing"}),
+        )
+
+    return notifier if _cfg(current) == _cfg(notifier) else current
