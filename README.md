@@ -107,18 +107,48 @@ python utils\run.py serve      # Windows
 
 > Linux 下若中文显示乱码，先 `export PYTHONIOENCODING=utf-8`。
 
-### 方式三：单文件 EXE（Windows，免装 Python）
+### 方式三：单文件（免装 Python）
 
-到 [Releases](https://github.com/enmingxiong821-cloud/campusnet/releases/latest) 下载
-`campusnet-<版本>-windows-x64.exe`，放进一个固定目录后直接运行。它是同一个程序的
-单文件打包：
+到 [Releases](https://github.com/enmingxiong821-cloud/campusnet/releases/latest) 下载对应平台的文件，
+放进一个固定目录后直接运行。它们是同一个程序的单文件打包：
 
-- **不需要装 Python**；数据库、日志、控制台令牌都落在 `%LOCALAPPDATA%\campusnet`
-  （不会写进临时解包目录，重启配置不丢）；
-- 用法与命令行版一致：`campusnet.exe setup` 生成桌面快捷方式、`campusnet.exe serve`
-  起服务、`campusnet.exe doctor` 自检；
+| 平台 | 文件名 |
+|---|---|
+| Windows x64 | `campusnet-<版本>-windows-x64.exe` |
+| Linux x64 | `campusnet-<版本>-linux-x64` |
+| Linux arm64 | `campusnet-<版本>-linux-arm64` |
+| macOS arm64 | `campusnet-<版本>-macos-arm64` |
+
+- **不需要装 Python**；Windows 下数据库、日志、控制台令牌都落在
+  `%LOCALAPPDATA%\campusnet`（不会写进临时解包目录，重启配置不丢），
+  Linux/macOS 落在对应的数据目录；
+- 用法与命令行版一致：`campusnet setup` 生成桌面快捷方式、`campusnet serve`
+  起服务、`campusnet doctor` 自检；
 - 自己构建：`python -m pip install pyinstaller` 然后
   `python -m PyInstaller packaging/campusnet.spec --noconfirm`。
+
+Linux/macOS 下载后需要 `chmod +x`，首次运行可能要在系统设置里允许这个来源的程序。
+
+### 方式四：Docker（Linux 服务器 / 软路由 / NAS）
+
+```
+docker compose up -d
+```
+
+镜像里除了 CPython 就只有仓库文件——运行时是纯标准库，没有第三方依赖那一层，
+也就没有依赖锁过期这回事。账号、事件、控制台令牌都在一个卷里（`database/`），
+`docker compose down` 不会丢。
+
+默认只把控制台绑在 `127.0.0.1:2268`：令牌是唯一门禁，直接映射到局域网
+等于把入口挂出去。手机要连就用 `docker-compose.tailscale.yml`，走 tailnet
+而不开局域网端口。
+
+有两件事容器里做不了，需要的话别用容器：
+
+- **远程关机**——容器里 `poweroff` 关掉的是容器，不是宿主机。这个能力用宿主机上的
+  系统级服务（见「步骤五」）。
+- **发 WOL 魔术包**——广播出不了 docker 网桥，得改成 `network_mode: host`
+  （`docker-compose.yml` 末尾有现成的写法）。
 
 ---
 
@@ -276,9 +306,19 @@ Web 控制台的「设置」页也有对应开关。三种系统的落地载体�
 | Linux | systemd 用户单元 | 无 systemd 时退化为 XDG autostart |
 | macOS | LaunchAgent plist | `RunAtLoad`，不设 `KeepAlive` |
 
-启动项写入用户级位置；是否允许注册取决于系统策略。这里实现的是**用户登录自启动**，
-不是三平台统一的无需登录开机服务。Linux 用户会话自启动不要求 linger；
-需要无需登录运行时可另行配置 `loginctl enable-linger $USER`，权限取决于系统策略。
+启动项写入用户级位置；是否允许注册取决于系统策略。上面这些实现的是**用户登录自启动**。
+
+需要**无需登录**就跑（机器重启后停在登录界面也要完成认证，宿舍台式机远程使用就是这个
+场景），用 `packaging/` 下的系统级服务文件：
+
+| 系统 | 文件 | 安装方式 |
+|---|---|---|
+| Linux | `packaging/campusnet.service` | 装到 `/etc/systemd/system/`，`systemctl enable --now campusnet` |
+| macOS | `packaging/com.campusnet.daemon.plist` | 装到 `/Library/LaunchDaemons/`，`launchctl load -w` |
+
+两份文件的开头都写了逐步命令（含如何建独立账号、文件该放哪）。它们默认用非 root 账号
+运行；远程开关机需要额外授权，文件末尾给了最小化的 polkit 规则。Linux 用户会话自启动
+本身不要求 linger，走系统级单元也不需要它。
 
 安装前会干跑一次「解释器 + 导入本体」自检，装不上时如实报失败，而不是留下一个
 起不来的启动项。`status` 会区分「已写入」与「在本机是否会生效」——没有桌面会话的
