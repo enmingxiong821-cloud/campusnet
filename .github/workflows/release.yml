@@ -111,11 +111,32 @@ jobs:
             dist/*.zip.sha256
           retention-days: 30
 
-  build-exe:
-    name: 单文件 EXE（Windows）
+  build-binary:
+    name: 单文件 ${{ matrix.target }}
     needs: verify
-    if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: windows-latest
+    # tag 出正式产物；workflow_dispatch 用来在打 tag 之前先把四个平台各跑一遍，
+    # 免得 Release 已经发出去了才发现某个平台编不出来。
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: windows-x64
+            binary: dist/campusnet.exe
+          - os: ubuntu-24.04
+            target: linux-x64
+            binary: dist/campusnet
+          # arm64 标签取自 actions/runner-images 的 README（`ubuntu-24.04-arm`），
+          # 镜像名是 ubuntu-24.04-arm64，两者不同，别按镜像名写 runs-on。
+          - os: ubuntu-24.04-arm
+            target: linux-arm64
+            binary: dist/campusnet
+          # macos-14 在 runner-images 里已标 deprecated，arm64 现用 macos-15。
+          - os: macos-15
+            target: macos-arm64
+            binary: dist/campusnet
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
@@ -126,27 +147,50 @@ jobs:
       - name: 安装 PyInstaller
         run: python -m pip install pyinstaller
 
-      - name: 构建单文件 exe
+      - name: 构建单文件
         run: python -m PyInstaller packaging/campusnet.spec --noconfirm
 
-      - name: 冒烟验证（版本 + 自检）
+      - name: 冒烟验证
         env:
           PYTHONIOENCODING: utf-8
+        shell: bash
         run: |
-          dist\campusnet.exe --version
-          dist\campusnet.exe profiles --validate
-          dist\campusnet.exe doctor --no-probe
+          set -e
+          BIN="${{ matrix.binary }}"
+          test -x "$BIN" || test -f "$BIN"
+          "$BIN" --version
+          # 冻结后最容易静默出错的不是代码而是数据：profiles 目录没打进去，
+          # 程序一声不响地变成「0 条规则」。必须断言确实读到规则了。
+          "$BIN" profiles --validate | tee /tmp/profiles.txt
+          grep -q '^\[OK  \]' /tmp/profiles.txt
+          # doctor 不判退出码：它的返回码反映的是这台机器的用户状态
+          # （没建过账号就是 FAIL），不是构建是否成功。
+          "$BIN" doctor --no-probe || true
 
-      - name: 上传 exe
-        uses: actions/upload-artifact@v4
+      - name: 收拢产物
+        shell: bash
+        run: |
+          set -e
+          VERSION="${GITHUB_REF_NAME#v}"
+          mkdir -p out
+          DEST="out/campusnet-${VERSION}-${{ matrix.target }}"
+          cp "${{ matrix.binary }}" "$DEST"
+          if [ "${{ matrix.target }}" = "windows-x64" ]; then
+            mv "$DEST" "$DEST.exe"
+          else
+            chmod +x "$DEST"
+          fi
+          ls -la out
+
+      - uses: actions/upload-artifact@v4
         with:
-          name: campusnet-exe
-          path: dist/campusnet.exe
+          name: campusnet-bin-${{ matrix.target }}
+          path: out/*
           retention-days: 30
 
   release:
     name: 创建 Release
-    needs: [verify, build-exe]
+    needs: [verify, build-binary]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     steps:
@@ -157,21 +201,32 @@ jobs:
           name: campusnet-release
           path: dist
 
+      # pattern 只取单文件产物；merge-multiple 让四个平台的二进制平铺到一个目录，
+      # 免得 gh release create 还要逐个展开子目录。
       - uses: actions/download-artifact@v4
         with:
-          name: campusnet-exe
-          path: dist/exe
+          pattern: campusnet-bin-*
+          path: dist/bin
+          merge-multiple: true
 
       - name: 发布
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -e
+          ls -la dist/bin
           VERSION="${GITHUB_REF_NAME#v}"
-          mv dist/exe/campusnet.exe "dist/campusnet-${VERSION}-windows-x64.exe"
+          # 少一个平台就当场失败：Release 一旦发出去就很难收回，
+          # 与其发一份残缺的，不如红在这里。
+          for target in windows-x64 linux-x64 linux-arm64 macos-arm64; do
+            if ! ls "dist/bin/campusnet-${VERSION}-${target}"* >/dev/null 2>&1; then
+              echo "::error::缺少 ${target} 的单文件产物"
+              exit 1
+            fi
+          done
           gh release create "$GITHUB_REF_NAME" \
-            "dist/campusnet-${VERSION}.zip" \
-            "dist/campusnet-${VERSION}.zip.sha256" \
-            "dist/campusnet-${VERSION}-windows-x64.exe" \
+            dist/campusnet-*.zip \
+            dist/campusnet-*.zip.sha256 \
+            dist/bin/* \
             --title "校园网自连 v${VERSION}" \
             --generate-notes
