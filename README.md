@@ -139,6 +139,11 @@ docker compose up -d
 也就没有依赖锁过期这回事。账号、事件、控制台令牌都在一个卷里（`database/`），
 `docker compose down` 不会丢。
 
+> **容器里那份数据是独立的一份。** 卷名叫 `campusnet_campusnet-data`，和你直接在
+> 这台机器上跑 `python utils/run.py` 用的仓库 `database/` 是两个地方。之前用命令行
+> 或控制台建过号的，`docker compose up -d` 之后控制台里是空的，得重新建号——
+> 容器读不到宿主机那份。
+
 默认只把控制台绑在 `127.0.0.1:2268`：令牌是唯一门禁，直接映射到局域网
 等于把入口挂出去。手机要连就用 `docker-compose.tailscale.yml`，走 tailnet
 而不开局域网端口。
