@@ -1,0 +1,36 @@
+name: 故障报告
+description: 服务不工作、连不上、接口报错等
+title: "[故障] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        请先跑一次自检并粘贴输出，能省掉来回确认环境的往返。
+  - type: textarea
+    id: doctor
+    attributes:
+      label: doctor 输出
+      description: 运行 `python utils/run.py doctor --json` 并粘贴完整输出
+      placeholder: '{"version": "...", ...}'
+    validations:
+      required: true
+  - type: textarea
+    id: symptom
+    attributes:
+      label: 现象
+      description: 期望发生什么、实际发生了什么
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      placeholder: |
+        1. ...
+        2. ...
+  - type: input
+    id: os
+    attributes:
+      label: 系统
+      placeholder: Windows 11 / Ubuntu 24.04 / macOS 15

@@ -1,0 +1,28 @@
+name: 本校规则投稿
+description: 给新的校园网门户提一条适配规则
+title: "[规则] "
+labels: ["rule"]
+body:
+  - type: textarea
+    id: fixture
+    attributes:
+      label: 脱敏 fixture
+      description: |
+        贴 `python utils/run.py portal-report --url <门户登录页>` 生成的脱敏 HTML，
+        或 `--replay` 复现的片段。**不要**贴真实学号、口令或内网地址。
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: info
+    attributes:
+      label: 学校与门户信息
+      description: 学校名、门户地址、建议登录方式（http / browser / srun）
+    validations:
+      required: true
+  - type: textarea
+    id: rule
+    attributes:
+      label: 规则 JSON（如有）
+      description: 你已经试出来的规则文件内容（参照 project/backend/campusnet/profiles/）
+      render: shell
