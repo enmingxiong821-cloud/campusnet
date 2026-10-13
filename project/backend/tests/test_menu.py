@@ -221,3 +221,180 @@ def test_guided_add_without_candidates(monkeypatch) -> None:  # noqa: ANN001
 
     assert menu_mod.guided_add(_feed([]), out.append) == 1
     assert any("没发现可用门户" in line for line in out)
+
+
+# ---------------------------------------------- 中断与失败分支（F2）
+
+
+def test_relaunch_elevated_without_powershell(monkeypatch) -> None:  # noqa: ANN001
+    """没有 PowerShell 时返回失败码，不能让用户看到 traceback。"""
+    monkeypatch.setattr(menu_mod.shutil, "which", lambda _name: None)
+
+    assert menu_mod._relaunch_elevated(["bootstart", "install"]) == 1
+
+
+def test_relaunch_elevated_runs_and_reports(monkeypatch) -> None:  # noqa: ANN001
+    calls: list[list[str]] = []
+    monkeypatch.setattr(menu_mod.shutil, "which", lambda _name: "powershell")
+    monkeypatch.setattr(
+        menu_mod.subprocess, "run", lambda args, **kwargs: calls.append(args)
+    )
+
+    assert menu_mod._relaunch_elevated(["power", "off"]) == 0
+    assert calls and "RunAs" in " ".join(calls[0])
+
+
+def test_relaunch_elevated_swallows_oserror(monkeypatch) -> None:  # noqa: ANN001
+    monkeypatch.setattr(menu_mod.shutil, "which", lambda _name: "powershell")
+
+    def boom(*args, **kwargs):
+        raise OSError("spawn failed")
+
+    monkeypatch.setattr(menu_mod.subprocess, "run", boom)
+
+    assert menu_mod._relaunch_elevated(["power", "off"]) == 1
+
+
+def test_register_bootstart_aborts_on_interrupt(monkeypatch) -> None:  # noqa: ANN001
+    """Ctrl+C / 输入流结束等同于取消，返回 2 而不是抛出去。"""
+
+    def ask(_prompt: str) -> str:
+        raise EOFError
+
+    assert menu_mod.register_bootstart(ask, lambda *_: None) == 2
+
+
+def test_guided_add_reports_discovery_failure(monkeypatch) -> None:  # noqa: ANN001
+    from campusnet import discovery as discovery_mod
+
+    def boom(**kwargs):
+        raise RuntimeError("扫描失败")
+
+    monkeypatch.setattr(discovery_mod, "discover", boom)
+    out: list[str] = []
+
+    assert menu_mod.guided_add(_feed([]), out.append) == 1
+    assert any("发现问题失败" in line and "扫描失败" in line for line in out)
+
+
+def _fake_discovery(monkeypatch, candidate: dict) -> None:  # noqa: ANN001
+    from campusnet import discovery as discovery_mod
+
+    monkeypatch.setattr(
+        discovery_mod, "discover", lambda **kwargs: {"candidates": [candidate]}
+    )
+    monkeypatch.setattr(
+        discovery_mod,
+        "to_account_fields",
+        lambda item: {"login_mode": "http"} if isinstance(item, dict) else {},
+    )
+
+
+def test_guided_add_cancels_without_username(monkeypatch, store) -> None:  # noqa: ANN001
+    _fake_discovery(monkeypatch, {"vendor": "drcom", "url": "http://10.0.0.1/login"})
+    out: list[str] = []
+
+    # 备注名用默认、账号留空
+    assert menu_mod.guided_add(_feed(["", ""]), out.append) == 2
+    assert any("没填账号" in line for line in out)
+
+
+def test_guided_add_cancels_without_password(monkeypatch, store) -> None:  # noqa: ANN001
+    import getpass
+
+    _fake_discovery(monkeypatch, {"vendor": "srun", "url": "http://10.0.0.1/login"})
+    monkeypatch.setattr(getpass, "getpass", lambda _prompt: "")
+    out: list[str] = []
+
+    assert menu_mod.guided_add(_feed(["", "20240001"]), out.append) == 2
+    assert any("没填密码" in line for line in out)
+
+
+def test_guided_add_accepts_object_candidate(monkeypatch, store) -> None:  # noqa: ANN001
+    """候选既可能是 dict，也可能是带 as_dict() 的对象。"""
+    import getpass
+
+    class Candidate:
+        def as_dict(self) -> dict:
+            return {"vendor": "h3c", "url": "http://10.0.0.1/login"}
+
+    _fake_discovery(monkeypatch, Candidate())  # type: ignore[arg-type]
+    monkeypatch.setattr(getpass, "getpass", lambda _prompt: "pw")
+
+    assert menu_mod.guided_add(_feed(["宿舍", "20240001"]), lambda *_: None) == 0
+
+
+def test_install_browser_runs_installer(monkeypatch) -> None:  # noqa: ANN001
+    from campusnet import setup_flow
+
+    monkeypatch.setattr(setup_flow, "browser_ready", lambda: False)
+    monkeypatch.setattr(
+        setup_flow, "install_browser_deps", lambda: (True, "装好了")
+    )
+    out: list[str] = []
+
+    assert menu_mod.install_browser(_feed(["y"]), out.append) == 0
+    assert any("装好了" in line for line in out)
+
+
+def test_install_browser_reports_failure(monkeypatch) -> None:  # noqa: ANN001
+    from campusnet import setup_flow
+
+    monkeypatch.setattr(setup_flow, "browser_ready", lambda: False)
+    monkeypatch.setattr(
+        setup_flow, "install_browser_deps", lambda: (False, "下载失败")
+    )
+    out: list[str] = []
+
+    assert menu_mod.install_browser(_feed(["y"]), out.append) == 1
+    assert any("下载失败" in line for line in out)
+
+
+def test_run_menu_returns_zero_on_interrupt() -> None:  # noqa: ANN001
+    """菜单提示处按 Ctrl+C / 输入结束，应干净退出而不是抛栈。"""
+
+    def ask(_prompt: str = "") -> str:
+        raise KeyboardInterrupt
+
+    assert menu_mod.run_menu(ask, lambda *_: None) == 0
+
+
+def test_run_menu_dispatches_handler(monkeypatch) -> None:  # noqa: ANN001
+    """带 handler 的条目走 handler，不经过 CLI。"""
+    calls: list[int] = []
+
+    class FakeItem:
+        label = "假条目"
+        hint = ""
+        section = ""
+        args = ()
+        handler = staticmethod(lambda ask, out: calls.append(1) or 0)
+
+    monkeypatch.setattr(menu_mod, "ITEMS", (FakeItem(),))
+
+    assert menu_mod.run_menu(_feed(["1", "0"]), lambda *_: None) == 0
+    assert calls == [1]
+
+
+def test_run_menu_returns_zero_when_return_prompt_interrupted(
+    monkeypatch,
+) -> None:  # noqa: ANN001
+    """执行完动作、等「按回车返回」时输入结束，也要干净退出。"""
+
+    class FakeItem:
+        label = "假条目"
+        hint = ""
+        section = ""
+        args = ()
+        handler = staticmethod(lambda ask, out: 0)
+
+    monkeypatch.setattr(menu_mod, "ITEMS", (FakeItem(),))
+    answers = iter(["1"])
+
+    def ask(_prompt: str = "") -> str:
+        try:
+            return next(answers)
+        except StopIteration:
+            raise KeyboardInterrupt from None
+
+    assert menu_mod.run_menu(ask, lambda *_: None) == 0
