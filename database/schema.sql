@@ -60,6 +60,15 @@ CREATE TABLE IF NOT EXISTS devices (
     created_at  TEXT    NOT NULL DEFAULT (datetime('now','localtime'))
 );
 
+CREATE TABLE IF NOT EXISTS pair_codes (
+    code_hash   TEXT    PRIMARY KEY,
+    created_at  TEXT    NOT NULL DEFAULT (datetime('now','localtime')),
+    expires_at  TEXT    NOT NULL,
+    used_at     TEXT,
+    failures    INTEGER NOT NULL DEFAULT 0,
+    user_agent  TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_events_ts     ON events (ts DESC);
 CREATE INDEX IF NOT EXISTS idx_events_acc    ON events (account_id, ts DESC);
 CREATE INDEX IF NOT EXISTS idx_accounts_name ON accounts (name);

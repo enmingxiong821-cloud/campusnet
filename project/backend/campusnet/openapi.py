@@ -53,6 +53,8 @@ _SUMMARIES: dict[tuple[str, str], str] = {
     ("POST", "/api/devices"): "新增可唤醒设备",
     ("DELETE", "/api/devices/{id}"): "删除可唤醒设备",
     ("POST", "/api/devices/{id}/wake"): "一键唤醒设备",
+    ("POST", "/api/pair"): "生成一次性扫码配对码",
+    ("POST", "/api/pair/claim"): "凭配对码换取控制台会话",
     ("GET", "/api/auth/status"): "控制台认证状态",
     ("POST", "/api/auth/login"): "用令牌登录控制台",
     ("POST", "/api/auth/logout"): "退出控制台登录",

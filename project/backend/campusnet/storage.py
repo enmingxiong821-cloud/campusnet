@@ -15,7 +15,7 @@ from . import crypto
 from .paths import SCHEMA_PATH, db_path as db_path_default
 
 _WRITE_LOCK = threading.Lock()
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 STATE_UNKNOWN = "unknown"
 STATE_ONLINE = "online"
@@ -480,6 +480,50 @@ class Store:
         with _WRITE_LOCK, self._connection() as conn:
             cur = conn.execute("DELETE FROM devices WHERE id = ?", (device_id,))
             return cur.rowcount > 0
+
+    # ---------- pair codes ----------
+    def add_pair_code(self, code_hash: str, expires_at: str) -> None:
+        """存配对码哈希（不存明文）。expires_at 形如 YYYY-MM-DD HH:MM:SS。"""
+        with _WRITE_LOCK, self._connection() as conn:
+            conn.execute(
+                "INSERT INTO pair_codes (code_hash, expires_at) VALUES (?, ?)",
+                (code_hash, expires_at),
+            )
+
+    def get_pair_code(self, code_hash: str) -> dict[str, Any] | None:
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM pair_codes WHERE code_hash = ?", (code_hash,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def mark_pair_code_used(self, code_hash: str, user_agent: str) -> None:
+        with _WRITE_LOCK, self._connection() as conn:
+            conn.execute(
+                "UPDATE pair_codes SET used_at = datetime('now','localtime'), "
+                "user_agent = ? WHERE code_hash = ?",
+                (user_agent, code_hash),
+            )
+
+    def record_pair_failure(self, code_hash: str) -> int:
+        """记一次失败并返回当前失败次数（用于 3 次锁定）。"""
+        with _WRITE_LOCK, self._connection() as conn:
+            conn.execute(
+                "UPDATE pair_codes SET failures = failures + 1 WHERE code_hash = ?",
+                (code_hash,),
+            )
+            row = conn.execute(
+                "SELECT failures FROM pair_codes WHERE code_hash = ?", (code_hash,)
+            ).fetchone()
+        return int(row["failures"]) if row else 0
+
+    def purge_pair_codes(self) -> int:
+        """删除过期配对码，避免表无限增长。"""
+        with _WRITE_LOCK, self._connection() as conn:
+            cur = conn.execute(
+                "DELETE FROM pair_codes WHERE expires_at < datetime('now','localtime')"
+            )
+            return cur.rowcount or 0
 
 
 def accounts_to_rows(accounts: Iterable[Account]) -> list[dict[str, Any]]:
