@@ -600,6 +600,26 @@ def routes_system(store: Store) -> dict[tuple[str, str], Handler]:
         )
         h._send(HTTPStatus.OK, {"ok": True, "action": action, "command": command})
 
+    def doctor_power(_: dict[str, Any], h: ApiHandler) -> None:
+        """电源体检（只读）：远程开关机前置条件逐项结论。"""
+        from . import powerprep as powerprep_mod
+
+        items = powerprep_mod.run(fix=False)
+        h._send(HTTPStatus.OK, {"ok": True, "items": [i.as_dict() for i in items]})
+
+    def doctor_power_fix(_: dict[str, Any], h: ApiHandler) -> None:
+        """批量修复可自动化的项；与电源动作一样要求 confirm，走同源 + 会话保护。"""
+        from . import powerprep as powerprep_mod
+
+        payload = h._read_body()
+        if not payload.get("confirm"):
+            raise ApiError(
+                HTTPStatus.BAD_REQUEST, "修复系统设置需要显式确认（confirm=true）"
+            )
+        items = powerprep_mod.run(fix=True)
+        store.add_event("电源体检执行了自动修复", level="warning", stage="power")
+        h._send(HTTPStatus.OK, {"ok": True, "items": [i.as_dict() for i in items]})
+
     return {
         ("GET", "/api/health"): health,
         ("GET", "/healthz"): healthz,
@@ -610,6 +630,8 @@ def routes_system(store: Store) -> dict[tuple[str, str], Handler]:
         ("POST", "/api/bootstart/uninstall"): bootstart_uninstall,
         ("POST", "/api/power/{action}"): power_action,
         ("GET", "/api/power/info"): power_info,
+        ("GET", "/api/doctor/power"): doctor_power,
+        ("POST", "/api/doctor/power/fix"): doctor_power_fix,
     }
 
 

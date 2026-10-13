@@ -369,6 +369,49 @@ def test_power_action_reboot_and_unknown(api, monkeypatch) -> None:  # noqa: ANN
     assert bad_data["ok"] is False
 
 
+def test_doctor_power_lists_items(api, monkeypatch) -> None:  # noqa: ANN001
+    from campusnet import powerprep
+
+    monkeypatch.setattr(
+        "campusnet.powerprep.run",
+        lambda fix=False, yes=False, plat=None: [
+            powerprep.PowerItem("快速启动", powerprep.OK, "已关闭")
+        ],
+    )
+
+    status, data = call(f"{api}/api/doctor/power")
+
+    assert status == 200
+    assert data["ok"] is True
+    assert data["items"][0]["name"] == "快速启动"
+    assert data["items"][0]["status"] == "ok"
+
+
+def test_doctor_power_fix_requires_confirm(api, monkeypatch) -> None:  # noqa: ANN001
+    calls: list = []
+    monkeypatch.setattr("campusnet.powerprep.run", lambda **k: calls.append(k) or [])
+
+    status, data = call(f"{api}/api/doctor/power/fix", "POST", {})
+
+    assert status == 400
+    assert calls == []
+    assert "confirm" in data["error"]
+
+
+def test_doctor_power_fix_executes(api, monkeypatch) -> None:  # noqa: ANN001
+    calls: list = []
+    monkeypatch.setattr(
+        "campusnet.powerprep.run",
+        lambda fix=False, yes=False, plat=None: calls.append({"fix": fix, "yes": yes}) or [],
+    )
+
+    status, data = call(f"{api}/api/doctor/power/fix", "POST", {"confirm": True})
+
+    assert status == 200
+    assert data["ok"] is True
+    assert calls == [{"fix": True, "yes": False}]
+
+
 def test_uninstall_consumes_body_on_persistent_connection(api, monkeypatch):
     import http.client
 

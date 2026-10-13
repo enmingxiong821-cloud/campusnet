@@ -44,6 +44,8 @@ _SUMMARIES: dict[tuple[str, str], str] = {
     ("POST", "/api/bootstart/uninstall"): "移除开机自启动",
     ("GET", "/api/power/info"): "远程开机需要的信息（网卡 MAC 与唤醒命令）",
     ("POST", "/api/power/{action}"): "远程关机或重启（需 confirm）",
+    ("GET", "/api/doctor/power"): "电源体检（远程开关机前置条件）",
+    ("POST", "/api/doctor/power/fix"): "批量修复可自动化的电源体检项（需 confirm）",
     ("GET", "/api/auth/status"): "控制台认证状态",
     ("POST", "/api/auth/login"): "用令牌登录控制台",
     ("POST", "/api/auth/logout"): "退出控制台登录",
