@@ -1,6 +1,11 @@
-# 要分发到 Linux 的配置文件强制 LF。
+# 要分发到 Linux/macOS 的配置文件强制 LF。
 #
 # 本仓库在 Windows 上开发，core.autocrlf=true 会在检出时把换行改成 CRLF，
 # 而 systemd 单元文件里的 CR 可能被当成值的一部分。与其去赌目标平台是否
 # 容忍，不如让它在仓库里就一直是 LF。
+#
+# plist 严格说容忍 CRLF（XML 本来就允许），但两份配置文件混着两种换行没有
+# 任何好处，而且 test_service_files.py 会断言两者都是 LF——漏掉这一行的话，
+# 那个测试会在 Windows 检出上假红。
 packaging/*.service text eol=lf
+packaging/*.plist   text eol=lf
