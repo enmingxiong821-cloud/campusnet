@@ -31,14 +31,10 @@ def _relaunch_elevated(args: list[str]) -> int:
     if not exe:
         return 1
     from .bootstart import launch_command_line
+    from .shortcuts import elevate_command_line
 
-    inner = launch_command_line(args)
-    quoted_inner = "'" + inner.replace("'", "''") + "'"
-    script = (
-        "Start-Process -Verb RunAs -FilePath 'cmd.exe' -ArgumentList "
-        + quoted_inner
-        + " -Wait"
-    )
+    # -Wait：等提权后的那次注册真正跑完，菜单里才能紧接着报告结果。
+    script = elevate_command_line(launch_command_line(args)) + " -Wait"
     try:
         subprocess.run([exe, "-NoProfile", "-Command", script], timeout=600)
     except (OSError, subprocess.SubprocessError):

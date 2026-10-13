@@ -79,6 +79,19 @@ def _ps_quote(text: str) -> str:
     return "'" + str(text).replace("'", "''") + "'"
 
 
+def elevate_command_line(arguments: str) -> str:
+    """把一条命令行包成「以管理员身份运行」的 PowerShell 片段（执行时弹 UAC）。
+
+    两处要用：生成自我提权的快捷方式（写成 .lnk 的参数），以及菜单里当场提权重跑。
+    引号转义只留这一份——两边各转一次，就容易有一边悄悄转错，
+    而转错的后果是提权之后跑的不是原来那条命令，在界面上很难看出来。
+    """
+    return (
+        "Start-Process -Verb RunAs -FilePath 'cmd.exe' -ArgumentList "
+        + _ps_quote(arguments)
+    )
+
+
 def _run_powershell(script: str) -> tuple[bool, str]:
     exe = shutil.which("powershell") or shutil.which("pwsh")
     if not exe:
@@ -146,10 +159,7 @@ def create_windows_elevated(
     ]
     for item in shortcuts:
         command = launch_command_line(item.args)
-        inner = (
-            "Start-Process -Verb RunAs -FilePath 'cmd.exe' -ArgumentList "
-            + _ps_quote("/k " + command)
-        )
+        inner = elevate_command_line("/k " + command)
         script.append(
             "$s = $W.CreateShortcut([IO.Path]::Combine($dir, "
             + _ps_quote(item.name + ".lnk")
