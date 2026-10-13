@@ -6,6 +6,7 @@ import re
 import threading
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Callable
 
 from . import portal, probe as probe_mod, wifi as wifi_mod
@@ -272,6 +273,12 @@ class Monitor:
                         f"监控循环异常: {exc}", level="error", stage="monitor"
                     )
                     ok = False
+                try:
+                    self._dispatch_wake_plans()
+                except Exception as exc:  # noqa: BLE001 - 唤醒调度异常不污染重连节奏
+                    self.store.add_event(
+                        f"唤醒计划调度异常: {exc}", level="error", stage="wake"
+                    )
                 self._stop.wait(self._next_delay(started_at, ok))
         finally:
             self.running_loop = False
@@ -289,6 +296,41 @@ class Monitor:
         if not all_ok:
             return float(self.retry_interval)
         return float(self.interval)
+
+    def _dispatch_wake_plans(self) -> None:
+        """到点的唤醒计划发 WOL；每天每档最多一次，单条失败只记事件不打断监控。
+
+        由 _loop 每轮顺带调用；与 check_all 的 self._lock 无关，不共享锁，
+        这样唤醒调度再慢也不会阻塞或死锁掉探活/重连。
+        """
+        from . import wakeplan
+
+        plans = self.store.list_wake_plans(enabled_only=True)
+        if not plans:
+            return
+        now = datetime.now()
+        for plan in plans:
+            schedule = wakeplan.parse_schedule(plan.schedule)
+            if schedule is None:
+                continue
+            last_run = wakeplan.parse_last_run(plan.last_run_at)
+            if not wakeplan.should_fire(schedule, now, last_run):
+                continue
+            try:
+                wakeplan.send_wol(plan.mac, plan.broadcast, plan.port)
+            except Exception as exc:  # noqa: BLE001 - 单条失败不影响其它计划
+                self.store.add_event(
+                    f"唤醒计划 {plan.name} 发送失败：{type(exc).__name__}: {exc}",
+                    level="warning",
+                    stage="wake",
+                )
+                continue
+            self.store.mark_wake_plan_run(plan.id, now)
+            self.store.add_event(
+                f"唤醒计划 {plan.name} 已发送 WOL 到 {plan.mac}",
+                level="info",
+                stage="wake",
+            )
 
     def _check_network_identity(self, account: Account) -> None:
         """SSID 身份检查，结果只记事件，不阻断流程。

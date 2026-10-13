@@ -11,7 +11,9 @@ from campusnet.storage import (
     STATE_FAILED,
     STATE_ONLINE,
     Account,
+    Device,
     Store,
+    WakePlan,
     accounts_to_rows,
 )
 
@@ -276,3 +278,47 @@ def test_newer_database_version_is_rejected(tmp_path):
             conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
             == []
         )
+
+
+def test_wake_plan_roundtrip(store: Store) -> None:
+    new_id = store.add_wake_plan(
+        WakePlan(name="宿舍台式机", mac="AA:BB:CC:DD:EE:FF", schedule="07:30")
+    )
+
+    plans = store.list_wake_plans()
+    assert [p.id for p in plans] == [new_id]
+    loaded = plans[0]
+    assert loaded.name == "宿舍台式机"
+    assert loaded.mac == "AA:BB:CC:DD:EE:FF"
+    assert loaded.enabled is True
+    assert loaded.last_run_at is None
+
+
+def test_wake_plan_delete_and_mark_run(store: Store) -> None:
+    from datetime import datetime
+
+    new_id = store.add_wake_plan(
+        WakePlan(name="p", mac="AA:BB:CC:DD:EE:FF", schedule="07:30")
+    )
+
+    store.mark_wake_plan_run(new_id, datetime(2026, 10, 13, 7, 30))
+    loaded = store.list_wake_plans()[0]
+    assert loaded.last_run_at == "2026-10-13 07:30:00"
+
+    assert store.delete_wake_plan(new_id) is True
+    assert store.delete_wake_plan(new_id) is False
+    assert store.list_wake_plans() == []
+
+
+def test_device_roundtrip_and_delete(store: Store) -> None:
+    new_id = store.add_device(
+        Device(name="树莓派", mac="11:22:33:44:55:66", note="宿舍跳板")
+    )
+
+    devices = store.list_devices()
+    assert devices[0].id == new_id
+    assert devices[0].name == "树莓派"
+    assert devices[0].note == "宿舍跳板"
+
+    assert store.delete_device(new_id) is True
+    assert store.list_devices() == []

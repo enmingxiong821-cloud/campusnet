@@ -412,6 +412,68 @@ def test_doctor_power_fix_executes(api, monkeypatch) -> None:  # noqa: ANN001
     assert calls == [{"fix": True, "yes": False}]
 
 
+def test_wake_plans_crud(api) -> None:  # noqa: ANN001
+    status, data = call(
+        f"{api}/api/wake-plans",
+        "POST",
+        {"name": "每天开机", "mac": "AA:BB:CC:DD:EE:FF", "schedule": "07:30"},
+    )
+    assert status == 201
+    plan_id = data["id"]
+
+    status, data = call(f"{api}/api/wake-plans")
+    assert status == 200
+    assert len(data["plans"]) == 1
+    assert data["plans"][0]["name"] == "每天开机"
+
+    status, data = call(f"{api}/api/wake-plans/{plan_id}", "DELETE")
+    assert status == 200
+
+    status, data = call(f"{api}/api/wake-plans")
+    assert data["plans"] == []
+
+
+def test_wake_plan_validation(api) -> None:  # noqa: ANN001
+    status, _ = call(
+        f"{api}/api/wake-plans",
+        "POST",
+        {"name": "x", "mac": "bad-mac", "schedule": "07:30"},
+    )
+    assert status == 400
+
+    status, _ = call(
+        f"{api}/api/wake-plans",
+        "POST",
+        {"name": "x", "mac": "AA:BB:CC:DD:EE:FF", "schedule": "25:00"},
+    )
+    assert status == 400
+
+
+def test_devices_crud_and_wake(api, monkeypatch) -> None:  # noqa: ANN001
+    monkeypatch.setattr(
+        "campusnet.power.wake",
+        lambda mac, broadcast="255.255.255.255", port=9: f"{broadcast}:{port}",
+    )
+
+    status, data = call(
+        f"{api}/api/devices",
+        "POST",
+        {"name": "树莓派", "mac": "11:22:33:44:55:66", "note": "跳板"},
+    )
+    assert status == 201
+    device_id = data["id"]
+
+    status, data = call(f"{api}/api/devices")
+    assert len(data["devices"]) == 1
+
+    status, data = call(f"{api}/api/devices/{device_id}/wake", "POST", {})
+    assert status == 200
+    assert data["ok"] is True
+
+    status, data = call(f"{api}/api/devices/{device_id}", "DELETE")
+    assert status == 200
+
+
 def test_uninstall_consumes_body_on_persistent_connection(api, monkeypatch):
     import http.client
 
