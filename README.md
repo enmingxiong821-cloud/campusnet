@@ -14,8 +14,38 @@
 
 ---
 
+## 它能做什么、不能做什么
+
+先把责任边界说清楚，能省掉一大半沟通成本：
+
+| 你想要的效果 | 谁来实现 | 怎么做到 |
+|---|---|---|
+| **通电就自动联网**（含校园网认证） | ✅ 本程序 | 注册自启后随系统拉起，探活发现断网就自动登录门户 |
+| **远程关机 / 重启** | ✅ 本程序 | 控制台一键操作（关机、重启），需控制台令牌 |
+| **远程开机**（机器已经彻底断电） | ⚠️ 硬件 | 软件做不到——断电后机器上没有任何程序在运行 |
+| 802.1X / PPPoE / 专有客户端 | ❌ 不做 | 生效层级不同，见[常见问题](#常见问题) |
+
+> **一句话边界**：本程序保证的是「**系统起来之后，网络一定被接回来**」；
+> 「**机器要不要起来**」不归软件管。
+
+### 远程开机：三条路线，按「宿舍断电」的现实排序
+
+| 层 | 手段 | 适用场景 | 前提条件 |
+|---|---|---|---|
+| **L1** | BIOS「来电自启」+ 智能插座断电几秒再上电 | **宿舍晚上断电（首选，也是唯一正解）** | 主板 BIOS 有 `Restore AC Power Loss` / `AC Power Recovery` 之类的选项并设为 **Power On**；宿舍整体断电时，要自带 4G 的插座才能远程控制它 |
+| **L2** | 宿舍留一台常开小设备（树莓派 / ESP32 / 旧路由 / 软路由）发 WOL 魔术包 | 机器有电，但处于关机或睡眠 | 跳板与目标**必须在同一个二层网段**——WoL 是二层广播，跨不了路由器 |
+| **L3** | 同网段手机上的 WOL App，或路由器自带插件 | 临时应急 | 手机与目标在同一局域网 |
+
+**为什么远程开机不能只靠软件**：WoL 是二层广播，跨不了路由器；Tailscale 官方也发不了魔术包
+（[官方博客原文](https://tailscale.com/blog/wake-on-lan-tailscale-upsnap)）。
+所以「人在外面、把宿舍已经断电的机器打开」只有 **L1** 一条路；
+L2 / L3 解决的是「机器有电但关着」，别当成 L1 的替代品。
+
+---
+
 ## 目录
 
+- [它能做什么、不能做什么](#它能做什么不能做什么)
 - [快速开始](#快速开始)
 - [三种用法](#三种用法)
 - [真实校园网怎么配](#真实校园网怎么配)
@@ -28,6 +58,23 @@
 ---
 
 ## 快速开始
+
+### 方式〇：一行命令（最省事）
+
+已装 Python 3.10+ 的话，直接粘贴一行：
+
+- **Windows**（PowerShell）：
+  ```
+  iwr -useb https://raw.githubusercontent.com/enmingxiong821-cloud/campusnet/main/install.ps1 | iex
+  ```
+- **Linux / macOS**：
+  ```
+  curl -fsSL https://raw.githubusercontent.com/enmingxiong821-cloud/campusnet/main/install.sh | sh
+  ```
+
+它会自动下载仓库、检查 Python、生成桌面快捷方式并跑一遍自检；已装过会走升级分支。
+想先看它要做什么，在命令末尾加 `--dry-run`（Linux/macOS）或把 `| iex` 换成
+`-OutFile install.ps1` 后手动运行。
 
 ### 方式一：一键配置（推荐）
 
@@ -45,7 +92,19 @@
 > 需要 Python 3.10 或更高版本。没有的话先装：
 > <https://www.python.org/downloads/>（Windows 安装时记得勾选 "Add python.exe to PATH"）。
 
-### 方式二：手动
+### 方式二：手动（已装 Python，想读源码或自己改）
+
+```
+git clone https://github.com/enmingxiong821-cloud/campusnet.git
+cd campusnet
+
+python utils\run.py serve      # Windows
+./utils/start.sh               # Linux / macOS
+```
+
+浏览器打开 <http://127.0.0.1:2268>。
+
+> Linux 下若中文显示乱码，先 `export PYTHONIOENCODING=utf-8`。
 
 ### 方式三：单文件 EXE（Windows，免装 Python）
 
@@ -59,30 +118,6 @@
   起服务、`campusnet.exe doctor` 自检；
 - 自己构建：`python -m pip install pyinstaller` 然后
   `python -m PyInstaller packaging/campusnet.spec --noconfirm`。
-
-#### Windows
-
-```
-git clone https://github.com/enmingxiong821-cloud/campusnet.git
-cd campusnet
-
-python utils\run.py serve
-```
-
-浏览器打开 <http://127.0.0.1:2268>。
-
-#### Linux / macOS
-
-```
-git clone https://github.com/enmingxiong821-cloud/campusnet.git
-cd campusnet
-
-./utils/start.sh
-```
-
-浏览器打开 <http://127.0.0.1:2268>。
-
-> Linux 下若中文显示乱码，先 `export PYTHONIOENCODING=utf-8`。
 
 ---
 
@@ -573,7 +608,7 @@ project/frontend/
 `/api/v1/...`（不带 v1 的旧路径仍然可用，老客户端不受影响）：
 
 ```
-python utils/run.py openapi --out docs/openapi.json   # 输出 OpenAPI 3.1 契约
+python utils/run.py openapi --out doc/openapi.json   # 输出 OpenAPI 3.1 契约
 ```
 
 契约由真实路由表生成，并有测试锁住两边一致——加了路由却忘了更新契约、或者契约里

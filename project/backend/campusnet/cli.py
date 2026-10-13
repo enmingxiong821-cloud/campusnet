@@ -189,6 +189,11 @@ def cmd_bootstart(args: argparse.Namespace) -> int:
             print(f"启动项位置: {result.path}")
         return 0
 
+    if args.bootstart_action == "verify":
+        ok, detail = bootstart_mod.verify()
+        print(("已验证生效：" if ok else "未证实生效：") + detail)
+        return 0 if ok else 1
+
     if args.bootstart_action == "install":
         password = ""
         if args.mode == "task":
@@ -478,8 +483,12 @@ def cmd_openapi(args: argparse.Namespace) -> int:
     spec = openapi_mod.build(handler.routes.keys())
     text = json.dumps(spec, ensure_ascii=False, indent=2, sort_keys=True)
     if args.out:
-        Path(args.out).write_text(text + "\n", encoding="utf-8")
-        print(f"已写出契约：{args.out}（{len(spec['paths'])} 条路径）")
+        target = Path(args.out)
+        # 用户会把文档里的 `--out doc/openapi.json` 原样复制执行；
+        # 父目录不存在时不能只抛 FileNotFoundError（仓里其余写盘处都建了父目录）。
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text + "\n", encoding="utf-8")
+        print(f"已写出契约：{target}（{len(spec['paths'])} 条路径）")
         return 0
     print(text)
     return 0
@@ -669,6 +678,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_boot_install.set_defaults(func=cmd_bootstart)
     p_boot_uninstall = boot_sub.add_parser("uninstall", help="移除开机自启动")
     p_boot_uninstall.set_defaults(func=cmd_bootstart)
+    p_boot_verify = boot_sub.add_parser("verify", help="自证「无需登录即运行」是否真的生效")
+    p_boot_verify.set_defaults(func=cmd_bootstart)
 
     p_doctor = sub.add_parser(
         "doctor", help="一键自检：端口、数据库、令牌、自启动、探活"

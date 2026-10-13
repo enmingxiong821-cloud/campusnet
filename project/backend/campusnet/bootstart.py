@@ -203,12 +203,34 @@ def task_registered() -> bool:
     return ok
 
 
+def _looks_like_permission_denied(message: str) -> bool:
+    """判断 PowerShell 的报错是不是「权限不足」。
+
+    不能只匹配英文 `access is denied`：中文 Windows 回的是「拒绝访问」，
+    而项目面向的就是中文用户——那样 UAC 提权提示永远不会出现，
+    用户只会看到一串原始报错。HRESULT 0x80070005 是 E_ACCESSDENIED，
+    在各种语言下都一样，所以一并认。
+    """
+    low = (message or "").lower()
+    return any(
+        token in low
+        for token in ("access is denied", "拒绝访问", "access denied", "0x80070005", "accessdenied")
+    )
+
+
 def register_task(host: str, port: int, password: str) -> tuple[bool, str]:
     """注册「开机触发、无论是否登录都运行」的计划任务。
 
     为什么要密码：Windows 只有两条路能让任务不经登录运行——把密码交给
     任务计划程序保存（它存进 LSA），或者让机器自动登录（密码会落到注册表）。
     这里选前者，并且密码只从 stdin 传给 PowerShell，不进命令行、不进环境变量。
+
+    三个容易踩的设置项，都必须显式写死：
+    - `-ExecutionTimeLimit 0`：默认上限是 **3 天**，到点任务会被直接终止——
+      对一个常驻守护来说等于「跑三天后悄悄消失」，而且只在开机时触发过、
+      任务计划程序也不会自己重启它（错误码停在 0x41306）。
+    - `-MultipleInstances IgnoreNew`：避免计划任务和桌面快捷方式叠加起两份。
+    - `-DontStopOnIdleEnd`：空闲/切电池时不因为默认策略被掐掉。
     """
     if not password:
         return False, "需要当前 Windows 账户的密码，才能注册「无需登录」的任务"
@@ -230,21 +252,30 @@ def register_task(host: str, port: int, password: str) -> tuple[bool, str]:
         "$sec.MakeReadOnly();"
         f"$act = New-ScheduledTaskAction -Execute {_ps_quote(exe)}"
         f" -Argument {_ps_quote(args)};"
-        "$trg = New-ScheduledTaskTrigger -AtStartup;"
+        # 开机触发覆盖「有电就来」；登录触发是补网：开机那一刻网卡/无线驱动
+        # 常常还没就绪，登录时再来一次能缩短用户的等待。
+        "$trg = @("
+        " (New-ScheduledTaskTrigger -AtStartup),"
+        f" (New-ScheduledTaskTrigger -AtLogOn -User {_ps_quote(account)})"
+        ");"
         "$set = New-ScheduledTaskSettingsSet -StartWhenAvailable"
         " -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)"
-        " -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries;"
+        " -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries"
+        " -DontStopOnIdleEnd"
+        " -ExecutionTimeLimit ([TimeSpan]::Zero)"
+        " -MultipleInstances IgnoreNew;"
         f"Register-ScheduledTask -TaskName {_ps_quote(TASK_NAME)} -Action $act"
         # Windows PowerShell 5.1 的参数名是 -User（-UserId 属于 New-ScheduledTaskPrincipal）
         f" -Trigger $trg -Settings $set -User {_ps_quote(account)}"
         " -Password $sec -Force | Out-Null;"
     )
     ok, message = _run_powershell_script(script, child_env)
-    if not ok and "access is denied" in message.lower():
+    if not ok and _looks_like_permission_denied(message):
         return False, (
             "需要管理员权限才能注册「开机触发、无需登录」的任务"
-            "（Windows 拒绝为该账户保存凭据）。请右键快捷方式选择「以管理员身份运行」，"
-            "或在管理员 PowerShell 里执行：python utils/run.py bootstart install --mode task"
+            "（Windows 拒绝为该账户保存凭据）。请右键桌面上的"
+            "「校园网自连（以管理员身份）」快捷方式，或在管理员 PowerShell 里执行："
+            "python utils/run.py bootstart install --mode task"
         )
     return ok, message
 
@@ -719,6 +750,82 @@ def status() -> BootStatus:
             )
         return BootStatus(True, True, path, detail)
     return BootStatus(True, False, path, "未安装开机自启动", True, effective=False)
+
+
+def verify() -> tuple[bool, str]:
+    """自证「无需登录即运行」到底有没有真的生效。
+
+    「已写入」不等于「会生效」——这正是 status() 里 effective 字段要表达的差异，
+    但它只能靠静态判断。这里拿运行事实说话：
+
+    - Windows task 模式：对比计划任务的「上次运行时间」与「系统开机时间」，
+      任务在开机后跑过，才证明它确实是开机触发、没等任何人登录。
+    - Linux systemd：linger 打开后 user 管理器才会在开机时启动并常驻，
+      这是「未登录也运行」的前提；否则只是登录时启动。
+    - macOS：LaunchDaemon（system 域）才不依赖图形会话，LaunchAgent 做不到。
+
+    返回 (是否已验证生效, 一句话结论)。查不到事实时宁可说「未证实」，不假装成功。
+    """
+    name = platform_name()
+    if name == "windows":
+        if not task_registered():
+            return False, "未安装「无需登录」的计划任务（先跑 bootstart install --mode task）"
+        exe = shutil.which("powershell") or shutil.which("pwsh")
+        if not exe:
+            return False, "找不到 powershell，无法读取任务运行时间"
+        script = (
+            "$b = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime;"
+            f"$i = Get-ScheduledTaskInfo -TaskName {_ps_quote(TASK_NAME)}"
+            " -ErrorAction SilentlyContinue;"
+            "if ($i -and $i.LastRunTime) {"
+            "  Write-Output ('BOOT=' + $b.ToUniversalTime().ToString('o'));"
+            "  Write-Output ('RUN=' + $i.LastRunTime.ToUniversalTime().ToString('o'))"
+            "} else { Write-Output 'NOT_RUN' }"
+        )
+        ok, output = _run_powershell_script(script)
+        if not ok or not output.strip():
+            return False, "任务已注册，但读取运行记录失败，暂无法自证"
+        if "NOT_RUN" in output:
+            return False, "任务已注册，但开机后尚未运行过——重启一次后再跑本命令验证"
+        boot = run = None
+        for line in output.splitlines():
+            if line.startswith("BOOT="):
+                boot = line[5:].strip()
+            elif line.startswith("RUN="):
+                run = line[4:].strip()
+        if not boot or not run:
+            return False, "读取到的时间格式不对，暂无法自证"
+        # 时间戳同为 ISO-8601 UTC，字符串比较等价于时间比较。
+        if run >= boot:
+            return True, "任务在本次开机后已运行——无需登录自启已生效"
+        return False, "任务上一次运行早于本次开机——很可能没有按预期触发，请重新安装"
+
+    if name == "linux":
+        unit = _linux_unit_path()
+        if not unit.exists():
+            return False, "未安装 systemd 单元（先跑 bootstart install）"
+        loginctl = shutil.which("loginctl")
+        if not loginctl:
+            return False, "未找到 loginctl，无法确认 linger 状态"
+        user = os.environ.get("USER", "") or os.environ.get("USERNAME", "")
+        ok, out = _run_quiet([loginctl, "show-user", user, "-p", "Linger"])
+        linger_on = ok and "Linger=yes" in out
+        if linger_on:
+            return True, "systemd user 已启用 linger——未登录时也会在开机后启动"
+        return False, "systemd 单元已装，但 linger 未开启（登录后才启动）——用 loginctl enable-linger 开启"
+
+    if name == "darwin":
+        plist = _macos_plist_path()
+        if plist.exists():
+            # LaunchAgent 写在 ~/Library/LaunchAgents，只在图形会话里跑；
+            # 真正的「未登录也运行」要 /Library/LaunchDaemons + root。这里如实说明差异。
+            return False, (
+                "已安装 LaunchAgent（登录后才会运行）；"
+                "要做到未登录也运行需改用 LaunchDaemon 并以 root 安装"
+            )
+        return False, "未安装自启动（先跑 bootstart install）"
+
+    return False, f"不支持的平台：{name}"
 
 
 def activate(status_result: BootStatus) -> str:

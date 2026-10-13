@@ -722,9 +722,48 @@ def _match_route(
     return None, {}
 
 
-def require_same_origin(h: ApiHandler) -> None:
-    """校验浏览器写请求；允许无 Origin 的本地 CLI 客户端。"""
+EXTENSION_SCHEME = "chrome-extension://"
+LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+
+def _host_is_loopback(host_header: str) -> bool:
+    """Host 头（可能带端口）是否指向本机回环。"""
+    host = (host_header or "").strip().lower()
+    if host.startswith("["):  # [::1]:2268
+        return host[1:].split("]", 1)[0] in LOOPBACK_HOSTS
+    return host.rsplit(":", 1)[0] in LOOPBACK_HOSTS
+
+
+def _is_extension_origin(origin: str) -> bool:
+    """是否浏览器扩展的来源（Origin 由浏览器设定，页面 JS 改不了）。"""
+    if not origin.startswith(EXTENSION_SCHEME):
+        return False
+    rest = origin[len(EXTENSION_SCHEME) :]
+    return bool(rest) and "/" not in rest
+
+
+def require_same_origin(h: ApiHandler, *, token_ok: bool = False) -> None:
+    """校验浏览器写请求；允许无 Origin 的本地 CLI 客户端。
+
+    两条豁免，前提都是「请求方确实拿到了凭据」，网页拿不到：
+
+    1. **显式令牌有效**（token_ok）。CSRF 的成因是浏览器自动附带 Cookie，而
+       Authorization / X-CampusNet-Token 这类自定义头跨站页读不到、要发也会先触发
+       预检——OWASP 的 CSRF 备忘单把「自定义请求头」列为有效防御。传入的必须是
+       「令牌有效」而不是「带了头」，否则等于放行任何人。
+    2. **浏览器扩展访问本机回环**。MV3 扩展 service worker 发非 GET 请求时，Origin
+       必然是 `chrome-extension://<id>`（浏览器设定，见 w3c/webextensions#777），
+       永远不可能等于 Host，于是被一刀切拦掉——这正是扩展「优先把检测交给本地服务」
+       从来没生效过、一直静默回落的原因。网页的 Origin 只会是 http(s) 或 null，
+       伪造不出这个 scheme，所以按 scheme 放行不会给网页写权限；再限定 Host 是回环，
+       跨机访问仍然必须带令牌。
+    """
+    if token_ok:
+        return
     origin = h.headers.get("Origin")
+    if origin is not None and _is_extension_origin(origin):
+        if _host_is_loopback(h.headers.get("Host", "")):
+            return
     valid = True
     if origin is not None:
         try:
@@ -794,7 +833,12 @@ def _install_dispatch(handler: type[ApiHandler]) -> None:
             return
         try:
             if method in ("POST", "PUT", "DELETE", "PATCH"):
-                require_same_origin(self)
+                require_same_origin(
+                    self,
+                    token_ok=bool(
+                        self.auth and self.auth.explicit_token_ok(self.headers)
+                    ),
+                )
             fn({"query": query, "path": path, "params": params}, self)
         except ApiError as exc:
             self._send(exc.status, {"ok": False, "error": exc.message})

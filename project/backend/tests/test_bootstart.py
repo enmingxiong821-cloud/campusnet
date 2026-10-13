@@ -545,6 +545,54 @@ def test_task_install_explains_admin_requirement(
     assert "bootstart install --mode task" in result.detail
 
 
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Register-ScheduledTask : Access is denied.",
+        "Register-ScheduledTask : 拒绝访问。",
+        "Register-ScheduledTask : 拒绝访问。 (0x80070005)",
+    ],
+)
+def test_permission_denied_is_recognised_in_any_locale(message: str) -> None:
+    """中文 Windows 回的是「拒绝访问」。
+
+    旧实现只匹配英文串，于是中文用户永远看不到提权指引，
+    只会对着一串 PowerShell 原始报错发呆。
+    """
+    assert boot_mod._looks_like_permission_denied(message) is True
+    assert boot_mod._looks_like_permission_denied("找不到路径 C:\\nope") is False
+
+
+def test_task_script_hardens_daemon_settings(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """注册脚本必须显式关掉几个会「悄悄杀掉常驻守护」的默认值。"""
+    _force(monkeypatch, "windows")
+    monkeypatch.setenv("USERNAME", "tester")
+    monkeypatch.setenv("USERDOMAIN", "TESTBOX")
+    captured: dict[str, str] = {}
+
+    def fake_run(script: str, env: dict[str, str] | None = None):  # noqa: ANN001
+        captured["script"] = script
+        return True, ""
+
+    monkeypatch.setattr(boot_mod, "_run_powershell_script", fake_run)
+
+    ok, _ = boot_mod.register_task("127.0.0.1", 2268, "pw")
+
+    assert ok is True
+    script = captured["script"]
+    # 默认上限 3 天，到点直接终止常驻进程；必须设成 0（无限）
+    assert "-ExecutionTimeLimit ([TimeSpan]::Zero)" in script
+    assert "-MultipleInstances IgnoreNew" in script
+    assert "-DontStopOnIdleEnd" in script
+    # 开机触发是「有电就来」，登录触发是补网（开机那刻网卡常常还没就绪）
+    assert "-AtStartup" in script
+    assert "-AtLogOn" in script
+    # 密码不能进脚本本体
+    assert "pw" not in script.replace("CAMPUSNET_TASK_PASSWORD", "")
+
+
 def test_task_password_never_lands_in_script(
     fake_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -628,3 +676,73 @@ def test_cli_bootstart_task_install_asks_password(
     monkeypatch.setattr(getpass, "getpass", lambda prompt="": "secret")
 
     assert cli_mod.main(["bootstart", "install", "--mode", "task", "--port", "2268"]) == 0
+
+
+# ---------- verify（自证无需登录自启是否生效） ----------
+
+
+def _ps_returns(monkeypatch: pytest.MonkeyPatch, output: str) -> None:
+    """让 verify() 的 PowerShell 查询返回指定输出。"""
+    monkeypatch.setattr(boot_mod.shutil, "which", lambda name: "powershell")
+    monkeypatch.setattr(
+        boot_mod, "_run_powershell_script", lambda script: (True, output)
+    )
+
+
+def test_verify_task_ran_after_boot_is_effective(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _force(monkeypatch, "windows")
+    monkeypatch.setattr(boot_mod, "task_registered", lambda: True)
+    _ps_returns(
+        monkeypatch,
+        "BOOT=2026-10-12T08:00:00Z\nRUN=2026-10-12T08:00:05Z",
+    )
+
+    ok, detail = boot_mod.verify()
+
+    assert ok is True
+    assert "生效" in detail
+
+
+def test_verify_task_not_run_yet_is_not_confirmed(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """第一次装完还没经历过开机，不能假装「已验证」。"""
+    _force(monkeypatch, "windows")
+    monkeypatch.setattr(boot_mod, "task_registered", lambda: True)
+    _ps_returns(monkeypatch, "NOT_RUN")
+
+    ok, detail = boot_mod.verify()
+
+    assert ok is False
+    assert "尚未运行" in detail
+
+
+def test_verify_task_ran_before_boot_is_not_effective(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """任务上次运行早于本次开机——说明没在开机时触发，不能算生效。"""
+    _force(monkeypatch, "windows")
+    monkeypatch.setattr(boot_mod, "task_registered", lambda: True)
+    _ps_returns(
+        monkeypatch,
+        "BOOT=2026-10-12T08:00:00Z\nRUN=2026-10-11T20:00:00Z",
+    )
+
+    ok, detail = boot_mod.verify()
+
+    assert ok is False
+    assert "重新安装" in detail
+
+
+def test_verify_without_task_is_not_confirmed(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _force(monkeypatch, "windows")
+    monkeypatch.setattr(boot_mod, "task_registered", lambda: False)
+
+    ok, detail = boot_mod.verify()
+
+    assert ok is False
+    assert "mode task" in detail

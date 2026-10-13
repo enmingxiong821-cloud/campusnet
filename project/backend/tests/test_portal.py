@@ -125,6 +125,21 @@ def test_classify_password_error() -> None:
     r = classify_response("<p>密码错误</p>", 200, "http://x/")
     assert r.state == "failed"
     assert "密码错误" in r.message
+    assert r.terminal is True
+
+
+def test_classify_password_error_is_terminal_but_login_page_is_not() -> None:
+    """凭据被拒是终态（重试无用），停留在登录页是瞬态（可重试）。"""
+    cred = classify_response("passworderror", 200, "http://x/")
+    assert cred.terminal is True
+    still = classify_response("<html>login</html>", 200, "http://10.0.0.1/eportal/portal/login")
+    assert still.state == "failed"
+    assert still.terminal is False
+
+
+def test_classify_userdeny_is_terminal() -> None:
+    r = classify_response('{"result":0,"userdeny":"1"}', 200, "http://x/")
+    assert r.terminal is True
 
 
 def test_classify_already_online() -> None:

@@ -185,36 +185,37 @@ def test_keystream_prefix_stability() -> None:
 
 @pytest.mark.parametrize("pid", [0, -1, -999])
 def test_non_positive_pid_is_dead(pid: int) -> None:
-    assert lockfile._pid_alive(pid) is False
+    assert lockfile.pid_alive(pid) is False
 
 
 def test_current_process_is_alive() -> None:
-    assert lockfile._pid_alive(os.getpid()) is True
+    assert lockfile.pid_alive(os.getpid()) is True
 
 
 def test_impossible_pid_is_dead() -> None:
     """PID 上限之外必然不存在，且不能抛 OverflowError。
 
     这个断言是 Linux CI 逼出来的：os.kill 对超出 int 范围的 PID
-    抛 OverflowError，而 OverflowError 不是 OSError 子类，
-    会穿透 except 逃出 _pid_alive，让 acquire() 整个崩掉。
+    抛 OverflowError，而 OverflowError 不是 OSError 子类，会穿透 except 逃出去。
+    持锁判定已经完全不依赖 PID，但这个诊断函数仍会被 doctor 拿去措辞，
+    所以它同样不能崩。
     """
-    assert lockfile._pid_alive(4_294_967_000) is False
+    assert lockfile.pid_alive(4_294_967_000) is False
 
 
 def test_absurdly_large_pid_does_not_raise() -> None:
     """2^40 远超 Linux pid_max，必须判死而不是崩。"""
-    assert lockfile._pid_alive(1 << 40) is False
-    assert lockfile._pid_alive(1 << 62) is False
+    assert lockfile.pid_alive(1 << 40) is False
+    assert lockfile.pid_alive(1 << 62) is False
 
 
 def test_pid_just_above_max_is_dead() -> None:
-    assert lockfile._pid_alive(lockfile._MAX_PID + 1) is False
+    assert lockfile.pid_alive(lockfile._MAX_PID + 1) is False
 
 
 def test_current_process_is_detected_on_this_platform() -> None:
     """跨平台自检：不碰 ctypes，os.getpid 在任何平台都该判活。"""
-    assert lockfile._pid_alive(os.getpid()) is True
+    assert lockfile.pid_alive(os.getpid()) is True
 
 
 @pytest.mark.skipif(os.name != "nt", reason="GetCurrentProcessId 仅 Windows 可用")
@@ -232,11 +233,11 @@ def test_child_process_detected_alive_then_dead() -> None:
     """
     proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
     try:
-        assert lockfile._pid_alive(proc.pid) is True
+        assert lockfile.pid_alive(proc.pid) is True
     finally:
         proc.kill()
         proc.wait(timeout=10)
-    assert lockfile._pid_alive(proc.pid) is False
+    assert lockfile.pid_alive(proc.pid) is False
 
 
 @pytest.mark.skipif(os.name != "nt", reason="仅 Windows 有 ctypes 分支")
@@ -244,7 +245,7 @@ def test_windows_branch_is_the_one_exercised() -> None:
     """确认当前平台确实走的是 ctypes 分支，否则上面的测试是假绿。"""
     import inspect
 
-    src = inspect.getsource(lockfile._pid_alive)
+    src = inspect.getsource(lockfile.pid_alive)
     assert 'os.name == "nt"' in src
     assert os.name == "nt"
 
@@ -252,7 +253,7 @@ def test_windows_branch_is_the_one_exercised() -> None:
 @pytest.mark.skipif(os.name == "nt", reason="仅 POSIX 走 os.kill 分支")
 def test_posix_branch_permission_denied_counts_alive() -> None:
     """POSIX 下无权限访问别人的进程也算存活。"""
-    lockfile._pid_alive(1)  # pid 1 通常存在且当前用户无权限查询
+    lockfile.pid_alive(1)  # pid 1 通常存在且当前用户无权限查询
 
 
 # ---------- 锁的边界 ----------

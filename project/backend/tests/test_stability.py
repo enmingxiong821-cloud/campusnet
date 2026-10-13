@@ -272,17 +272,48 @@ def test_lock_ignores_dead_holder(tmp_path: Path) -> None:
 
 
 def test_lock_reports_live_foreign_holder(tmp_path: Path) -> None:
-    """别的活进程持锁时要认出来。"""
+    """别的活进程真的持锁时要认出来。
+
+    判定以内核文件锁为准，所以必须让子进程**真的**去 acquire，
+    光在文件里写一个活着的 PID 不再算「持有」——那正是会被 PID 复用坑到的判法，
+    见 test_lock_ignores_stale_file_with_reused_pid。
+    """
+    from campusnet.lockfile import SingleInstance
+
+    backend = Path(__file__).resolve().parents[1]
+    lock_path = tmp_path / "cn.lock"
+    proc = subprocess.Popen(
+        [sys.executable, "-c", _HELPER, str(lock_path), str(backend)],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert proc.stdout.readline().strip() == "ACQUIRED"
+        lock = SingleInstance(lock_path)
+        assert lock.is_held_by_other_process() is True
+        assert lock.acquire() is False
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)
+
+
+def test_lock_ignores_stale_file_with_reused_pid(tmp_path: Path) -> None:
+    """残留锁文件里是个活着的无关进程，也不能挡住启动。
+
+    系统会把 PID 复用给别的程序（我们的文件里那个 PID 已经属于无关进程了），
+    旧实现按 PID 判活就会把服务永久挡在门外，只能靠人工删文件。
+    """
     from campusnet.lockfile import SingleInstance
 
     helper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
     try:
         lock_path = tmp_path / "cn.lock"
         lock_path.write_text(str(helper.pid), encoding="utf-8")
-
         lock = SingleInstance(lock_path)
-        assert lock.is_held_by_other_process() is True
-        assert lock.acquire() is False
+        assert lock.is_held_by_other_process() is False
+        assert lock.acquire() is True
+        assert lock.holder_pid() == os.getpid()
+        lock.release()
     finally:
         helper.terminate()
         helper.wait(timeout=10)

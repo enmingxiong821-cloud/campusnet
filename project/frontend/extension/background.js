@@ -31,6 +31,9 @@ const DEFAULTS = {
   maxEvents: 200,
   // 跑着 Python 版服务时优先把检测交给它（自动探测可用性，不可用就静默回落）
   useLocalService: true,
+  // 只有服务绑到局域网（serve --host 0.0.0.0）时才需要填：那时 /api/check 要求显式令牌。
+  // 默认只监听 127.0.0.1，服务端按「扩展来源 + 回环」放行，留空即可。
+  apiToken: '',
 };
 
 /** 本地服务地址；扩展自己那套 fetch 登录只是「没装 Python」时的简化替代。 */
@@ -204,9 +207,14 @@ async function logEvent(level, stage, message, accountId = null) {
  *
  * 校园网里的 GBK 页面、SRUN 的 challenge/xxtea、CAS 单点登录，扩展自己那套
  * fetch 登录都处理不了，而 Python 侧这些坑全踩过。这里只做「能连上就用」的
- * 探测：连不上（没装、端口不同、需要令牌）就返回 null，静默回落到扩展实现。
+ * 探测：连不上（没装、端口不同、服务绑了局域网又没填令牌）就返回 null，
+ * 静默回落到扩展实现。
+ *
+ * 注意 POST 一定要带 Origin 相关的心智模型：service worker 发非 GET 请求时
+ * 浏览器会附上 `Origin: chrome-extension://<id>`，服务端为此专门放行了
+ * 「扩展来源 + 回环」这一组合，所以默认配置下不需要令牌。
  */
-async function checkViaLocalService(timeoutMs = 2000) {
+async function checkViaLocalService(settings, timeoutMs = 2000) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -223,9 +231,13 @@ async function checkViaLocalService(timeoutMs = 2000) {
     clearTimeout(timer);
   }
   try {
+    const headers = { 'Content-Type': 'application/json' };
+    if (settings && settings.apiToken) {
+      headers['X-CampusNet-Token'] = settings.apiToken;
+    }
     const resp = await fetch(`${LOCAL_SERVICE_URL}/api/check`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: '{}',
       cache: 'no-store',
     });
@@ -274,7 +286,7 @@ async function checkOnce() {
 
     // 跑着 Python 版就优先交给它：认证逻辑与这些年踩过的坑都在那边。
     if (settings.useLocalService !== false) {
-      const served = await checkViaLocalService();
+      const served = await checkViaLocalService(settings);
       if (served) {
         const results = served.results;
         const allOnline = results.length > 0 && results.every(item => item.online);

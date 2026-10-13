@@ -104,6 +104,23 @@ def test_add_show_ssid_needs_no_mandatory_flags() -> None:
     assert cli.main(["add", "--show-ssid"]) == 0
 
 
+def test_openapi_out_creates_parent_dir(
+    isolated_store,  # noqa: ANN001
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,  # noqa: ANN001
+) -> None:
+    """README 里的 `openapi --out doc/openapi.json` 必须能原样复制执行。
+
+    父目录不存在时曾经直接抛 FileNotFoundError。文档给的命令跑不通比命令写错更伤——
+    用户会先怀疑自己的环境。仓里其余写盘处都建了父目录，这条守住一致性。
+    """
+    target = tmp_path / "doc" / "openapi.json"
+    assert run(["openapi", "--out", str(target)], monkeypatch) == 0
+    spec = json.loads(target.read_text(encoding="utf-8"))
+    assert spec["openapi"].startswith("3.1")
+    assert spec["paths"]
+
+
 def test_password_mode_choices_are_enforced() -> None:
     with pytest.raises(SystemExit):
         cli.main(

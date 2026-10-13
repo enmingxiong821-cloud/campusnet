@@ -44,6 +44,11 @@ DEFAULT_WARMUP_INTERVAL = 15
 # 掉线是分钟级事件，按 60 秒一轮去等，用户感知到的「恢复速度」被拉长了。
 DEFAULT_RETRY_INTERVAL = 60
 
+# 凭据被门户拒绝后的冷却时长：密码错、账号被停用这类「重试不会改结果」的失败，
+# 再试也只是在给门户送无效请求（有些学校 5 次就锁号）。冷却期内跳过登录、
+# 只保留探活，改对密码后随下一轮自然恢复。
+CREDENTIAL_BACKOFF_SECONDS = 600
+
 
 @dataclass
 class ProgressItem:
@@ -141,6 +146,12 @@ class Monitor:
         from .notify import Notifier
 
         self.notifier = Notifier.from_store(store)
+        # 凭据失败冷却：account_id -> 冷却截止时刻（monotonic 秒）。
+        # 只在「认证被门户明确拒绝」时写入，网络类失败不进这里，照常退避重试。
+        self._credential_cooldown: dict[int, float] = {}
+        # 冷却字典要自己的锁：self._lock 是 check_all 的可重入保护，
+        # 在 check_account 期间一直被持有，复用它会死锁。
+        self._cooldown_lock = threading.Lock()
 
     # ---------- 实时进度 ----------
     def emit_progress(self, account: Account, stage: str, message: str) -> None:
@@ -458,6 +469,35 @@ class Monitor:
             account, "offline", f"检测到掉线（{check.status}），准备登录重连"
         )
 
+        # 凭据被门户拒绝后进入冷却：再试也是同样的结果，只会把无效请求灌给门户
+        # （有些学校 5 次就锁号）。冷却期内跳过登录、只保留探活，改对密码后随
+        # 下一轮自然恢复。冷却只拦「登录」，不拦探活——网络真的通了照样报在线。
+        with self._cooldown_lock:
+            cooldown_until = self._credential_cooldown.get(account.id)
+        now = time.monotonic()
+        if cooldown_until and now < cooldown_until:
+            remaining = int(cooldown_until - now)
+            outcome = CheckOutcome(
+                account.id,
+                account.name,
+                False,
+                STATE_OFFLINE,
+                f"认证被门户拒绝，冷却中（{remaining} 秒后自动重试；改对密码请更新账号）",
+                check.detail,
+                0,
+                time.perf_counter() - started,
+            )
+            self.store.set_state(account.id, STATE_OFFLINE)
+            self.emit_progress(account, "wait", outcome.message)
+            self.store.add_event(
+                f"{account.name}: 凭据失败冷却中，跳过登录（{remaining} 秒后重试）",
+                level="warning",
+                stage="login",
+                state=STATE_OFFLINE,
+                account_id=account.id,
+            )
+            return outcome
+
         attempts = 0
         network_confirmed = False
         last = portal.LoginResult("failed", "未执行登录", "")
@@ -496,14 +536,38 @@ class Monitor:
                 self.emit_progress(account, "warn", "门户说成功，但复检仍未放行")
             else:
                 self.emit_progress(account, "warn", f"登录未成功：{last.message}")
+                if last.terminal:
+                    # 凭据被门户明确拒绝：这一轮剩下的重试都是白送请求，立刻收手。
+                    # 冷却写进 _credential_cooldown，下一轮起跳过登录直到冷却结束。
+                    self.emit_progress(
+                        account, "wait", "凭据被门户拒绝，本轮停止重试并进入冷却"
+                    )
+                    break
 
             if attempt < max(1, account.max_retries):
                 wait = min(3 * attempt, 8)
                 self.emit_progress(account, "wait", f"{wait} 秒后重试")
                 time.sleep(wait)
 
+        if last.terminal:
+            with self._cooldown_lock:
+                self._credential_cooldown[account.id] = (
+                    time.monotonic() + CREDENTIAL_BACKOFF_SECONDS
+                )
+            self.store.add_event(
+                f"{account.name}: 凭据被门户拒绝（{last.message}），"
+                f"进入 {CREDENTIAL_BACKOFF_SECONDS} 秒冷却，不再反复提交登录",
+                level="warning",
+                stage="login",
+                state=STATE_OFFLINE,
+                account_id=account.id,
+            )
+
         elapsed = time.perf_counter() - started
         if last.ok:
+            # 登录成功即清掉冷却：可能是用户改了密码，也可能是上次的拒绝已过期。
+            with self._cooldown_lock:
+                self._credential_cooldown.pop(account.id, None)
             state = STATE_LOGGED_IN if network_confirmed else STATE_OFFLINE
             self.store.set_state(account.id, state)
             return CheckOutcome(

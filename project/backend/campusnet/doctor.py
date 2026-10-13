@@ -16,7 +16,7 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 from . import __version__, bootstart, ports, probe as probe_mod
-from .lockfile import SingleInstance
+from .lockfile import SingleInstance, pid_alive
 from .paths import (
     API_HOST,
     API_PORT,
@@ -103,7 +103,15 @@ def _lock_check() -> Check:
     if lock.is_held_by_other_process():
         return Check("实例锁", WARN, f"已有服务实例在运行（持有者 PID {holder}，{path}）")
     if path.exists():
-        return Check("实例锁", OK, f"锁文件存在但持有者已不在（{path}），下次启动会自动接管")
+        # 判定以内核文件锁为准，所以残留文件不影响启动；这里只把原因说清楚。
+        if holder and pid_alive(holder):
+            return Check(
+                "实例锁",
+                OK,
+                f"锁文件残留，记录的 PID {holder} 仍在运行但没有持有文件锁"
+                f"（多半是无关进程，PID 被系统复用了）；不影响启动（{path}）",
+            )
+        return Check("实例锁", OK, f"锁文件是上次异常退出的残留（{path}），不影响启动")
     return Check("实例锁", OK, f"未被占用（{path}）")
 
 

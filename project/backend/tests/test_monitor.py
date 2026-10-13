@@ -149,6 +149,51 @@ def test_login_error_state_maps_to_offline(
     assert result.state == STATE_OFFLINE
 
 
+def test_terminal_credential_failure_stops_retrying(store, account, offline_probe, monkeypatch) -> None:  # noqa: ANN001
+    """凭据被门户拒绝（terminal）时，一轮内就该收手，不再灌 max_retries 次请求。"""
+    acc_id = store.add_account(account)
+    offline_probe["online"] = False
+    calls = {"count": 0}
+
+    def fake_login(*a, **k):
+        calls["count"] += 1
+        return LoginResult("failed", "密码错误", terminal=True)
+
+    monkeypatch.setattr(monitor_mod.portal, "login", fake_login)
+    monkeypatch.setattr(time, "sleep", lambda *_a: None)
+
+    mon = Monitor(store, interval=10)
+    result = mon.check_account(store.get_account(acc_id))
+
+    assert calls["count"] == 1
+    assert result.attempts == 1
+    assert not result.online
+
+
+def test_terminal_failure_sets_cooldown_and_skips_next_login(store, account, offline_probe, monkeypatch) -> None:  # noqa: ANN001
+    """冷却写入后，紧接着的下一轮跳过登录，只保留探活。"""
+    acc_id = store.add_account(account)
+    offline_probe["online"] = False
+    calls = {"count": 0}
+
+    def fake_login(*a, **k):
+        calls["count"] += 1
+        return LoginResult("failed", "密码错误", terminal=True)
+
+    monkeypatch.setattr(monitor_mod.portal, "login", fake_login)
+    monkeypatch.setattr(time, "sleep", lambda *_a: None)
+
+    mon = Monitor(store, interval=10)
+    acc = store.get_account(acc_id)
+    first = mon.check_account(acc)
+    second = mon.check_account(acc)
+
+    assert first.attempts == 1 and first.state == STATE_FAILED
+    assert calls["count"] == 1, "冷却期内不该再发起登录"
+    assert second.attempts == 0
+    assert "冷却" in second.message
+
+
 def test_success_confirmed_by_probe(store, account, offline_probe, monkeypatch) -> None:  # noqa: ANN001
     """登录返回成功但探活仍不通时，不应误报在线。"""
     acc_id = store.add_account(account)
