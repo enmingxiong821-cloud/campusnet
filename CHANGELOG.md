@@ -25,6 +25,20 @@
   内网 IP 作为门户线索加入候选。
 - **控制台 PWA**（D1）：可安装到手机桌面；Service Worker 只缓存外壳，
   离线打开显示「服务不可达」而不是白屏，`/api/` 一律不缓存不兜底。
+- **四平台单文件**（E1）：单文件产物从只有 Windows x64 扩到 Linux x64 / Linux arm64 /
+  macOS arm64，后三个平台不必再自己装 Python。打 tag 前可用 `workflow_dispatch`
+  先把四个平台各编一遍，不必等 Release 发出去才发现某个平台编不出来。
+- **系统级服务文件**（E4）：`packaging/` 下新增 systemd 单元与 macOS LaunchDaemon，
+  开机即连、不用等人登录——`bootstart install` 生成的一直是「登录后」语义，
+  「有电就连」缺的正是这一层。
+- **容器部署**（E2）：新增 `Dockerfile`、`docker-compose.yml` 与 `.dockerignore`。
+  镜像以非 root 用户运行，`HEALTHCHECK` 打公开的 `/healthz`（用解释器自带的 urllib，
+  不额外装 curl）；账号、事件与令牌都落在 `database/` 一个卷里。
+  `.dockerignore` 把 `config.json` / `*.key` / `*.db` 挡在构建上下文外——
+  `.gitignore` 挡得住提交，挡不住 `COPY`。
+- **多架构镜像与 tailnet 组网**（E3）：打 tag 时构建 `linux/amd64` + `linux/arm64`
+  推到 GHCR，普通 push 不构建镜像；另给 `docker-compose.tailscale.yml`，
+  让控制台只在 tailnet 上可达，不必把 2268 映射到局域网。
 - **首屏三大按钮 + 通知渠道预设**（D3+D4）：首屏加「关机 / 重启 / 立即检测」
   （拇指可达、带二次确认）；通知从「填一个 URL」升级为「选渠道 + 填 key」，
   内置 bark / Server酱 / 企业微信机器人 / 钉钉 / Telegram / ntfy 六种预设，
@@ -66,6 +80,16 @@
 - `cli.py` 按主题拆成 `cli/` 包（account / net / power / service / system），
   解析器与入口留在包内 `__init__`，各子命令的 `--help` 输出逐行不变；
   菜单与快捷方式共用的提权命令行构造收进 `shortcuts.elevate_command_line`。
+- `packaging/` 下的服务文件加防漂移测试：启动参数必须逐字等于
+  `bootstart.launch_args()`、注册目标必须是「机器起来」而非「用户登录」、
+  编码变量在、换行为 LF（新增 `.gitattributes` 把 unit 文件钉死成 LF，
+  免得 Windows 上 `core.autocrlf` 把 CR 带进 systemd 的值里）。
+- 发布流程的冒烟从「跑一下 `--version`」加强成断言真的读到规则：
+  冻结后最容易静默出错的不是代码而是数据，`profiles` 目录没打进去时
+  程序会一声不响地变成「0 条规则」。
+- compose 文件显式写了 `name:`：不写就取目录名当项目名，而本仓库目录名
+  「校园网自连」消毒之后是空串，`docker compose up` 会直接报
+  `project name must not be empty`。
 
 ## [1.6.0] - 2026-10-12
 
