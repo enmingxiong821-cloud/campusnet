@@ -14,6 +14,7 @@ from typing import Any
 from urllib.parse import urljoin, urlsplit
 
 from . import charset as charset_mod
+from . import tls as tls_mod
 from .paths import DEFAULT_USER_AGENT
 
 DEFAULT_PROBES = (
@@ -77,10 +78,7 @@ class _NoProxy(urllib.request.ProxyHandler):
 
 
 def _build_opener(insecure: bool) -> urllib.request.OpenerDirector:
-    ctx = ssl.create_default_context()
-    if insecure:
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
+    ctx = tls_mod.portal_context(insecure)
     handlers = [
         _NoProxy(),
         _NoRedirect(),

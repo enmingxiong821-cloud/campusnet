@@ -9,7 +9,6 @@ from __future__ import annotations
 import json
 import re
 import socket
-import ssl
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -18,6 +17,7 @@ from urllib.parse import urlsplit
 
 from . import probe as probe_mod
 from . import profiles as profiles_mod
+from . import tls as tls_mod
 from .paths import DEFAULT_USER_AGENT
 
 # 高频门户路径候选：Dr.COM / 深菱 / H3C / 新网 / 华为 / 深澜 SRUN 等常见形态
@@ -90,9 +90,8 @@ class _NoProxy(urllib.request.ProxyHandler):
 
 
 def _fetch_opener() -> urllib.request.OpenerDirector:
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
+    # 扫的是网关与门户，都是内网地址，一律自签证书
+    ctx = tls_mod.portal_context(insecure=True)
     opener = urllib.request.build_opener(
         _NoProxy(),
         _NoRedirect(),

@@ -15,13 +15,14 @@ import json
 import os
 import re
 import shutil
-import ssl
 import subprocess
 import sys
 import urllib.request
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import Any
+
+from . import tls as tls_mod
 
 OK = "ok"
 FIXED = "fixed"
@@ -307,9 +308,9 @@ def _check_auto_logon() -> PowerItem:
 def _check_time_skew() -> PowerItem:
     """时间偏差：断电后主板电池老化会导致时钟漂移，HMAC/HTTPS 握手会失败。"""
     target = os.environ.get("CAMPUSNET_TIME_SERVER", DEFAULT_TIME_TARGET)
-    context = ssl.create_default_context()
-    context.check_hostname = False
-    context.verify_mode = ssl.CERT_NONE
+    # 关校验是必须的：时钟本身就是被测对象，证书有效期先一步失败的话，
+    # 这一项永远测不出偏差，反而变成常绿。
+    context = tls_mod.portal_context(insecure=True)
     request = urllib.request.Request(target, headers={"User-Agent": "campusnet"})
     try:
         with urllib.request.urlopen(request, timeout=5, context=context) as response:

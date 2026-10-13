@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Callable
 
 from . import charset as charset_mod
 from . import probe as probe_mod
+from . import tls as tls_mod
 from .paths import DEFAULT_USER_AGENT
 from .storage import Account
 
@@ -263,12 +264,7 @@ class _NoProxy(urllib.request.ProxyHandler):
 
 
 def _opener(cookies: CookieJar, insecure: bool = False) -> urllib.request.OpenerDirector:
-    import ssl
-
-    ctx = ssl.create_default_context()
-    if insecure:
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
+    ctx = tls_mod.portal_context(insecure)
     opener = urllib.request.build_opener(
         _NoProxy(),
         _NoRedirect(),

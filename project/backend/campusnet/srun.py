@@ -36,6 +36,7 @@ from typing import Any
 
 from .charset import decode as decode_body
 from .paths import DEFAULT_USER_AGENT
+from .tls import portal_context
 
 # SRUN 加密常量，三段密文都依赖它们，错一个就是 sign_error
 DEFAULT_AC_ID = "1"
@@ -484,12 +485,7 @@ class _NoProxy(urllib.request.ProxyHandler):
 
 
 def _opener(insecure: bool):
-    import ssl
-
-    ctx = ssl.create_default_context()
-    if insecure:
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
+    ctx = portal_context(insecure)
     opener = urllib.request.build_opener(
         _NoProxy(),
         urllib.request.HTTPSHandler(context=ctx),
