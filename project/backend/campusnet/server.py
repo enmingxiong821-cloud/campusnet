@@ -769,6 +769,78 @@ def routes_wake(store: Store) -> dict[tuple[str, str], Handler]:
     }
 
 
+def routes_pair(
+    store: Store, auth: ApiAuth | None
+) -> dict[tuple[str, str], Handler]:
+    """扫码配对：生成一次性配对码，手机凭码换正式会话（不必手抄令牌）。"""
+
+    def generate(_: dict[str, Any], h: ApiHandler) -> None:
+        from datetime import datetime, timedelta
+
+        from . import pair as pair_mod
+
+        store.purge_pair_codes()  # 顺手清过期码，避免表无限增长
+        code = pair_mod.generate_code()
+        expires_at = (
+            datetime.now() + timedelta(seconds=pair_mod.PAIR_TTL_SECONDS)
+        ).strftime("%Y-%m-%d %H:%M:%S")
+        store.add_pair_code(pair_mod.code_hash(code), expires_at)
+        host = h.headers.get("Host", "127.0.0.1")
+        url = f"http://{host}/#pair={code}"
+        store.add_event("生成了一个扫码配对码", level="info", stage="pair")
+        h._send(
+            HTTPStatus.OK,
+            {"ok": True, "code": code, "url": url, "expires_at": expires_at},
+        )
+
+    def claim(_: dict[str, Any], h: ApiHandler) -> None:
+        from datetime import datetime
+
+        from . import pair as pair_mod
+
+        payload = h._read_body()
+        code = str(payload.get("code", "")).strip().upper()
+        if not code:
+            raise ApiError(HTTPStatus.BAD_REQUEST, "缺少配对码")
+        chash = pair_mod.code_hash(code)
+        record = store.get_pair_code(chash)
+        if record is None:
+            store.add_event("配对失败：无效配对码", level="warning", stage="pair")
+            raise ApiError(HTTPStatus.UNAUTHORIZED, "配对码无效或已过期")
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        if record["expires_at"] < now:
+            store.record_pair_failure(chash)
+            store.add_event("配对失败：配对码已过期", level="warning", stage="pair")
+            raise ApiError(HTTPStatus.UNAUTHORIZED, "配对码已过期")
+        if record["used_at"]:
+            store.add_event("配对失败：配对码已被使用", level="warning", stage="pair")
+            raise ApiError(HTTPStatus.UNAUTHORIZED, "配对码已被使用")
+        if record["failures"] >= pair_mod.MAX_FAILURES:
+            store.add_event(
+                "配对失败：尝试次数过多已锁定", level="warning", stage="pair"
+            )
+            raise ApiError(
+                HTTPStatus.TOO_MANY_REQUESTS, "尝试次数过多，请重新生成配对码"
+            )
+        user_agent = h.headers.get("User-Agent", "")
+        store.mark_pair_code_used(chash, user_agent)
+        store.add_event("扫码配对成功", level="info", stage="pair")
+        if auth is not None:
+            session = auth.issue_session()
+            h._send(
+                HTTPStatus.OK,
+                {"ok": True, "authenticated": True},
+                extra_headers={"Set-Cookie": auth.set_cookie(session)},
+            )
+        else:
+            h._send(HTTPStatus.OK, {"ok": True})
+
+    return {
+        ("POST", "/api/pair"): generate,
+        ("POST", "/api/pair/claim"): claim,
+    }
+
+
 def routes_auth(auth: ApiAuth | None) -> dict[tuple[str, str], Handler]:
     """认证入口公开，业务 API 由分发层统一保护。"""
 
@@ -834,6 +906,7 @@ def build_handler(
         routes_events(store),
         routes_system(store),
         routes_wake(store),
+        routes_pair(store, auth),
         routes_auth(auth),
     ):
         routes.update(group)
@@ -948,6 +1021,7 @@ def _install_dispatch(handler: type[ApiHandler]) -> None:
         ("GET", "/api/auth/status"),
         ("POST", "/api/auth/login"),
         ("POST", "/api/auth/logout"),
+        ("POST", "/api/pair/claim"),
     }
 
     def _dispatch(self: ApiHandler, method: str) -> None:

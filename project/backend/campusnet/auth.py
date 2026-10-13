@@ -144,6 +144,13 @@ class ApiAuth:
             self._sessions[session] = time.time() + SESSION_TTL
         return session
 
+    def issue_session(self) -> str:
+        """直接发放一个会话，不必再验令牌——扫码配对成功后走这里。"""
+        session = secrets.token_urlsafe(32)
+        with self._lock:
+            self._sessions[session] = time.time() + SESSION_TTL
+        return session
+
     def logout(self, headers: object) -> None:
         session = self._session_from_headers(headers)
         if session:

@@ -300,6 +300,14 @@
           需要管理员权限并确认一次 UAC。
           Linux 走 systemd 用户单元（无则退化为 XDG autostart），macOS 走 LaunchAgent。
         </p>
+
+        <hr style="margin:22px 0;border:none;border-top:1px solid var(--line)">
+        <div class="row" style="align-items:center">
+          <span class="lbl" style="min-width:96px">扫码配对</span>
+          <button class="ghost" id="btnGenPair">生成配对码</button>
+          <span class="hint">手机不必手抄令牌：生成一个 6 位配对码，5 分钟有效、只能用一次</span>
+        </div>
+        <div id="pairResult" style="margin-top:8px"></div>
       </div>
     </section>
 
@@ -430,7 +438,7 @@ async function api(path, opts = {}) {
     body: opts.body ? JSON.stringify(opts.body) : undefined,
   });
   const data = await res.json().catch(() => ({ ok:false, error:'响应不是 JSON' }));
-  if (res.status === 401 && authRequired && !path.startsWith('/api/auth/')) {
+  if (res.status === 401 && authRequired && !path.startsWith('/api/auth/') && !path.startsWith('/api/pair/')) {
     showAuth('会话已失效，请重新输入控制台令牌');
   }
   if (!res.ok || data.ok === false) throw new Error(data.error || `HTTP ${res.status}`);
@@ -1063,7 +1071,47 @@ $('authForm').onsubmit = async e => {
   }
 };
 
-initAuth().then(data => {
+async function generatePair() {
+  const box = $('pairResult');
+  box.innerHTML = '<div class="hint">生成中…</div>';
+  try {
+    const r = await api('/api/pair', { method:'POST', body:{} });
+    box.innerHTML = `
+      <div style="border:1px solid var(--line);border-radius:8px;padding:12px">
+        <div style="font-size:28px;letter-spacing:8px;font-family:var(--mono);font-weight:650">${esc(r.code)}</div>
+        <div class="hint mono" style="margin-top:6px;overflow-wrap:anywhere">${esc(r.url)}</div>
+        <div class="row" style="margin-top:8px">
+          <button class="ghost" data-copy="${esc(r.url)}">复制链接</button>
+          <span class="hint">${esc(r.expires_at)} 前有效，只能用一次；手机打开上面链接即可配对</span>
+        </div>
+      </div>`;
+    box.querySelector('button[data-copy]').onclick = (e) => {
+      navigator.clipboard?.writeText(e.target.dataset.copy);
+      toast('已复制', 'ok');
+    };
+  } catch (e) { box.innerHTML = '<div class="empty">生成失败: ' + esc(e.message) + '</div>'; }
+}
+
+async function claimPairFromHash() {
+  const m = location.hash.match(/[#&]pair=([A-Za-z0-9]+)/);
+  if (!m) return false;
+  const code = m[1].toUpperCase();
+  try {
+    await api('/api/pair/claim', { method:'POST', body:{ code } });
+    location.hash = '';
+    hideAuth();
+    await refresh();
+    toast('配对成功', 'ok');
+  } catch (e) {
+    location.hash = '';
+    showAuth('配对失败：' + e.message);
+  }
+  return true;
+}
+$('btnGenPair').onclick = generatePair;
+
+initAuth().then(async data => {
+  if (await claimPairFromHash()) return;
   if (!authRequired || data.authenticated) refresh();
 }).catch(err => showAuth('无法连接服务：' + err.message));
 // 常态轮询：10 秒刷一次账号与状态，同时低频拉进度，

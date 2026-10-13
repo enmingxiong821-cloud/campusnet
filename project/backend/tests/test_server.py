@@ -888,6 +888,58 @@ def test_pwa_assets_served(api: _Api) -> None:
     assert raw[:8] == b"\x89PNG\r\n\x1a\n"
 
 
+def test_pair_generate_and_claim(api: _Api) -> None:
+    status, data = call(f"{api}/api/pair", "POST", {})
+    assert status == 200
+    code = data["code"]
+    assert len(code) == 6
+    assert data["url"].endswith("#pair=" + code)
+
+    status, data = call(f"{api}/api/pair/claim", "POST", {"code": code})
+    assert status == 200
+    assert data["ok"] is True
+
+    # 单次使用：第二次报 401
+    status, data = call(f"{api}/api/pair/claim", "POST", {"code": code})
+    assert status == 401
+
+
+def test_pair_claim_rejects_wrong_code(api: _Api) -> None:
+    status, data = call(f"{api}/api/pair/claim", "POST", {"code": "ZZZZZZ"})
+    assert status == 401
+
+
+def test_pair_claim_requires_code(api: _Api) -> None:
+    status, _ = call(f"{api}/api/pair/claim", "POST", {})
+    assert status == 400
+
+
+def test_pair_claim_sets_session_cookie(auth_api: _Api) -> None:
+    # 用显式令牌生成配对码（/api/pair 需要认证）
+    req = urllib.request.Request(
+        f"{auth_api}/api/pair",
+        data=b"{}",
+        method="POST",
+        headers={"Content-Type": "application/json", "X-CampusNet-Token": "t" * 43},
+    )
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        code = json.loads(resp.read().decode("utf-8"))["code"]
+
+    # claim 是公开接口，凭码换会话 Cookie
+    req = urllib.request.Request(
+        f"{auth_api}/api/pair/claim",
+        data=json.dumps({"code": code}).encode("utf-8"),
+        method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        cookie = resp.headers.get("Set-Cookie", "")
+
+    assert "campusnet_session=" in cookie
+    assert "HttpOnly" in cookie
+    assert "SameSite=Strict" in cookie
+
+
 def test_path_traversal_blocked(api: _Api) -> None:
     status, _ = call(f"{api}/../config.json")
     assert status in (403, 404)
