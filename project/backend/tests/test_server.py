@@ -865,6 +865,29 @@ def test_static_missing_file_404(api: _Api) -> None:
     assert status == 404 and data["ok"] is False
 
 
+def test_pwa_assets_served(api: _Api) -> None:
+    with urllib.request.urlopen(f"{api}/manifest.webmanifest", timeout=10) as resp:
+        manifest = resp.read().decode("utf-8")
+        manifest_ctype = resp.headers.get("Content-Type", "")
+    assert resp.status == 200
+    assert "application/manifest+json" in manifest_ctype
+    assert '"display": "standalone"' in manifest
+
+    with urllib.request.urlopen(f"{api}/service-worker.js", timeout=10) as resp:
+        sw = resp.read().decode("utf-8")
+        sw_ctype = resp.headers.get("Content-Type", "")
+    assert resp.status == 200
+    assert "javascript" in sw_ctype
+    assert "campusnet-shell" in sw
+
+    with urllib.request.urlopen(f"{api}/icons/icon192.png", timeout=10) as resp:
+        raw = resp.read()
+        png_ctype = resp.headers.get("Content-Type", "")
+    assert resp.status == 200
+    assert "image/png" in png_ctype
+    assert raw[:8] == b"\x89PNG\r\n\x1a\n"
+
+
 def test_path_traversal_blocked(api: _Api) -> None:
     status, _ = call(f"{api}/../config.json")
     assert status in (403, 404)

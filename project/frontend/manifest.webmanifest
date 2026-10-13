@@ -1,0 +1,15 @@
+{
+  "name": "校园网自连 · 控制台",
+  "short_name": "校园网自连",
+  "description": "有电自动连校园网，远程开关机",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#0f1218",
+  "theme_color": "#0f1218",
+  "icons": [
+    { "src": "/icons/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "/icons/icon192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/icons/icon512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}
