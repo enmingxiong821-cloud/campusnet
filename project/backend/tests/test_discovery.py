@@ -121,6 +121,48 @@ def test_guess_gateways_starts_with_local_gateway() -> None:
     assert len(set(gateways)) == len(gateways)  # 去重
 
 
+def test_is_private_ipv4() -> None:
+    assert discovery._is_private_ipv4("10.0.0.1") is True
+    assert discovery._is_private_ipv4("172.16.0.5") is True
+    assert discovery._is_private_ipv4("172.31.255.255") is True
+    assert discovery._is_private_ipv4("192.168.1.1") is True
+    assert discovery._is_private_ipv4("127.0.0.1") is True
+    assert discovery._is_private_ipv4("8.8.8.8") is False
+    assert discovery._is_private_ipv4("172.15.0.1") is False
+    assert discovery._is_private_ipv4("not-an-ip") is False
+
+
+def test_detect_dns_hijack_returns_private_ip(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        discovery.socket,
+        "getaddrinfo",
+        lambda host, port: [(2, 1, 6, "", ("10.110.168.53", 0))],
+    )
+
+    assert discovery.detect_dns_hijack("www.msftconnecttest.com") == "10.110.168.53"
+
+
+def test_detect_dns_hijack_ignores_public(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        discovery.socket,
+        "getaddrinfo",
+        lambda host, port: [(2, 1, 6, "", ("8.8.8.8", 0))],
+    )
+
+    assert discovery.detect_dns_hijack("www.baidu.com") is None
+
+
+def test_detect_dns_hijack_handles_resolve_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _raise(host, port):  # noqa: ANN001, ANN002
+        raise OSError("no resolve")
+
+    monkeypatch.setattr(discovery.socket, "getaddrinfo", _raise)
+
+    assert discovery.detect_dns_hijack("no-such-host.invalid") is None
+
+
 def test_local_ipv4_returns_valid_shape() -> None:
     ip = discovery.local_ipv4()
     assert ip is None or ip.count(".") == 3

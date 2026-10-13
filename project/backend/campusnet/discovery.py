@@ -193,6 +193,40 @@ def guess_gateways() -> list[str]:
     return out
 
 
+def _is_private_ipv4(ip: str) -> bool:
+    """RFC 1918 私有段 + 回环：DNS 劫持到这些地址就说明域名被门户接管了。"""
+    try:
+        parts = [int(p) for p in ip.split(".")]
+    except ValueError:
+        return False
+    if len(parts) != 4:
+        return False
+    a, b, _c, _d = parts
+    return a == 10 or a == 127 or (a == 172 and 16 <= b <= 31) or (a == 192 and b == 168)
+
+
+def detect_dns_hijack(hostname: str) -> str | None:
+    """DNS 劫持判定：域名被解析到内网地址时返回那个内网 IP，否则 None。
+
+    校园网常见做法是劫持 DNS，把任何域名都解析到门户服务器的内网 IP，
+    从而把用户「拦」在认证页。这个 IP 就是最直接的门户线索。
+    """
+    host = (urlsplit("http://" + hostname).hostname or "").strip()
+    if not host:
+        return None
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except OSError:
+        return None
+    for info in infos:
+        ip = info[4][0]
+        if ":" in ip:  # 只看 IPv4
+            continue
+        if _is_private_ipv4(ip):
+            return ip
+    return None
+
+
 # ---------------------------------------------------------------- 指纹与字段
 
 
@@ -398,6 +432,18 @@ def discover(
     detected = probe_mod.detect_portal_url(seed, timeout=timeout)
     if detected and detected not in seeds:
         seeds.append(detected)
+
+    # DNS 劫持判定：域名被解析到内网地址，多半被门户劫持，内网 IP 即门户线索。
+    seed_host = urlsplit(seed).hostname
+    if seed_host:
+        hijack_ip = detect_dns_hijack(seed_host)
+        if hijack_ip:
+            hijack_url = f"http://{hijack_ip}/"
+            if hijack_url not in seeds:
+                seeds.append(hijack_url)
+            report["hints"].append(
+                f"检测到 DNS 劫持：{seed_host} 解析到内网 {hijack_ip}"
+            )
 
     candidates = scan_urls(seeds, timeout=timeout) if seeds else []
 
