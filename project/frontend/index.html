@@ -189,6 +189,12 @@
     #wakeHint{overflow-wrap:anywhere}
     .row button{flex:1 1 auto}
   }
+  /* 首屏三大按钮：拇指可达，大字号大热区 */
+  .quick-actions{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:14px 18px 0}
+  .qa{padding:15px 8px;border:1px solid var(--line);border-radius:var(--radius);font-size:16px;font-weight:600;cursor:pointer;background:var(--card);color:var(--txt)}
+  .qa:active{transform:scale(.97)}
+  .qa.danger{background:rgba(229,83,75,.16);color:#f28b82;border-color:rgba(229,83,75,.42)}
+  .qa.ok{background:rgba(47,191,113,.14);color:#6fdc9a;border-color:rgba(47,191,113,.4)}
 </style>
 </head>
 <body>
@@ -215,6 +221,12 @@
 </header>
 
 <main>
+  <div class="quick-actions">
+    <button class="qa danger" id="btnQuickOff">关机</button>
+    <button class="qa" id="btnQuickReboot">重启</button>
+    <button class="qa ok" id="btnQuickProbe">立即检测</button>
+  </div>
+
   <div class="grid cards">
     <div class="card"><h3>账号总数</h3><div class="val" id="cTotal">0</div><div class="sub" id="cEnabled">启用 0</div></div>
     <div class="card"><h3>在线</h3><div class="val" id="cOnline" style="color:var(--ok)">0</div><div class="sub" id="cOnlineSub">—</div></div>
@@ -268,8 +280,22 @@
           <label><span class="lbl">服务启动时自动开监控</span>
             <select id="setAutostart"><option value="1">是</option><option value="0">否</option></select>
           </label>
-          <label><span class="lbl">失败通知 Webhook</span>
-            <input id="setNotifyUrl" placeholder="留空即关闭；钉钉/企业微信机器人的地址都行">
+          <label><span class="lbl">失败通知渠道</span>
+            <select id="setNotifyChannel">
+              <option value="generic">通用 Webhook</option>
+              <option value="bark">Bark（iOS）</option>
+              <option value="serverchan">Server酱</option>
+              <option value="wecom">企业微信机器人</option>
+              <option value="dingtalk">钉钉机器人</option>
+              <option value="telegram">Telegram Bot</option>
+              <option value="ntfy">ntfy</option>
+            </select>
+          </label>
+          <label id="notifyUrlLabel"><span class="lbl">Webhook 地址</span>
+            <input id="setNotifyUrl" placeholder="通用渠道填完整 webhook URL">
+          </label>
+          <label id="notifyKeyLabel" hidden><span class="lbl">渠道 Key</span>
+            <input id="setNotifyKey" placeholder="Bark 填设备 key；Telegram 填 bot_token/chat_id">
           </label>
           <label><span class="lbl">连续失败几次后通知</span>
             <input type="number" id="setNotifyAfter" min="1" max="99" placeholder="3">
@@ -277,6 +303,7 @@
         </div>
         <div class="row">
           <button id="btnSaveSettings">保存设置</button>
+          <button class="ghost" id="btnTestNotify">发送测试通知</button>
           <button class="ghost" id="btnDetectPortal">检测门户地址</button>
           <span class="hint" id="detectResult"></span>
         </div>
@@ -782,9 +809,18 @@ async function loadSettings() {
     $('setInterval').value = settings.interval ?? 60;
     $('setHeadless').value = (settings.headless === false) ? '0' : '1';
     $('setAutostart').value = (settings.autostart === false) ? '0' : '1';
+    $('setNotifyChannel').value = settings.notify_channel ?? 'generic';
     $('setNotifyUrl').value = settings.notify_url ?? '';
+    $('setNotifyKey').value = settings.notify_key ?? '';
     $('setNotifyAfter').value = settings.notify_after_failures ?? 3;
+    toggleNotifyFields();
   } catch (e) { toast('加载设置失败: ' + e.message, 'err'); }
+}
+
+function toggleNotifyFields() {
+  const generic = $('setNotifyChannel').value === 'generic';
+  $('notifyUrlLabel').hidden = !generic;
+  $('notifyKeyLabel').hidden = generic;
 }
 
 async function saveSettings() {
@@ -795,13 +831,22 @@ async function saveSettings() {
   };
   try {
     await api('/api/settings', { method:'PUT', body: {
+      notify_channel: $('setNotifyChannel').value,
       notify_url: $('setNotifyUrl').value.trim(),
+      notify_key: $('setNotifyKey').value.trim(),
       notify_after_failures: +$('setNotifyAfter').value || 3,
     }});
     await api('/api/monitor/start', { method:'POST', body });
     toast('设置已保存并应用', 'ok');
     refresh();
   } catch (e) { toast('保存失败: ' + e.message, 'err'); }
+}
+
+async function testNotify() {
+  try {
+    await api('/api/notify/test', { method:'POST', body:{} });
+    toast('测试通知已发送', 'ok');
+  } catch (e) { toast('发送失败: ' + e.message, 'err'); }
 }
 
 // 复用账号状态的徽标配色：已开启用 s-online（绿），未开启用 s-unknown（灰）。
@@ -1042,7 +1087,12 @@ $('btnPowerInfo').onclick = loadWakeHint;
 $('btnPowerPrep').onclick = runPowerPrep;
 $('btnAddPlan').onclick = addWakePlan;
 $('btnAddDevice').onclick = addDevice;
+$('btnQuickOff').onclick = () => powerAction('off');
+$('btnQuickReboot').onclick = () => powerAction('reboot');
+$('btnQuickProbe').onclick = probeNow;
 $('btnSaveSettings').onclick = saveSettings;
+$('btnTestNotify').onclick = testNotify;
+$('setNotifyChannel').onchange = toggleNotifyFields;
 $('btnBootInstall').onclick = () => setBootstart('install');
 $('btnBootUninstall').onclick = () => setBootstart('uninstall');
 $('btnDetectPortal').onclick = async () => {

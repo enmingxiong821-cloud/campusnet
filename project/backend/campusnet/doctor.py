@@ -232,20 +232,21 @@ def _update_check(enabled: bool = True) -> Check:
 def _notify_check(store: Any | None) -> Check:
     if store is None:
         return Check("失败通知", WARN, "数据库打不开，无法读取通知配置")
-    from .notify import Notifier
+    from .notify import CHANNELS, Notifier
 
     notifier = Notifier.from_store(store)
     if notifier.enabled:
+        label = CHANNELS.get(notifier.channel, notifier.channel)
         return Check(
             "失败通知",
             OK,
-            f"已配置 webhook（连续失败 {notifier.after_failures} 次起通知，恢复时也通知）",
+            f"已配置 {label}（连续失败 {notifier.after_failures} 次起通知，恢复时也通知）",
         )
     return Check(
         "失败通知",
         WARN,
         "未配置：机器出问题时不会主动通知你"
-        "（设 notify_url，或用 CAMPUSNET_NOTIFY_URL 临时启用）",
+        "（设置里选渠道填 key，或用 CAMPUSNET_NOTIFY_URL 临时启用）",
     )
 
 

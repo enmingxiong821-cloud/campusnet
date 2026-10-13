@@ -940,6 +940,28 @@ def test_pair_claim_sets_session_cookie(auth_api: _Api) -> None:
     assert "SameSite=Strict" in cookie
 
 
+def test_notify_channels_listed(api: _Api) -> None:
+    status, data = call(f"{api}/api/notify/channels")
+    assert status == 200
+    assert data["channels"]["bark"] == "Bark"
+    assert data["channels"]["wecom"] == "企业微信机器人"
+
+
+def test_notify_test_requires_config(api: _Api) -> None:
+    status, _ = call(f"{api}/api/notify/test", "POST", {})
+    assert status == 400
+
+
+def test_notify_test_sends_when_configured(api: _Api, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("campusnet.notify.send_test", lambda notifier: True)
+    call(f"{api}/api/settings", "PUT", {"notify_channel": "bark", "notify_key": "k"})
+
+    status, data = call(f"{api}/api/notify/test", "POST", {})
+
+    assert status == 200
+    assert data["ok"] is True
+
+
 def test_path_traversal_blocked(api: _Api) -> None:
     status, _ = call(f"{api}/../config.json")
     assert status in (403, 404)
