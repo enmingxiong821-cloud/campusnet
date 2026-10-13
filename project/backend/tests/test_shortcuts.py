@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import webbrowser
 from pathlib import Path
@@ -151,6 +152,89 @@ def test_cli_access_prints_report(
     assert cli_mod.main(["access"]) == 0
 
     assert "控制台令牌" in capsys.readouterr().out
+
+
+def test_tailscale_status_not_installed(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(access_mod.shutil, "which", lambda _name: None)
+
+    assert access_mod.tailscale_status()["installed"] is False
+
+
+def test_tailscale_status_parses_json(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Result:
+        returncode = 0
+        stdout = json.dumps(
+            {
+                "Self": {
+                    "HostName": "dorm-pc",
+                    "DNSName": "dorm-pc.tail12345.ts.net",
+                    "TailscaleIPs": ["100.64.0.9", "fd7a::1"],
+                },
+                "CurrentTailnet": {"Name": "tail12345.ts.net"},
+                "Peer": {"node1": {}, "node2": {}},
+            }
+        ).encode()
+
+    monkeypatch.setattr(access_mod.shutil, "which", lambda _name: "tailscale")
+    monkeypatch.setattr(access_mod.subprocess, "run", lambda *a, **k: Result())
+
+    status = access_mod.tailscale_status()
+
+    assert status["installed"] is True
+    assert status["logged_in"] is True
+    assert status["tailnet"] == "tail12345"
+    assert status["ip"] == "100.64.0.9"
+    assert status["peers"] == 2
+
+
+def _fake_status(**overrides):  # noqa: ANN003
+    base = {
+        "installed": False,
+        "running": False,
+        "logged_in": False,
+        "tailnet": "",
+        "hostname": "",
+        "ip": "",
+        "peers": 0,
+    }
+    base.update(overrides)
+    return base
+
+
+def test_guide_missing_tailscale(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(access_mod, "tailscale_status", lambda: _fake_status())
+    monkeypatch.setattr(access_mod, "lan_ip", lambda: "")
+
+    text = "\n".join(access_mod.guide())
+
+    assert "缺这一步" in text
+    assert "winget" in text
+
+
+def test_guide_logged_in(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        access_mod,
+        "tailscale_status",
+        lambda: _fake_status(installed=True, running=True, logged_in=True,
+                             tailnet="tail12345", ip="100.64.0.9", peers=3),
+    )
+    monkeypatch.setattr(access_mod, "lan_ip", lambda: "192.168.1.23")
+
+    text = "\n".join(access_mod.guide())
+
+    assert "tailnet=tail12345" in text
+    assert "对端 3 台" in text
+    assert "http://100.64.0.9:2268" in text
+
+
+def test_cli_access_guide(monkeypatch: pytest.MonkeyPatch, capsys) -> None:  # noqa: ANN001
+    monkeypatch.setattr(
+        access_mod, "guide", lambda host="127.0.0.1", port=2268: ["三步走"]
+    )
+
+    assert cli_mod.main(["access", "--guide"]) == 0
+
+    assert "三步走" in capsys.readouterr().out
 
 
 # ---------- console / logs ----------
