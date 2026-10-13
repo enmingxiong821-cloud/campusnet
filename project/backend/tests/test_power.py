@@ -4,11 +4,19 @@ from __future__ import annotations
 
 import socket
 import sys
+from types import SimpleNamespace
 
 import pytest
 
 from campusnet import cli as cli_mod
 from campusnet import power
+
+
+def _proc(returncode: int = 0, stdout: str = "") -> SimpleNamespace:
+    """假的 subprocess 结果对象；_run / _run_capture 只读这三项。"""
+    return SimpleNamespace(
+        returncode=returncode, stdout=stdout.encode(), stderr=b""
+    )
 
 
 def test_shutdown_command_matches_platform() -> None:
@@ -148,3 +156,186 @@ def test_wake_info_without_mac_gives_placeholder(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(power, "local_macs", lambda: [])
 
     assert "<网卡MAC>" in str(power.wake_info()["command"])
+
+
+# ------------------------------------------------------- 平台与异常分支补测（F2）
+
+
+def test_run_wraps_oserror(monkeypatch: pytest.MonkeyPatch) -> None:
+    """命令根本跑不起来（找不到可执行文件）也要包成 PowerError。"""
+
+    def boom(*args, **kwargs):
+        raise OSError("no such binary")
+
+    monkeypatch.setattr(power.subprocess, "run", boom)
+
+    with pytest.raises(power.PowerError) as excinfo:
+        power._run(["nope"])
+
+    assert "OSError" in str(excinfo.value)
+
+
+def test_shutdown_command_darwin(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(power.sys, "platform", "darwin")
+
+    assert power.shutdown_command() == [
+        "osascript",
+        "-e",
+        'tell application "System Events" to shut down',
+    ]
+
+
+def test_reboot_command_darwin(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(power.sys, "platform", "darwin")
+
+    assert power.reboot_command() == [
+        "osascript",
+        "-e",
+        'tell application "System Events" to restart',
+    ]
+
+
+def test_linux_uses_systemctl_when_available(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(power.sys, "platform", "linux")
+    monkeypatch.setattr(power.shutil, "which", lambda _name: "/usr/bin/systemctl")
+
+    assert power.shutdown_command() == ["systemctl", "poweroff"]
+    assert power.reboot_command() == ["systemctl", "reboot"]
+
+
+def test_linux_falls_back_to_shutdown(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(power.sys, "platform", "linux")
+    monkeypatch.setattr(power.shutil, "which", lambda _name: None)
+
+    assert power.shutdown_command() == ["shutdown", "-h", "now"]
+    assert power.reboot_command() == ["shutdown", "-r", "now"]
+
+
+def test_delay_is_clamped_to_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(power.sys, "platform", "win32")
+
+    assert power.shutdown_command(-5) == ["shutdown", "/s", "/t", "0"]
+
+
+def test_reboot_executes_and_reports_command(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[list[str]] = []
+    monkeypatch.setattr(power.sys, "platform", "win32")
+    monkeypatch.setattr(power, "_run", lambda args: calls.append(args))
+
+    assert power.reboot(30) == "shutdown /r /t 30"
+    assert calls == [["shutdown", "/r", "/t", "30"]]
+
+
+def test_reboot_dry_run_skips_execution(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(power.sys, "platform", "win32")
+    monkeypatch.setattr(
+        power, "_run", lambda args: pytest.fail("dry_run 不该真的执行命令")
+    )
+
+    assert power.reboot(0, dry_run=True) == "shutdown /r /t 0"
+
+
+def test_run_capture_reports_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(power.subprocess, "run", lambda *a, **k: _proc(1, "出错"))
+
+    ok, text = power._run_capture(["x"])
+
+    assert ok is False
+    assert "出错" in text
+
+
+def test_run_capture_swallows_oserror(monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(*args, **kwargs):
+        raise OSError("missing")
+
+    monkeypatch.setattr(power.subprocess, "run", boom)
+
+    assert power._run_capture(["x"]) == (False, "")
+
+
+def test_local_macs_windows_getmac_absent(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(power.shutil, "which", lambda _name: None)
+
+    assert power.local_macs("nt") == []
+
+
+def test_local_macs_windows_command_failed(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(power.shutil, "which", lambda _name: "getmac")
+    monkeypatch.setattr(power, "_run_capture", lambda args: (False, ""))
+
+    assert power.local_macs("nt") == []
+
+
+def test_local_macs_windows_dedupes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """同一张网卡在 getmac 里可能出现多行，去重且已连接的排前面。"""
+    monkeypatch.setattr(power.shutil, "which", lambda _name: "getmac")
+    monkeypatch.setattr(
+        power,
+        "_run_capture",
+        lambda args: (
+            True,
+            '"AC-45-EF-49-B7-F4","Media disconnected"\n'
+            '"AC-45-EF-49-B7-F4","\\Device\\Tcpip_{X}"\n'
+            "这行没有 MAC\n",
+        ),
+    )
+
+    assert power.local_macs("nt") == ["AC:45:EF:49:B7:F4"]
+
+
+def test_local_macs_posix_parses_ip_link(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        power,
+        "_run_capture",
+        lambda args: (
+            True,
+            "2: eth0: <BROADCAST> link/ether ac:45:ef:49:b7:f4 brd ff:ff:ff:ff:ff:ff\n"
+            "3: lo: <LOOPBACK> link/ether 00:00:00:00:00:00 brd 00:00:00:00:00:00\n",
+        ),
+    )
+
+    assert power.local_macs("posix") == ["AC:45:EF:49:B7:F4"]
+
+
+def test_local_macs_posix_falls_back_to_ifconfig(monkeypatch: pytest.MonkeyPatch) -> None:
+    def capture(args):
+        if args[0] == "ip":
+            return False, ""
+        return True, "ether ac:45:ef:49:b7:f4\n"
+
+    monkeypatch.setattr(power, "_run_capture", capture)
+
+    assert power.local_macs("posix") == ["AC:45:EF:49:B7:F4"]
+
+
+def test_local_macs_posix_all_failed(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(power, "_run_capture", lambda args: (False, ""))
+
+    assert power.local_macs("posix") == []
+
+
+def test_local_macs_defaults_to_current_os(monkeypatch: pytest.MonkeyPatch) -> None:
+    """不传 platform 时按 os.name 选实现，这里只断言它确实读了 os.name。"""
+    monkeypatch.setattr(power.os, "name", "posix")
+    monkeypatch.setattr(power, "_run_capture", lambda args: (False, ""))
+
+    assert power.local_macs() == []
+
+
+def test_wake_wraps_socket_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    class BoomSock:
+        def setsockopt(self, *args):
+            pass
+
+        def sendto(self, *args):
+            raise OSError("network unreachable")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(power.socket, "socket", lambda *a, **k: BoomSock())
+
+    with pytest.raises(power.PowerError) as excinfo:
+        power.wake("AA:BB:CC:DD:EE:FF")
+
+    assert "OSError" in str(excinfo.value)

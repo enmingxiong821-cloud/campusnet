@@ -129,7 +129,11 @@ def local_macs(platform: str | None = None) -> list[str]:
     macs = []
     for match in re.finditer(r"\b([0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5})\b", text or ""):
         mac = match.group(1).upper()
-        if mac not in macs and mac != "00:00:00:00:00:00":
+        # `ip -o link` / `ifconfig -a` 的输出里带着广播地址与全零占位，
+        # 它们长得和 MAC 一样但不是网卡地址，留给用户只会让人填错 WOL。
+        if mac in ("00:00:00:00:00:00", "FF:FF:FF:FF:FF:FF"):
+            continue
+        if mac not in macs:
             macs.append(mac)
     return macs
 
