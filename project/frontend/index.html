@@ -3,7 +3,11 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#0f1218">
 <title>校园网自连 · 控制台</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" type="image/svg+xml" href="/icons/icon.svg">
+<link rel="apple-touch-icon" href="/icons/icon192.png">
 <style>
   :root{
     --bg:#0f1218; --bg-soft:#161b24; --card:#1b212c; --line:#252c39;
@@ -400,6 +404,11 @@
 <script>
 const $ = id => document.getElementById(id);
 const state = { accounts: [], monitor: { alive:false, interval:60, checking:false }, editingId: null, timer: null };
+
+// PWA：注册 service worker，缓存外壳让「添加到主屏幕」的窗口离线也能打开。
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/service-worker.js').catch(() => {});
+}
 
 const STATE_TEXT = {
   online:'在线', logged_in:'已登录', offline:'掉线', failed:'登录失败', unknown:'在线未确认'

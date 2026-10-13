@@ -227,6 +227,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._send(HTTPStatus.NOT_FOUND, {"ok": False, "error": f"找不到 {path}"})
             return
         ctype, _ = mimetypes.guess_type(str(target))
+        if target.suffix == ".webmanifest":
+            ctype = "application/manifest+json"  # PWA 清单，mimetypes 不一定认这个扩展名
         self._send(
             HTTPStatus.OK, target.read_bytes(), ctype or "application/octet-stream"
         )
