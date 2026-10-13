@@ -231,6 +231,7 @@
     <div class="tabs">
       <button class="tab active" data-tab="accounts">账号</button>
       <button class="tab" data-tab="events">事件日志</button>
+      <button class="tab" data-tab="power">电源</button>
       <button class="tab" data-tab="settings">设置</button>
     </div>
 
@@ -275,14 +276,6 @@
           <button class="ghost" id="btnDetectPortal">检测门户地址</button>
           <span class="hint" id="detectResult"></span>
         </div>
-        <div class="row" style="margin-top:14px">
-          <span class="lbl" style="min-width:96px">电源控制</span>
-          <button class="ghost danger" id="btnPowerOff">远程关机</button>
-          <button class="ghost" id="btnPowerReboot">远程重启</button>
-          <button class="ghost" id="btnPowerInfo">怎么远程开机</button>
-          <span class="hint" id="powerHint"></span>
-        </div>
-        <p class="hint" id="wakeHint" style="margin-top:8px;white-space:pre-wrap"></p>
         <label style="margin-top:18px"><span class="lbl">用于检测门户地址的探测网址</span>
           <input id="setDetectUrl" value="http://www.msftconnecttest.com/connecttest.txt">
         </label>
@@ -297,12 +290,63 @@
         </div>
         <p class="hint" style="margin-top:8px">
           目标链路是：通电 → 程序自动运行 → 自动认证你配置好的网络；机器开不开机由你远程决定
-          （关机用上面的按钮，开机需要 BIOS 上电自启 / 智能插座 / WOL 之一）。
+          （关机 / 唤醒 / 体检在「电源」页操作，开机需要 BIOS 上电自启 / 智能插座 / WOL 之一）。
           默认载体写在当前用户启动文件夹，是「登录后」语义；想要「通电就自动连」，
           用桌面快捷方式「注册开机自启-无需登录(需管理员)」注册计划任务——开机触发、无论是否登录都运行，
           需要管理员权限并确认一次 UAC。
           Linux 走 systemd 用户单元（无则退化为 XDG autostart），macOS 走 LaunchAgent。
         </p>
+      </div>
+    </section>
+
+    <section id="tab-power" hidden>
+      <div class="panel-body">
+        <div class="row">
+          <span class="lbl" style="min-width:96px">电源控制</span>
+          <button class="ghost danger" id="btnPowerOff">远程关机</button>
+          <button class="ghost" id="btnPowerReboot">远程重启</button>
+          <button class="ghost" id="btnPowerPrep">电源体检</button>
+          <button class="ghost" id="btnPowerInfo">怎么远程开机</button>
+          <span class="hint" id="powerHint"></span>
+        </div>
+
+        <h4 style="margin:18px 0 8px">远程开机 · 三层方案（按「宿舍断电」现实排序）</h4>
+        <div style="display:grid;gap:8px">
+          <div style="border:1px solid var(--line);border-radius:8px;padding:10px 12px">
+            <strong>L1 · 来电自启 + 智能插座</strong> <span class="hint">断电场景首选</span>
+            <div class="hint" style="margin-top:4px">BIOS 设「断电恢复 = Power On」，插座重新上电后机器自动开机；宿舍整体断电时插座也要能联网，需自带 4G/SIM 的插座。</div>
+          </div>
+          <div style="border:1px solid var(--line);border-radius:8px;padding:10px 12px">
+            <strong>L2 · 常开跳板 + WOL</strong> <span class="hint">有电但关机 / 睡眠</span>
+            <div class="hint" style="margin-top:4px">宿舍里留一台常开小设备（树莓派 / 旧路由 / 旧手机）发魔术包叫醒这台电脑（需同一局域网）。</div>
+          </div>
+          <div style="border:1px solid var(--line);border-radius:8px;padding:10px 12px">
+            <strong>L3 · 同网段手机 App</strong> <span class="hint">临时应急</span>
+            <div class="hint" style="margin-top:4px">手机连同一 Wi-Fi，用 WOL App 填下面的 MAC 直接唤醒。</div>
+          </div>
+        </div>
+        <p class="hint" id="wakeHint" style="margin-top:8px;white-space:pre-wrap"></p>
+
+        <h4 style="margin:18px 0 8px">电源体检（远程开关机前置条件）</h4>
+        <div id="powerPrepResult"><div class="empty">点「电源体检」逐项检查，能自动修的会提示一键修复。</div></div>
+
+        <h4 style="margin:18px 0 8px">唤醒计划（定时发 WOL）</h4>
+        <div class="row">
+          <input id="planName" placeholder="名称" style="max-width:140px">
+          <input id="planMac" placeholder="MAC 如 AA:BB:CC:DD:EE:FF" style="max-width:210px">
+          <input id="planSchedule" placeholder="07:30 或 mon-fri 07:30" style="max-width:190px">
+          <button id="btnAddPlan">+ 添加计划</button>
+        </div>
+        <div id="wakePlanList"></div>
+
+        <h4 style="margin:18px 0 8px">设备清单（一键唤醒）</h4>
+        <div class="row">
+          <input id="devName" placeholder="名称" style="max-width:140px">
+          <input id="devMac" placeholder="MAC" style="max-width:210px">
+          <input id="devNote" placeholder="备注（可选）" style="max-width:160px">
+          <button id="btnAddDevice">+ 添加设备</button>
+        </div>
+        <div id="deviceList"></div>
       </div>
     </section>
   </div>
@@ -794,11 +838,12 @@ async function setBootstart(action) {
 document.querySelectorAll('.tab').forEach(t => t.onclick = () => {
   document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
   t.classList.add('active');
-  ['accounts','events','settings'].forEach(k => {
+  ['accounts','events','power','settings'].forEach(k => {
     $('tab-' + k).hidden = k !== t.dataset.tab;
   });
   if (t.dataset.tab === 'events') loadEvents();
-  if (t.dataset.tab === 'settings') { loadSettings(); loadBootstart(); loadWakeHint(); }
+  if (t.dataset.tab === 'power') loadPower();
+  if (t.dataset.tab === 'settings') { loadSettings(); loadBootstart(); }
 });
 
 $('btnAdd').onclick = () => openModal(null);
@@ -840,9 +885,146 @@ async function loadWakeHint() {
   }
 }
 
+async function loadPower() {
+  loadWakeHint();
+  loadWakePlans();
+  loadDevices();
+  loadPowerPrep();
+}
+
+async function loadWakePlans() {
+  const box = $('wakePlanList');
+  try {
+    const { plans } = await api('/api/wake-plans');
+    if (!plans.length) { box.innerHTML = '<div class="empty">还没有唤醒计划。</div>'; return; }
+    box.innerHTML = `<table><thead><tr><th>名称</th><th>MAC</th><th>时间表</th><th>上次发送</th><th style="text-align:right">操作</th></tr></thead><tbody>${
+      plans.map(p => `<tr>
+        <td>${esc(p.name)}</td>
+        <td class="mono">${esc(p.mac)}</td>
+        <td class="mono">${esc(p.schedule)}</td>
+        <td class="mono" style="color:var(--txt-mute)">${esc(p.last_run_at || '—')}</td>
+        <td><div class="row-actions"><button class="ghost danger" data-delplan="${p.id}">删除</button></div></td>
+      </tr>`).join('')
+    }</tbody></table>`;
+    box.querySelectorAll('button[data-delplan]').forEach(b => b.onclick = () => deleteWakePlan(+b.dataset.delplan));
+  } catch (e) { box.innerHTML = '<div class="empty">加载失败: ' + esc(e.message) + '</div>'; }
+}
+
+async function addWakePlan() {
+  const name = $('planName').value.trim();
+  const mac = $('planMac').value.trim();
+  const schedule = $('planSchedule').value.trim();
+  if (!name || !mac || !schedule) { toast('名称 / MAC / 时间表都要填', 'err'); return; }
+  try {
+    await api('/api/wake-plans', { method:'POST', body:{ name, mac, schedule } });
+    toast('已添加唤醒计划', 'ok');
+    $('planName').value = ''; $('planMac').value = ''; $('planSchedule').value = '';
+    loadWakePlans();
+  } catch (e) { toast('添加失败: ' + e.message, 'err'); }
+}
+
+async function deleteWakePlan(id) {
+  if (!confirm('删除这个唤醒计划？')) return;
+  try {
+    await api('/api/wake-plans/' + id, { method:'DELETE' });
+    toast('已删除', 'ok');
+    loadWakePlans();
+  } catch (e) { toast('删除失败: ' + e.message, 'err'); }
+}
+
+async function loadDevices() {
+  const box = $('deviceList');
+  try {
+    const { devices } = await api('/api/devices');
+    if (!devices.length) { box.innerHTML = '<div class="empty">还没有设备。</div>'; return; }
+    box.innerHTML = `<table><thead><tr><th>名称</th><th>MAC</th><th>备注</th><th style="text-align:right">操作</th></tr></thead><tbody>${
+      devices.map(d => `<tr>
+        <td>${esc(d.name)}</td>
+        <td class="mono">${esc(d.mac)}</td>
+        <td style="color:var(--txt-dim)">${esc(d.note || '—')}</td>
+        <td><div class="row-actions">
+          <button class="ghost" data-wake="${d.id}">唤醒</button>
+          <button class="ghost danger" data-deldev="${d.id}">删除</button>
+        </div></td>
+      </tr>`).join('')
+    }</tbody></table>`;
+    box.querySelectorAll('button[data-wake]').forEach(b => b.onclick = () => wakeDevice(+b.dataset.wake));
+    box.querySelectorAll('button[data-deldev]').forEach(b => b.onclick = () => deleteDevice(+b.dataset.deldev));
+  } catch (e) { box.innerHTML = '<div class="empty">加载失败: ' + esc(e.message) + '</div>'; }
+}
+
+async function addDevice() {
+  const name = $('devName').value.trim();
+  const mac = $('devMac').value.trim();
+  const note = $('devNote').value.trim();
+  if (!name || !mac) { toast('名称 / MAC 都要填', 'err'); return; }
+  try {
+    await api('/api/devices', { method:'POST', body:{ name, mac, note } });
+    toast('已添加设备', 'ok');
+    $('devName').value = ''; $('devMac').value = ''; $('devNote').value = '';
+    loadDevices();
+  } catch (e) { toast('添加失败: ' + e.message, 'err'); }
+}
+
+async function wakeDevice(id) {
+  try {
+    await api('/api/devices/' + id + '/wake', { method:'POST', body:{} });
+    toast('已发送唤醒包', 'ok');
+  } catch (e) { toast('唤醒失败: ' + e.message, 'err'); }
+}
+
+async function deleteDevice(id) {
+  if (!confirm('删除这个设备？')) return;
+  try {
+    await api('/api/devices/' + id, { method:'DELETE' });
+    toast('已删除', 'ok');
+    loadDevices();
+  } catch (e) { toast('删除失败: ' + e.message, 'err'); }
+}
+
+const _PREP_LABEL = { ok:'OK', fixed:'已修', warn:'注意', manual:'需人工' };
+const _PREP_CLS = { ok:'s-online', fixed:'s-online', warn:'s-unknown', manual:'s-failed' };
+
+function renderPowerPrep(items) {
+  const box = $('powerPrepResult');
+  if (!items || !items.length) { box.innerHTML = '<div class="empty">没有体检结果。</div>'; return; }
+  box.innerHTML = `<table><thead><tr><th>体检项</th><th>结论</th><th>说明</th></tr></thead><tbody>${
+    items.map(i => `<tr>
+      <td>${esc(i.name)}</td>
+      <td><span class="badge ${_PREP_CLS[i.status] || 's-unknown'}">${_PREP_LABEL[i.status] || i.status}</span></td>
+      <td>${esc(i.detail)}${i.undo ? '<div class="hint mono" style="margin-top:2px">改回去：' + esc(i.undo) + '</div>' : ''}</td>
+    </tr>`).join('')
+  }</tbody></table>`;
+}
+
+async function loadPowerPrep() {
+  try {
+    const { items } = await api('/api/doctor/power');
+    renderPowerPrep(items);
+  } catch (e) { $('powerPrepResult').innerHTML = '<div class="empty">体检失败: ' + esc(e.message) + '</div>'; }
+}
+
+async function runPowerPrep() {
+  $('powerPrepResult').innerHTML = '<div class="empty">体检中…</div>';
+  try {
+    const { items } = await api('/api/doctor/power');
+    renderPowerPrep(items);
+    const fixable = items.filter(i => i.fixable && ['warn', 'manual'].includes(i.status));
+    if (fixable.length && confirm(`有 ${fixable.length} 项可自动修复（快速启动 / 网卡唤醒 / 睡眠超时 / 远程桌面等），是否执行？`)) {
+      await api('/api/doctor/power/fix', { method:'POST', body:{ confirm:true } });
+      const { items: after } = await api('/api/doctor/power');
+      renderPowerPrep(after);
+      toast('修复完成', 'ok');
+    }
+  } catch (e) { toast('体检失败: ' + e.message, 'err'); }
+}
+
 $('btnPowerOff').onclick = () => powerAction('off');
 $('btnPowerReboot').onclick = () => powerAction('reboot');
 $('btnPowerInfo').onclick = loadWakeHint;
+$('btnPowerPrep').onclick = runPowerPrep;
+$('btnAddPlan').onclick = addWakePlan;
+$('btnAddDevice').onclick = addDevice;
 $('btnSaveSettings').onclick = saveSettings;
 $('btnBootInstall').onclick = () => setBootstart('install');
 $('btnBootUninstall').onclick = () => setBootstart('uninstall');
