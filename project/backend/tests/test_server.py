@@ -1158,3 +1158,526 @@ def test_progress_items_carry_ts_for_display(api: _Api, store: Store) -> None:  
     item = data["items"][0]
     assert set(item) == {"account_id", "account_name", "stage", "message", "ts", "seq"}
     assert isinstance(item["ts"], (int, float))
+
+
+# ---------- 请求体边界 ----------
+
+
+def test_empty_body_is_treated_as_empty_object(api: _Api) -> None:
+    """无请求体时 _read_body 返回空字典，而不是报错。"""
+    status, data = call(f"{api}/api/settings", "PUT")
+    assert status == 200 and data["ok"] is True
+
+
+def test_non_object_json_body_is_rejected(api: _Api) -> None:
+    """合法 JSON 但不是对象（数组/字符串）也要 400。"""
+    req = urllib.request.Request(
+        f"{api}/api/settings", data=b"[1, 2, 3]", method="PUT"
+    )
+    req.add_header("Content-Type", "application/json")
+    with pytest.raises(urllib.error.HTTPError) as error:
+        urllib.request.urlopen(req, timeout=10)
+    assert error.value.code == 400
+    assert "JSON 对象" in error.value.read().decode("utf-8")
+    error.value.close()
+
+
+def test_duplicate_content_length_is_rejected(api: _Api) -> None:
+    """重复的 Content-Length 头必须拒绝（请求走私防御）。"""
+    import socket
+
+    host, port = "127.0.0.1", int(api.rsplit(":", 1)[1])
+    with socket.create_connection((host, port), timeout=5) as sock:
+        sock.sendall(
+            b"POST /api/health HTTP/1.1\r\n"
+            b"Host: 127.0.0.1\r\n"
+            b"Content-Length: 0\r\n"
+            b"Content-Length: 0\r\n\r\n"
+        )
+        raw = sock.recv(4096)
+    assert b"400" in raw
+
+
+# ---------- 旧版 _dispatch 分支 ----------
+
+
+def test_base_dispatch_handles_all_methods(store: Store) -> None:
+    """不装 _install_dispatch 时，ApiHandler._dispatch / do_* 仍是活代码路径。"""
+    from http.server import ThreadingHTTPServer
+
+    handler = server_mod.build_handler(store, MonitorManager())
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    httpd.daemon_threads = True
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{httpd.server_address[1]}"
+    try:
+        # 命中路由
+        status, data = call(f"{base}/api/health")
+        assert status == 200 and data["ok"] is True
+        # 路径不存在且没有同名路由 -> 走静态资源 -> 404
+        status, data = call(f"{base}/api/nope")
+        assert status == 404 and data["ok"] is False
+        # 路径存在但方法不匹配 -> 405
+        for method in ("POST", "PUT", "DELETE"):
+            status, data = call(f"{base}/api/health", method, {})
+            assert status == 405 and data["ok"] is False
+        # 处理器主动抛 ApiError -> 原样返回状态码
+        status, data = call(f"{base}/api/accounts", "POST", {})
+        assert status == 400
+        # 处理器抛非 ApiError -> 兜底 500，且记一条事件
+        status, data = call(f"{base}/api/probe?timeout=abc")
+        assert status == 500 and "ValueError" in data["error"]
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join(timeout=5)
+
+
+# ---------- 直接调用路由函数（参数缺失时无法经 HTTP 到达） ----------
+
+
+def _route_fn(store: Store, key: tuple[str, str]):  # noqa: ANN202
+    handler = server_mod.build_handler(store, MonitorManager())
+    return handler.routes[key]
+
+
+def test_delete_account_without_id_param(store: Store) -> None:
+    """缺少 params（旧分发器不注入模板参数）时报「缺少账号 ID」。"""
+    fn = _route_fn(store, ("DELETE", "/api/accounts/{id}"))
+    with pytest.raises(server_mod.ApiError) as error:
+        fn({"query": {}, "path": "/api/accounts/1", "params": {}}, None)
+    assert error.value.status == 400
+    assert "缺少账号 ID" in error.value.message
+
+
+def test_delete_wake_plan_without_id_param(store: Store) -> None:
+    fn = _route_fn(store, ("DELETE", "/api/wake-plans/{id}"))
+    with pytest.raises(server_mod.ApiError) as error:
+        fn({"query": {}, "path": "/api/wake-plans/1", "params": {}}, None)
+    assert error.value.status == 400
+    assert "缺少计划 ID" in error.value.message
+
+
+def test_bootstart_install_rejects_non_tcp_address(store: Store) -> None:
+    """监听地址不是 TCP 元组（如 unix socket）时返回 500。"""
+    import types
+
+    fn = _route_fn(store, ("POST", "/api/bootstart/install"))
+
+    class _Stub:
+        headers = {"Content-Type": "application/json"}
+        close_connection = False
+        server = types.SimpleNamespace(server_address="unix-socket")
+
+        def _read_body(self):
+            return {}
+
+    with pytest.raises(server_mod.ApiError) as error:
+        fn({"query": {}, "path": "/api/bootstart/install"}, _Stub())
+    assert error.value.status == 500
+
+
+# ---------- 通知旁路失败不影响主流程 ----------
+
+
+def test_power_action_swallows_notify_failure(api: _Api, monkeypatch) -> None:  # noqa: ANN001
+    """通知渠道挂了也必须把电源动作结果正常返回。"""
+    monkeypatch.setattr("campusnet.power.shutdown", lambda *a, **k: "cmd")
+
+    class _Boom:
+        @staticmethod
+        def from_store(store):  # noqa: ANN001, ANN205
+            raise RuntimeError("通知渠道不可用")
+
+    monkeypatch.setattr("campusnet.notify.Notifier", _Boom)
+
+    status, data = call(f"{api}/api/power/off", "POST", {"confirm": True})
+    assert status == 200 and data["ok"] is True
+
+
+# ---------- 各错误分支 ----------
+
+
+def test_delete_account_non_integer_id(api: _Api) -> None:
+    status, data = call(f"{api}/api/accounts/abc", "DELETE")
+    assert status == 400 and data["ok"] is False
+
+
+def test_login_with_non_integer_account_id(api: _Api) -> None:
+    status, data = call(f"{api}/api/accounts/abc/login", "POST", {})
+    assert status == 400 and "非法" in data["error"]
+
+
+def test_monitor_start_applies_headless_and_autostart(api: _Api) -> None:
+    status, data = call(
+        f"{api}/api/monitor/start",
+        "POST",
+        {"interval": 120, "headless": True, "autostart": True},
+    )
+    assert status == 200 and data["status"]["alive"] is True
+    call(f"{api}/api/monitor/stop", "POST", {})
+
+
+def test_power_action_reports_power_error(api: _Api, monkeypatch) -> None:  # noqa: ANN001
+    from campusnet import power as power_mod
+
+    def _boom(*args, **kwargs):  # noqa: ANN002, ANN003
+        raise power_mod.PowerError("拒绝访问")
+
+    monkeypatch.setattr("campusnet.power.shutdown", _boom)
+    status, data = call(f"{api}/api/power/off", "POST", {"confirm": True})
+    assert status == 500
+    assert "拒绝访问" in data["error"]
+
+
+def test_notify_test_reports_send_failure(api: _Api, monkeypatch) -> None:  # noqa: ANN001
+    monkeypatch.setattr("campusnet.notify.send_test", lambda notifier: False)
+    call(f"{api}/api/settings", "PUT", {"notify_channel": "bark", "notify_key": "k"})
+
+    status, data = call(f"{api}/api/notify/test", "POST", {})
+    assert status == 502 and data["ok"] is False
+
+
+def test_wake_plan_requires_all_fields(api: _Api) -> None:
+    status, _ = call(f"{api}/api/wake-plans", "POST", {"name": "只有名字"})
+    assert status == 400
+
+
+def test_wake_plan_rejects_non_integer_port(api: _Api) -> None:
+    status, _ = call(
+        f"{api}/api/wake-plans",
+        "POST",
+        {
+            "name": "x",
+            "mac": "AA:BB:CC:DD:EE:FF",
+            "schedule": "07:30",
+            "port": "abc",
+        },
+    )
+    assert status == 400
+
+
+def test_wake_plan_delete_non_integer_id(api: _Api) -> None:
+    status, _ = call(f"{api}/api/wake-plans/abc", "DELETE")
+    assert status == 400
+
+
+def test_wake_plan_delete_missing_returns_404(api: _Api) -> None:
+    status, data = call(f"{api}/api/wake-plans/999", "DELETE")
+    assert status == 404 and data["ok"] is False
+
+
+def test_device_requires_name_and_mac(api: _Api) -> None:
+    status, _ = call(f"{api}/api/devices", "POST", {"name": "只有名字"})
+    assert status == 400
+
+
+def test_device_rejects_bad_mac(api: _Api) -> None:
+    status, _ = call(f"{api}/api/devices", "POST", {"name": "x", "mac": "not-a-mac"})
+    assert status == 400
+
+
+def test_delete_device_missing_returns_404(api: _Api) -> None:
+    status, data = call(f"{api}/api/devices/999", "DELETE")
+    assert status == 404 and data["ok"] is False
+
+
+def test_wake_device_missing_returns_404(api: _Api) -> None:
+    status, data = call(f"{api}/api/devices/999/wake", "POST", {})
+    assert status == 404 and data["ok"] is False
+
+
+def test_wake_device_reports_power_error(api: _Api, monkeypatch) -> None:  # noqa: ANN001
+    from campusnet import power as power_mod
+
+    def _boom(*args, **kwargs):  # noqa: ANN002, ANN003
+        raise power_mod.PowerError("广播失败")
+
+    monkeypatch.setattr("campusnet.power.wake", _boom)
+    _, created = call(
+        f"{api}/api/devices", "POST", {"name": "树莓派", "mac": "11:22:33:44:55:66"}
+    )
+    status, data = call(f"{api}/api/devices/{created['id']}/wake", "POST", {})
+    assert status == 400
+    assert "广播失败" in data["error"]
+
+
+# ---------- 配对码：过期与锁定 ----------
+
+
+def test_pair_claim_rejects_expired_code(api: _Api, store: Store) -> None:  # noqa: ANN001
+    from campusnet import pair as pair_mod
+
+    code = "ABC123"
+    store.add_pair_code(pair_mod.code_hash(code), "1970-01-01 00:00:00")
+    status, data = call(f"{api}/api/pair/claim", "POST", {"code": code})
+    assert status == 401
+    assert "过期" in data["error"]
+
+
+def test_pair_claim_locked_after_repeated_failures(
+    api: _Api, store: Store
+) -> None:  # noqa: ANN001
+    from campusnet import pair as pair_mod
+
+    code = "XYZ789"
+    chash = pair_mod.code_hash(code)
+    store.add_pair_code(chash, "2999-01-01 00:00:00")
+    for _ in range(pair_mod.MAX_FAILURES):
+        store.record_pair_failure(chash)
+
+    status, data = call(f"{api}/api/pair/claim", "POST", {"code": code})
+    assert status == 429
+    assert data["ok"] is False
+
+
+# ---------- /api/auth/* ----------
+
+
+def test_auth_status_without_auth(api: _Api) -> None:
+    status, data = call(f"{api}/api/auth/status")
+    assert status == 200
+    assert data["required"] is False
+    assert data["authenticated"] is True
+
+
+def test_auth_login_without_auth_is_noop(api: _Api) -> None:
+    """未启用鉴权时登录接口直接放行。"""
+    status, data = call(f"{api}/api/auth/login", "POST", {})
+    assert status == 200
+    assert data["required"] is False
+
+
+def test_auth_login_rejects_wrong_token(auth_api: _Api) -> None:
+    status, data = call(f"{auth_api}/api/auth/login", "POST", {"token": "wrong"})
+    assert status == 401 and data["ok"] is False
+
+
+def test_auth_login_accepts_correct_token(auth_api: _Api) -> None:
+    status, data = call(f"{auth_api}/api/auth/login", "POST", {"token": "t" * 43})
+    assert status == 200
+    assert data["authenticated"] is True
+
+
+def test_auth_logout_clears_session(auth_api: _Api) -> None:
+    status, data = call(f"{auth_api}/api/auth/logout", "POST", {})
+    assert status == 200 and data["ok"] is True
+
+
+# ---------- 来源校验的边界 ----------
+
+
+def test_extension_origin_from_bracketed_loopback_host(api: _Api) -> None:
+    """Host 为 [::1]（带方括号的 IPv6）时也算回环，扩展写请求放行。"""
+    request = urllib.request.Request(
+        f"{api}/api/events/clear",
+        data=b"{}",
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "Host": "[::1]:2268",
+            "Origin": EXTENSION_ORIGIN,
+        },
+    )
+    with urllib.request.urlopen(request, timeout=5) as response:
+        assert response.status == 200
+
+
+def test_malformed_origin_is_rejected(api: _Api) -> None:
+    """Origin 无法解析（如残缺的 IPv6）时按跨来源拒绝。"""
+    request = urllib.request.Request(
+        f"{api}/api/settings",
+        data=b"{}",
+        method="PUT",
+        headers={"Content-Type": "application/json", "Origin": "http://[::1"},
+    )
+    with pytest.raises(urllib.error.HTTPError) as error:
+        urllib.request.urlopen(request, timeout=5)
+    assert error.value.code == 403
+    error.value.close()
+
+
+# ---------- CORS 预检 ----------
+
+
+def test_options_preflight_is_handled(api: _Api) -> None:
+    request = urllib.request.Request(f"{api}/api/health", method="OPTIONS")
+    with urllib.request.urlopen(request, timeout=5) as response:
+        assert response.status == 204
+        assert "GET" in response.headers.get("Allow", "")
+        assert response.headers.get("Access-Control-Allow-Methods")
+
+
+# ---------- serve(): 启动、自启、退出清理 ----------
+
+
+class _FakeLock:
+    """替代 SingleInstance，记录释放次数。"""
+
+    def __init__(self, path):  # noqa: ANN001
+        self.path = path
+        self.releases = 0
+
+    def acquire(self) -> bool:
+        return True
+
+    def holder_pid(self):  # noqa: ANN201
+        return 4321
+
+    def release(self) -> None:
+        self.releases += 1
+
+
+class _FakeManager:
+    """替代 MonitorManager，避免真的起监控线程。"""
+
+    def __init__(self) -> None:
+        self.started = False
+        self.stopped = 0
+
+    def start(self, store) -> None:  # noqa: ANN001
+        self.started = True
+
+    def stop(self) -> None:
+        self.stopped += 1
+
+
+def _patch_serve_env(monkeypatch, lock, manager, server_cls) -> None:  # noqa: ANN001
+    monkeypatch.setattr(server_mod, "stdout_ready", lambda: None)
+    monkeypatch.setattr(server_mod, "SingleInstance", lambda path: lock)
+    monkeypatch.setattr(server_mod, "MonitorManager", lambda: manager)
+    monkeypatch.setattr(server_mod, "ApiAuth", lambda *a, **k: object())
+    monkeypatch.setattr(
+        server_mod.ports, "resolve_ports", lambda spec, **kw: {p: p for p in spec}
+    )
+    monkeypatch.setattr(server_mod, "ThreadingHTTPServer", server_cls)
+
+
+class _BlockingServer:
+    """serve_forever 立刻抛 KeyboardInterrupt，模拟 Ctrl+C。"""
+
+    def __init__(self, address, handler):  # noqa: ANN001
+        self.server_address = address
+        self.daemon_threads = False
+        self.closed = False
+
+    def serve_forever(self, *args, **kwargs):  # noqa: ANN002, ANN003
+        raise KeyboardInterrupt
+
+    def shutdown(self) -> None:
+        pass
+
+    def server_close(self) -> None:
+        self.closed = True
+
+
+def test_serve_exits_when_instance_running(store: Store, monkeypatch, capsys) -> None:  # noqa: ANN001
+    class _BusyLock(_FakeLock):
+        def acquire(self) -> bool:
+            return False
+
+    lock = _BusyLock("x")
+    _patch_serve_env(monkeypatch, lock, _FakeManager(), _BlockingServer)
+
+    with pytest.raises(SystemExit) as error:
+        server_mod.serve(store=store, host="127.0.0.1", port=12345)
+
+    assert error.value.code == 1
+    assert "已有实例运行" in capsys.readouterr().err
+    assert lock.releases == 0
+
+
+def test_serve_exits_when_port_unavailable(store: Store, monkeypatch, capsys) -> None:  # noqa: ANN001
+    lock = _FakeLock("x")
+
+    def _boom(spec, **kwargs):  # noqa: ANN001, ANN003
+        raise OSError("端口被占用")
+
+    _patch_serve_env(monkeypatch, lock, _FakeManager(), _BlockingServer)
+    monkeypatch.setattr(server_mod.ports, "resolve_ports", _boom)
+
+    with pytest.raises(SystemExit) as error:
+        server_mod.serve(store=store, host="127.0.0.1", port=12345)
+
+    assert error.value.code == 1
+    assert "端口被占用" in capsys.readouterr().err
+    assert lock.releases == 1
+
+
+def test_serve_exits_when_bind_fails(store: Store, monkeypatch, capsys) -> None:  # noqa: ANN001
+    lock = _FakeLock("x")
+
+    class _BadServer:
+        def __init__(self, address, handler):  # noqa: ANN001
+            raise OSError("绑定失败")
+
+    _patch_serve_env(monkeypatch, lock, _FakeManager(), _BadServer)
+
+    with pytest.raises(SystemExit) as error:
+        server_mod.serve(store=store, host="127.0.0.1", port=12345)
+
+    assert error.value.code == 1
+    assert "绑定失败" in capsys.readouterr().err
+    assert lock.releases == 1
+
+
+def test_serve_blocking_stops_cleanly_on_interrupt(
+    store: Store, monkeypatch, capsys
+) -> None:  # noqa: ANN001
+    """阻塞模式遇 Ctrl+C 后必须停监控、关服务、释放单实例锁。"""
+    lock = _FakeLock("x")
+    manager = _FakeManager()
+    created: dict = {}
+
+    class _InterruptServer(_BlockingServer):
+        def __init__(self, address, handler):  # noqa: ANN001
+            super().__init__(address, handler)
+            created["server"] = self
+
+    _patch_serve_env(monkeypatch, lock, manager, _InterruptServer)
+
+    # 非回环地址 -> 启用鉴权，覆盖打印令牌提示的分支
+    httpd = server_mod.serve(store=store, host="10.0.0.9", port=12345, autostart=True)
+
+    assert httpd is created["server"]
+    assert manager.started is True
+    assert manager.stopped >= 1
+    assert httpd.closed is True
+    assert lock.releases == 1
+    out = capsys.readouterr().out
+    assert "正在停止" in out
+    assert "令牌保护" in out
+
+
+def test_serve_non_blocking_releases_on_shutdown(
+    store: Store, monkeypatch
+) -> None:  # noqa: ANN001
+    """非阻塞模式返回 httpd；shutdown/server_close 各自触发一次释放。"""
+    lock = _FakeLock("x")
+    manager = _FakeManager()
+
+    class _NoopServer:
+        def __init__(self, address, handler):  # noqa: ANN001
+            self.server_address = address
+            self.daemon_threads = False
+            self.shutdown_called = False
+
+        def serve_forever(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            return
+
+        def shutdown(self) -> None:
+            self.shutdown_called = True
+
+        def server_close(self) -> None:
+            self.closed = True
+
+    _patch_serve_env(monkeypatch, lock, manager, _NoopServer)
+
+    httpd = server_mod.serve(store=store, host="127.0.0.1", port=12345, blocking=False)
+
+    assert httpd.shutdown_called is False  # serve 只是包了一层，不会自动调用
+    httpd.shutdown()
+    httpd.server_close()
+    assert manager.stopped >= 1
+    assert lock.releases == 1

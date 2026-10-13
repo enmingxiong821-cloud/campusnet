@@ -17,6 +17,10 @@ python utils/run.py console      # 打开控制台（含局域网访问地址与
 # 后端全量（CI 同款命令，只跑 backend/tests）
 python -m pytest project/backend/tests -q
 
+# 带覆盖率，门禁 90%（CI 用的就是这条；本地 pre-commit 不跑）
+python -m pytest project/backend/tests -q \
+  --cov=campusnet --cov-report=term-missing --cov-fail-under=90
+
 # 浏览器扩展
 node --check project/frontend/extension/background.js
 node project/frontend/extension/test-background.js
