@@ -98,6 +98,157 @@ def test_create_rejects_unknown_platform(tmp_path: Path) -> None:
     assert "plan9" in message
 
 
+# ---------- 平台与失败分支（F2）----------
+
+
+def test_desktop_dir_uses_userprofile_on_windows(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(shortcuts_mod.os, "name", "nt")
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+
+    assert shortcuts_mod.desktop_dir() == tmp_path / "Desktop"
+
+
+def test_desktop_dir_falls_back_to_home(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """USERPROFILE 没设（或被清空）时回落到 home，不能拼出相对路径。"""
+    monkeypatch.setattr(shortcuts_mod.os, "name", "nt")
+    monkeypatch.setenv("USERPROFILE", "")
+
+    assert shortcuts_mod.desktop_dir().name == "Desktop"
+
+
+def test_remove_legacy_skips_unremovable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """删不掉的旧快捷方式只是跳过，不能让整次生成失败。"""
+    target = tmp_path / "启动校园网服务.lnk"
+    target.write_text("old", encoding="utf-8")
+
+    def boom(self, *args, **kwargs):
+        raise OSError("文件被占用")
+
+    monkeypatch.setattr(Path, "unlink", boom)
+
+    assert shortcuts_mod._remove_legacy(tmp_path) == []
+
+
+def test_ps_quote_escapes_single_quotes() -> None:
+    assert shortcuts_mod._ps_quote("it's") == "'it''s'"
+
+
+def test_run_powershell_without_exe(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(shortcuts_mod.shutil, "which", lambda _name: None)
+
+    ok, message = shortcuts_mod._run_powershell("echo 1")
+
+    assert ok is False
+    assert "找不到 powershell" in message
+
+
+def test_run_powershell_reports_oserror(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(shortcuts_mod.shutil, "which", lambda _name: "powershell")
+
+    def boom(*args, **kwargs):
+        raise OSError("spawn failed")
+
+    monkeypatch.setattr(shortcuts_mod.subprocess, "run", boom)
+
+    ok, message = shortcuts_mod._run_powershell("echo 1")
+
+    assert ok is False
+    assert "OSError" in message
+
+
+def test_run_powershell_reports_nonzero_exit(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(shortcuts_mod.shutil, "which", lambda _name: "powershell")
+    monkeypatch.setattr(
+        shortcuts_mod.subprocess,
+        "run",
+        lambda *a, **k: _proc(1, "拒绝访问"),
+    )
+
+    ok, message = shortcuts_mod._run_powershell("echo 1")
+
+    assert ok is False
+    assert "拒绝访问" in message
+
+
+def test_run_powershell_reports_empty_output_on_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(shortcuts_mod.shutil, "which", lambda _name: "powershell")
+    monkeypatch.setattr(shortcuts_mod.subprocess, "run", lambda *a, **k: _proc(2, ""))
+
+    ok, message = shortcuts_mod._run_powershell("echo 1")
+
+    assert ok is False
+    assert "退出码 2" in message
+
+
+def test_create_windows_propagates_failure(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(
+        shortcuts_mod, "_run_powershell", lambda script: (False, "需要管理员")
+    )
+
+    ok, message = shortcuts_mod.create(tmp_path, platform="windows")
+
+    assert ok is False
+    assert message == "需要管理员"
+
+
+def test_create_windows_elevated_uses_runas(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    scripts: list[str] = []
+    monkeypatch.setattr(
+        shortcuts_mod,
+        "_run_powershell",
+        lambda script: (scripts.append(script) or (True, "")),
+    )
+
+    ok, message = shortcuts_mod.create_windows_elevated(
+        shortcuts_mod.DEFAULT_SHORTCUTS, tmp_path
+    )
+
+    assert ok is True
+    assert "管理员" in message
+    assert "RunAs" in scripts[0]
+
+
+def test_create_windows_elevated_propagates_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(shortcuts_mod, "_run_powershell", lambda script: (False, "被拒绝"))
+
+    ok, message = shortcuts_mod.create_windows_elevated(
+        shortcuts_mod.DEFAULT_SHORTCUTS, tmp_path
+    )
+
+    assert ok is False
+    assert message == "被拒绝"
+
+
+def test_create_posix_cleans_legacy(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """macOS/Linux 分支也要报告清理结果，不能只有 Windows 报。"""
+    (tmp_path / "打开控制台.command").write_text("old", encoding="utf-8")
+
+    ok, message = shortcuts_mod.create(tmp_path, platform="darwin")
+
+    assert ok is True
+    assert "清理了 1 个旧快捷方式" in message
+
+
+def _proc(returncode: int, text: str):  # noqa: ANN202
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        returncode=returncode, stdout=text.encode(), stderr=b""
+    )
+
+
 def test_cli_shortcut_prints_result(tmp_path: Path, capsys) -> None:  # noqa: ANN001
     code = cli_mod.main(["shortcut", "--dir", str(tmp_path), "--platform", "linux"])
 
