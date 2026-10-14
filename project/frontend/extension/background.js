@@ -148,7 +148,7 @@ async function probeAll(urls) {
  * @param {string} mode 密码编码方式（plain / base64）
  * @returns {Promise<{state: string, message: string, url?: string}>} classify 的结果
  */
-async function loginByFetch(portal, username, password, fields, mode) {
+async function loginByFetch(portal, username, password, fields, mode, timeoutMs = 15000) {
   const body = new URLSearchParams();
   // 只提交真正的表单字段，跳过 usernameField/passwordField 这两个说明性键
   for (const [k, v] of Object.entries(fields || {})) {
@@ -160,13 +160,32 @@ async function loginByFetch(portal, username, password, fields, mode) {
   body.append(userKey, username);
   body.append(passKey, encodePassword(password, mode));
 
-  const resp = await fetch(portal, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: body.toString(),
-    redirect: 'follow',
-    cache: 'no-store',
-  });
+  // 必须给超时：校园门户卡住（半开连接、门户自己挂起）时，没有 signal 的
+  // fetch 会一直悬着，service worker 也跟着什么都不做——用户看到的是
+  // 「点了没反应」，而且这一轮之后再也不会重试。
+  // 15 秒比探活的 5 秒宽：这里是一个真的 POST，慢门户登录要几秒很正常。
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let resp;
+  try {
+    resp = await fetch(portal, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: body.toString(),
+      redirect: 'follow',
+      cache: 'no-store',
+      signal: controller.signal,
+    });
+  } catch (err) {
+    if (err && err.name === 'AbortError') {
+      // 调用方只把 message 写进事件日志，所以要给人话，不能是默认的
+      // "The operation was aborted."
+      return { state: 'error', message: `门户在 ${timeoutMs / 1000} 秒内没有响应` };
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
   const text = await resp.text();
   return classify(text, resp.status, resp.url);
 }
@@ -293,6 +312,10 @@ async function checkViaLocalService(settings, timeoutMs = 2000) {
   } finally {
     clearTimeout(timer);
   }
+  // 这一步也要有自己的超时：上面那个 controller 只覆盖 /api/health，
+  // 它对应的 setTimeout 已经在 finally 里被清掉了。
+  const checkController = new AbortController();
+  const checkTimer = setTimeout(() => checkController.abort(), timeoutMs);
   try {
     const headers = { 'Content-Type': 'application/json' };
     if (settings && settings.apiToken) {
@@ -303,12 +326,15 @@ async function checkViaLocalService(settings, timeoutMs = 2000) {
       headers,
       body: '{}',
       cache: 'no-store',
+      signal: checkController.signal,
     });
     if (!resp.ok) return null;
     const data = await resp.json();
     return data && Array.isArray(data.results) ? data : null;
   } catch (e) {
     return null;
+  } finally {
+    clearTimeout(checkTimer);
   }
 }
 
