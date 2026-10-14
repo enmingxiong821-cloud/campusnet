@@ -221,6 +221,9 @@
   .install-bar[hidden]{display:none}
   .install-bar span{flex:1 1 auto}
   .install-bar button{flex:0 0 auto;padding:7px 12px;font-size:13px}
+  /* 同上：.row 也是 display:flex，hidden 压不住它，得自己写一条。 */
+  #bootTaskRow[hidden]{display:none}
+  #bootTaskRow input{flex:0 1 auto;padding:6px 8px;font-size:13px}
 </style>
 </head>
 <body>
@@ -357,15 +360,22 @@
           <button class="ghost" id="btnBootUninstall">关闭</button>
           <span class="hint" id="bootHint"></span>
         </div>
+        <!-- 只在 Windows 出现：那是唯一能用计划任务做到「无需登录」的平台。 -->
+        <div class="row" id="bootTaskRow" hidden>
+          <span class="lbl" style="min-width:96px">免登录启动</span>
+          <input type="password" id="bootTaskPw" autocomplete="new-password"
+                 placeholder="当前 Windows 账户密码" style="max-width:190px">
+          <button class="ghost" id="btnBootTask">注册计划任务</button>
+          <span class="hint">密码只交给任务计划程序保存一次，不落库、不进日志；需要管理员权限</span>
+        </div>
         <p class="hint" style="margin-top:8px">
           目标链路是：通电 → 程序自动运行 → 自动认证你配置好的网络；机器开不开机由你远程决定
           （关机 / 唤醒 / 体检在「电源」页操作，开机需要 BIOS 上电自启 / 智能插座 / WOL 之一）。
-          这里的「开启」注册的是<strong>当前用户的启动项</strong>（Windows 启动文件夹 /
+          上面的「开启」注册的是<strong>当前用户的启动项</strong>（Windows 启动文件夹 /
           systemd 用户单元，无则退化为 XDG autostart / macOS LaunchAgent），都是「登录后」
-          语义——机器停在登录界面时不会认证。要做到「通电就自动连」，Windows 用
-          <code>bootstart install --mode task</code> 注册计划任务（需管理员，并会把当前账户
-          密码交给任务计划程序保存一次），Linux / macOS 装 <code>packaging/</code> 下的系统级
-          单元（需 root）。这两条都要求本机授权，所以不放在控制台上做。
+          语义——机器停在登录界面时不会认证。Windows 上想「通电就自动连」，用下面的
+          「注册计划任务」；Linux / macOS 的对应做法是装 <code>packaging/</code> 下的系统级
+          单元（需 root），那一步在控制台上做不了。
         </p>
 
         <hr style="margin:22px 0;border:none;border-top:1px solid var(--line)">
@@ -1148,6 +1158,9 @@ async function testNotify() {
 // 样式表里没有 ok/off 这两个类，自造类名会得到一个没有底色的裸块。
 function renderBootstart(data) {
   const badge = $('bootBadge');
+  // 计划任务只存在于 Windows；另外两个平台的替代路径是 packaging/ 下的系统级单元，
+  // 要 root，控制台装不了。所以那一整行不出现，而不是摆一个点了必然失败的按钮。
+  $('bootTaskRow').hidden = !(data.supported && data.platform === 'windows');
   if (!data.supported) {
     badge.textContent = '本系统不支持';
     badge.className = 'badge s-unknown';
@@ -1189,6 +1202,38 @@ async function setBootstart(action) {
     toast('操作失败: ' + e.message, 'err');
     await loadBootstart();
     $('bootHint').textContent = '操作失败: ' + e.message;
+  }
+}
+
+// 计划任务模式要一次当前 Windows 账户密码（系统只为「开机触发、无需登录」的任务
+// 保存凭据）。密码只经这一次请求交出去，前端也不留：无论成败都立刻清空输入框。
+async function registerBootTask() {
+  const input = $('bootTaskPw');
+  const btn = $('btnBootTask');
+  const password = input.value;
+  if (!password) {
+    toast('请先填入当前 Windows 账户密码', 'err');
+    input.focus();
+    return;
+  }
+  btn.disabled = true;
+  $('bootHint').textContent = '注册计划任务中…';
+  try {
+    const data = await api('/api/bootstart/install',
+      { method:'POST', body:{ mode:'task', password } });
+    renderBootstart(data);
+    $('bootHint').textContent = data.detail || '';
+    toast(data.installed ? '计划任务已注册：通电即认证' : '未能生效：' + data.detail,
+          data.installed ? 'ok' : 'err');
+  } catch (e) {
+    // 非管理员账户会被系统拒绝，后端那句错误里带着「去本机跑菜单 / 命令行」的指路。
+    // 先刷新状态再写这句：loadBootstart 会用 status 的 detail 覆盖 bootHint。
+    toast('注册失败: ' + e.message, 'err');
+    await loadBootstart();
+    $('bootHint').textContent = '注册失败: ' + e.message;
+  } finally {
+    input.value = '';
+    btn.disabled = false;
   }
 }
 
@@ -1435,6 +1480,7 @@ $('btnTestNotify').onclick = testNotify;
 $('setNotifyChannel').onchange = toggleNotifyFields;
 $('btnBootInstall').onclick = () => setBootstart('install');
 $('btnBootUninstall').onclick = () => setBootstart('uninstall');
+$('btnBootTask').onclick = registerBootTask;
 $('btnDetectPortal').onclick = async () => {
   const url = $('setDetectUrl').value.trim();
   $('detectResult').textContent = '检测中…';

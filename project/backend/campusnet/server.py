@@ -605,6 +605,17 @@ def routes_system(store: Store) -> dict[tuple[str, str], Handler]:
             )
         host = payload.get("host", address[0])
         raw_port = payload.get("port", address[1])
+        # mode / password 都定死取值范围。密码只在这一次请求里存在：不存库、不进事件日志、
+        # 不进响应，交给 bootstart 之后就没人再持有它。
+        mode = payload.get("mode", "auto")
+        if mode not in ("auto", "task"):
+            raise ApiError(HTTPStatus.BAD_REQUEST, f"不支持的模式：{mode}")
+        password = payload.get("password", "")
+        if not isinstance(password, str):
+            raise ApiError(HTTPStatus.BAD_REQUEST, "password 必须为字符串")
+        if mode == "task" and bootstart.platform_name() != "windows":
+            # install() 也会拒绝，但那会走成 500——请求本身就不对，该是 400。
+            raise ApiError(HTTPStatus.BAD_REQUEST, "计划任务模式只支持 Windows")
         try:
             if (
                 not isinstance(host, str)
@@ -616,9 +627,10 @@ def routes_system(store: Store) -> dict[tuple[str, str], Handler]:
             bootstart.launch_args(host, port)
         except (ValueError, TypeError) as exc:
             raise ApiError(HTTPStatus.BAD_REQUEST, f"启动参数无效：{exc}") from exc
-        result = bootstart.install(host=host, port=port)
+        result = bootstart.install(host=host, port=port, mode=mode, password=password)
+        # 事件里只写结果与载体，绝不写请求内容——密码就在那个 body 里。
         store.add_event(
-            f"开机自启动安装请求 -> {'成功' if result.installed else '未生效'}：{result.detail}",
+            f"开机自启动安装请求（{mode}）-> {'成功' if result.installed else '未生效'}：{result.detail}",
             level="info" if result.installed else "warning",
             stage="server",
         )

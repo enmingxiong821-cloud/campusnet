@@ -394,7 +394,78 @@ def test_bootstart_defaults_to_listener(api, monkeypatch):
 
     monkeypatch.setattr(server_mod.bootstart, "install", install)
     assert call(f"{api}/api/bootstart/install", "POST", {})[0] == 200
-    assert captured == {"host": "127.0.0.1", "port": int(api.rsplit(":", 1)[1])}
+    assert captured == {
+        "host": "127.0.0.1",
+        "port": int(api.rsplit(":", 1)[1]),
+        "mode": "auto",
+        "password": "",
+    }
+
+
+def test_bootstart_task_mode_forwards_password_without_recording_it(
+    api, store: Store, monkeypatch  # noqa: ANN001
+):
+    """控制台注册计划任务：模式与密码送到 install()，密码不进响应也不进事件日志。
+
+    密码是这一轮唯一新增的敏感输入——它只该存在于这一次请求里。
+    """
+    monkeypatch.setenv("CAMPUSNET_FORCE_PLATFORM", "windows")
+    captured = {}
+
+    def install(**kwargs):
+        captured.update(kwargs)
+        return server_mod.bootstart.BootStatus(
+            True, True, None, "已注册计划任务（开机触发，无需登录即运行）"
+        )
+
+    monkeypatch.setattr(server_mod.bootstart, "install", install)
+
+    status, data = call(
+        f"{api}/api/bootstart/install", "POST", {"mode": "task", "password": "hunter2"}
+    )
+
+    assert status == 200
+    assert captured["mode"] == "task"
+    assert captured["password"] == "hunter2"
+    assert "hunter2" not in json.dumps(data)
+    events = json.dumps(store.list_events(limit=50), ensure_ascii=False)
+    assert "hunter2" not in events
+    assert "task" in events  # 载体还是记一笔，排查时用得上
+
+
+def test_bootstart_task_mode_rejected_off_windows(api, monkeypatch):
+    """另外两个平台的替代路径是系统级单元（要 root），控制台装不了。"""
+    monkeypatch.setenv("CAMPUSNET_FORCE_PLATFORM", "linux")
+    monkeypatch.setattr(
+        server_mod.bootstart,
+        "install",
+        lambda **kwargs: pytest.fail("非 Windows 上不该走到 install()"),
+    )
+
+    status, data = call(
+        f"{api}/api/bootstart/install", "POST", {"mode": "task", "password": "x"}
+    )
+
+    assert status == 400
+    assert "只支持 Windows" in data["error"]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [{"mode": "weird"}, {"mode": "task", "password": 123}, {"mode": None}],
+)
+def test_bootstart_rejects_bad_mode_payloads(api, monkeypatch, payload):
+    monkeypatch.setenv("CAMPUSNET_FORCE_PLATFORM", "windows")
+    monkeypatch.setattr(
+        server_mod.bootstart,
+        "install",
+        lambda **kwargs: pytest.fail("参数不对时不该走到 install()"),
+    )
+
+    status, data = call(f"{api}/api/bootstart/install", "POST", payload)
+
+    assert status == 400
+    assert not data["ok"]
 
 
 def test_power_action_requires_confirm(api, monkeypatch) -> None:  # noqa: ANN001
