@@ -8,7 +8,13 @@
 
 ## [未发布]
 
-## [2.0.1] - 2026-10-14
+## [2.0.2] - 2026-10-14
+
+内容与 `v2.0.1` 相同，只是重新发了一次：v2.0.1 的 tag 推上去后，发布流水线在
+「收集分发文件」这一步就红了——README 相对链接的校验从「只查 `doc/`」放宽到
+「所有相对路径」，当场指出 `SECURITY.md` 从未进包。tag 触发的 run 用的是该 tag
+提交处的 workflow 文件，既有 tag 上的这个洞补不了，所以补好打包清单后顺延版本号
+重发。下面即 v2.0.1 本该发布的条目。
 
 一次全项目体检后的加固：三处安全口子、若干只在特定环境下才现形的行为 bug，
 以及分发与安装链路上几处已经断掉的东西。
@@ -100,6 +106,11 @@
   Python 3.10/3.12/3.13）纳入必过。矩阵格的检查名因此带上 OS——原来同一版本在
   两个平台同名，windows 那格的红会被 ubuntu 那格的绿顶掉，不改名就拦不住。
   提 PR 的人从「扩展逻辑 + 凭据扫描」两道门禁，变成还要过六个格的测试。
+
+## [2.0.1] - 2026-10-14
+
+tag 已推送，但发布流水线在打包校验处失败（见 [2.0.2]），未产出任何发布物。
+条目并入 [2.0.2]。
 
 ## [2.0.0] - 2026-10-14
 
@@ -291,7 +302,8 @@ GHCR 多架构镜像、四平台单文件分发）、**远程开关机**（前�
 - 开源发布准备（README / LICENSE / CI / Release）、自测指南、
   端口冲突应对说明，以及「提交目标为 `origin/main`」的入库约定。
 
-[未发布]: https://github.com/enmingxiong821-cloud/campusnet/compare/v2.0.1...HEAD
+[未发布]: https://github.com/enmingxiong821-cloud/campusnet/compare/v2.0.2...HEAD
+[2.0.2]: https://github.com/enmingxiong821-cloud/campusnet/compare/v2.0.1...v2.0.2
 [2.0.1]: https://github.com/enmingxiong821-cloud/campusnet/compare/v2.0.0...v2.0.1
 [2.0.0]: https://github.com/enmingxiong821-cloud/campusnet/compare/v1.6.0...v2.0.0
 [1.6.0]: https://github.com/enmingxiong821-cloud/campusnet/compare/v1.5.0...v1.6.0
