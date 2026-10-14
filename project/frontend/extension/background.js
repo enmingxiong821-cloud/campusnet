@@ -39,6 +39,12 @@ const DEFAULTS = {
 /** 本地服务地址；扩展自己那套 fetch 登录只是「没装 Python」时的简化替代。 */
 const LOCAL_SERVICE_URL = 'http://127.0.0.1:2268';
 
+/**
+ * alarm 周期下限。Chrome 对已打包扩展的限制是 30 秒（未打包调试时更宽），
+ * 写比它更小的值不会跑得更快，只会让代码与实际行为对不上。
+ */
+const ALARM_MIN_MINUTES = 0.5;
+
 /** fields 里这两个键是「字段名说明」，不是要提交给门户的表单参数 */
 const META_FIELD_KEYS = new Set(['usernameField', 'passwordField']);
 
@@ -222,14 +228,20 @@ function encodePassword(password, mode) {
  * 从门户响应体里判成败——只能靠文本匹配，没有别的办法。
  *
  * 校园网门户五花八门：有的返回 JSON（`{"result":1}`），有的返回一句中文，
- * 有的干脆 200 + 空 body。所以判断顺序是「先找明确的成功标记，再找明确的
- * 失败标记，最后什么都不匹配时按 HTTP 状态兜底」：
+ * 有的干脆 200 + 空 body。判断顺序与后端 `portal.classify_response` 对齐，
+ * 顺序本身是有讲究的：
  *
  * - 成功标记放最前：某些门户成功页里也夹着「登录失败」的脚本模板或提示文案，
  *   先匹配失败标记会把成功判成失败；
- * - `"result":1` / `"success":true` 都带引号：去掉引号会误命中页面里的
- *   `result:0` 这类 JS 变量赋值；
- * - `userdeny` 是 SRUN 系的固定标记，中文门户里不会出现，留着不冲突；
+ * - **凭据被拒排在「已在线」之前**：反过来的话，一次明确的密码错误会被「已在线」
+ *   盖住，落到用户手里就成了「账号已在线」；后端为了这一点把「已在线」挪到了
+ *   两条凭据失败之后（Dr.COM 的已在线应答长成 `{"result":0,"msg":"您已在线"}`，
+ *   又必须排在通用失败标记之前）；
+ * - **「已在线」只认完整措辞**：裸的「在线」子串会把「在线客服」「当前在线人数」
+ *   「在线时长」这类页面判成已在线；
+ * - **`result` 必须带边界**：裸子串 `"result":1` 会命中 `"result":10` / `"result":12`，
+ *   那两个是失败；`result` 字段存在但不是 1（含 Dr.COM 的 -1）也一律算失败，
+ *   否则会掉进最后的兜底分支被判成功；
  * - 兜底那条是**故意宽松**的：2xx/3xx 且没有任何失败标记时记成功。门户文案
  *   改版（比如换了句「认证通过」）时，宁可让它按成功走、由随后的探活复核，
  *   也不要误报失败——探活失败自然会再登录一次，而误报失败会让用户白点。
@@ -242,18 +254,34 @@ function encodePassword(password, mode) {
  */
 function classify(text, status, url) {
   const low = (text || '').toLowerCase();
-  if (low.includes('"result":1') || low.includes('"success":true')) {
+  const tight = low.replace(/\s+/g, '');
+
+  if (/"result":\s*1(?![\d])/.test(low) || tight.includes('result=1')
+      || tight.includes('"success":true')) {
     return { state: 'success', message: '门户返回成功' };
   }
-  if (low.includes('已在线') || low.includes('already online')) {
-    return { state: 'already_online', message: '账号已在线' };
-  }
-  if (low.includes('密码错误') || low.includes('密码不正确') || low.includes('userdeny')) {
+
+  if (['密码错误', '密码不正确', 'passworderror', 'wrongpassword', 'invalidpassword']
+    .some((token) => low.includes(token))) {
     return { state: 'failed', message: '密码错误或认证失败' };
   }
-  if (low.includes('"result":0') || low.includes('登录失败')) {
+  if (low.includes('userdeny')) {
+    return { state: 'failed', message: '门户拒绝（账号被禁用或凭据无效）' };
+  }
+
+  if (['already online', 'already_online', '已在线', '已经在线', '重复登录']
+    .some((token) => low.includes(token))) {
+    return { state: 'already_online', message: '账号已在线' };
+  }
+
+  if (['"result":0', '"success":false', '登录失败', '认证失败']
+    .some((token) => tight.includes(token))) {
     return { state: 'failed', message: '门户返回登录失败' };
   }
+  if (/"result":\s*(?!1\b)[\d-]+/.test(low)) {
+    return { state: 'failed', message: '门户返回登录失败' };
+  }
+
   if (status >= 200 && status < 400) {
     return { state: 'success', message: `HTTP ${status}，未匹配到失败标记` };
   }
@@ -378,7 +406,18 @@ async function checkOnce() {
       const served = await checkViaLocalService(settings);
       if (served) {
         const results = served.results;
-        const allOnline = results.length > 0 && results.every(item => item.online);
+        if (results.length === 0) {
+          // 本地服务里一个启用的账号都没有，它这一轮其实什么都没说。
+          // 原来这里 `results.length > 0 && …` 恒为 false，于是「还没添加账号」
+          // 被显示成「掉线」，日志还写着「本地服务已处理这一轮检测」。
+          // 探活确实没放行这个事实保留（state.online 此刻已经是 false），
+          // 但话得说清楚是「没有账号可查」，不是「本地服务报了掉线」。
+          state.lastMessage = `探活未放行：${probe.detail}；本地服务里没有启用的账号`;
+          await logEvent('warning', 'service', '本地服务没有启用的账号，本轮未做认证');
+          await saveState();
+          return { online: false, via: 'local-service', results, reason: 'no_accounts' };
+        }
+        const allOnline = results.every(item => item.online);
         const summary = results.map(item => item.message).filter(Boolean).join('；')
           || '本地服务已处理这一轮检测';
         state.online = allOnline;
@@ -441,7 +480,7 @@ async function setEnabled(on) {
   if (on) {
     const { intervalMinutes = 1 } = await load();
     chrome.alarms.create('campusnet-check', {
-      periodInMinutes: Math.max(0.25, intervalMinutes),
+      periodInMinutes: Math.max(ALARM_MIN_MINUTES, intervalMinutes),
     });
     await checkOnce();
   } else {
@@ -495,12 +534,17 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   return true;
 });
 
-chrome.runtime.onInstalled.addListener(async () => {
-  await chrome.storage.local.set({ events: [] });
+chrome.runtime.onInstalled.addListener(async (details) => {
+  // 只在首次安装时清空。原来不分 reason 一律清空，于是每次扩展自动更新
+  // （reason === 'update'）都会把用户攒下的事件日志抹掉——而那正是
+  // 「刚才为什么断的」唯一现场，且用户根本没做任何操作。
+  if (!details || details.reason === 'install') {
+    await chrome.storage.local.set({ events: [] });
+  }
   const settings = await load();
   if (settings.enabled) {
     chrome.alarms.create('campusnet-check', {
-      periodInMinutes: Math.max(0.25, settings.intervalMinutes),
+      periodInMinutes: Math.max(ALARM_MIN_MINUTES, settings.intervalMinutes),
     });
     await checkOnce();
   } else {
@@ -512,7 +556,7 @@ chrome.runtime.onStartup.addListener(async () => {
   const settings = await load();
   if (settings.enabled) {
     chrome.alarms.create('campusnet-check', {
-      periodInMinutes: Math.max(0.25, settings.intervalMinutes),
+      periodInMinutes: Math.max(ALARM_MIN_MINUTES, settings.intervalMinutes),
     });
   }
 });
@@ -531,8 +575,9 @@ async function notifyOffline(message) {
 }
 
 /**
- * 只在「首次掉线」和「恢复上线」两个时刻通知，避免每轮检测都弹一次。
- * notified 标志在这里成对置位/清零，而不是只置位不清。
+ * 只在「刚刚掉线」那一刻通知一次（上一轮还在线、这一轮掉线），避免每轮都弹。
+ * 判据就是前后两轮的 online 之差，不需要额外的「已通知」标志——曾经有一个
+ * `state.notified`，只写不读，只会让人以为去重是靠它做的。
  */
 async function notifyOnTransition(previousOnline, currentOnline, message) {
   if (currentOnline === false && previousOnline !== false) {
@@ -545,11 +590,15 @@ async function notifyOnTransition(previousOnline, currentOnline, message) {
 chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (alarm.name !== 'campusnet-check') return;
 
+  // 必须先 await load()。state 是模块级变量，MV3 的 service worker 空闲约 30 秒
+  // 就被回收，下一次 alarm 触发时它已经回到初值（online: null）——而 load()
+  // 会把上次持久化的状态读回来。原来这里直接读 state.online，拿到的是 null，
+  // 而 null !== false 恒成立，于是**只要当前是掉线，每一轮都再弹一次通知**，
+  // 「只在首次掉线时通知」整个失效，用户被反复轰炸。
+  await load();
   const before = state.online;
   await checkOnce();
-
-  const dropped = await notifyOnTransition(before, state.online, state.lastMessage);
-  state.notified = dropped;
+  await notifyOnTransition(before, state.online, state.lastMessage);
   await saveState();
 });
 

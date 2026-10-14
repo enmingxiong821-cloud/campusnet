@@ -832,6 +832,162 @@ function probeWith(fetchImpl) {
       });
     }
 
+    /* ==================================================================
+       本轮修复的回归用例（追加在末尾，不改动上面任何已有用例）
+       ================================================================== */
+
+    describe('④ classify 判定顺序（与后端 portal.classify_response 对齐）');
+
+    console.log('\n[classify 判定顺序重写]');
+    // 顺序本身是这次改动的核心，逐条锁住：
+    //  - 成功标记必须带边界：裸子串 `"result":1` 会命中 `"result":10` / `"result":12`，
+    //    旧代码把它们判成成功，用户以为连上了、其实没有；
+    //  - `result` 字段存在但不是 1（含 Dr.COM 的 -1）一律失败，
+    //    否则会掉进最后的 2xx 兜底被判成功；
+    //  - 凭据被拒必须排在「已在线」之前：同一条响应里既写了密码错误又写了「已在线」时，
+    //    旧代码先命中「已在线」→ already_online，用户被告知「账号已在线」，
+    //    实际是自己密码错了，永远连不上还查不出原因；
+    //  - 「已在线」只认完整措辞（旧表只有「已在线」「already online」），
+    //    「已经在线」「重复登录」「already_online」这三条是这次新补的识别项。
+    const orderCases = [
+      ['result:10 判失败（"result":1 的后缀是 0）', '{"result":10}', 200, '/', 'failed'],
+      ['result:12 判失败（"result":1 的后缀是 2）', '{"result":12}', 200, '/', 'failed'],
+      ['Dr.COM result:-1 判失败', '{"result":-1}', 200, '/', 'failed'],
+      ['密码错误 + 已在线 同现 → 判失败（凭据优先）', '您的密码错误，且该账号已在线', 200, '/', 'failed'],
+      ['「已经在线」判已在线', '您的账号已经在线', 200, '/', 'already_online'],
+      ['「重复登录」判已在线', '请勿重复登录', 200, '/', 'already_online'],
+      ['「already_online」下划线写法判已在线', 'already_online', 200, '/', 'already_online'],
+    ];
+    for (const [name, text, status, url, expected] of orderCases) {
+      check(name, () => eq(probeApi.classify(text, status, url).state, expected, 'state'));
+    }
+
+    // 裸「在线」子串不能判成已在线：「在线客服」「在线时长」是普通页面文案。
+    // 这一条是防回归护栏——旧、新实现都不会命中，加它是防止以后有人图省事
+    // 把 token 表里的「已在线」放宽成裸「在线」。
+    check('裸「在线」子串不判成已在线', () => {
+      eq(probeApi.classify('在线客服系统', 200, '/').state === 'already_online', false, '在线客服');
+      eq(probeApi.classify('当前在线时长 3 小时', 200, '/').state === 'already_online', false, '在线时长');
+    });
+
+    // 成功标记优先于失败措辞：门户成功页里常夹着「登录失败」的脚本模板/提示文案。
+    // 这也是护栏（成功分支一直在最前），用来钉住「顺序不能倒过来」。
+    check('成功页里夹着「登录失败」仍判成功', () => {
+      eq(probeApi.classify('{"result":1} 登录失败提示模板', 200, '/').state, 'success', 'state');
+    });
+
+    describe('⑤ 本地服务返回空账号列表');
+
+    console.log('\n[checkOnce 遇 results:[]]');
+    {
+      // 本地服务通了，但一个启用的账号都没有：它这一轮其实什么都没说。
+      // 旧代码 `results.length > 0 && …` 恒为 false，于是「还没添加账号」被显示成
+      // 「掉线」，日志还写着「交给本地服务」——用户看着像本地服务报了掉线。
+      const storage = { data: { enabled: true, portalUrl: 'http://portal/login' } };
+      const { api } = loadBackground(storage, async (url) => {
+        if (url.endsWith('/api/health')) {
+          return { ok: true, status: 200, json: async () => ({ ok: true }) };
+        }
+        if (url.endsWith('/api/check')) {
+          return { ok: true, status: 200, json: async () => ({ ok: true, results: [] }) };
+        }
+        // 探活地址一律 302 跳门户 = 未放行
+        return { status: 302, headers: { get: () => 'http://portal/login' } };
+      });
+      const result = await api.checkOnce();
+
+      check('空账号列表判 no_accounts，不再伪装成掉线', () => {
+        eq(result.reason, 'no_accounts', 'reason');
+        eq(result.online, false, 'online');
+      });
+      check('空账号的日志说「没有账号」而不是「交给本地服务」', () => {
+        const messages = (storage.data.events || []).map(e => e.message).join('\n');
+        truthy(messages.includes('本地服务没有启用的账号'), messages);
+        eq(messages.includes('交给本地服务'), false, '不该出现「交给本地服务」');
+      });
+      check('空账号时 lastMessage 同时点名探活未放行与本地服务无账号', () => {
+        const last = storage.data.__state.lastMessage || '';
+        truthy(last.includes('探活未放行'), last);
+        truthy(last.includes('本地服务里没有启用的账号'), last);
+      });
+    }
+
+    describe('⑥ 安装/更新处理与 alarm 周期下限');
+
+    console.log('\n[onInstalled 只在首次安装清日志]');
+    {
+      const storage = { data: { events: [{ id: 'keep-1' }, { id: 'keep-2' }], enabled: false } };
+      const { chrome } = loadBackground(storage, async () => ({ ok: true, status: 200 }));
+      // 监听器是 async 的，返回 promise，必须 await
+      await chrome.__listeners.installed({ reason: 'update' });
+      check('update 不清空事件日志', () => {
+        eq((storage.data.events || []).length, 2, '事件条数');
+      });
+    }
+    {
+      const storage = { data: { events: [{ id: 'old' }], enabled: false } };
+      const { chrome } = loadBackground(storage, async () => ({ ok: true, status: 200 }));
+      await chrome.__listeners.installed({ reason: 'install' });
+      check('install 清空事件日志', () => {
+        eq((storage.data.events || []).length, 0, '事件条数');
+      });
+    }
+
+    console.log('\n[alarm 周期下限 ALARM_MIN_MINUTES]');
+    {
+      // 下限是 0.5 分钟（已打包扩展 Chrome 的硬限制是 30 秒）。旧代码写死
+      // Math.max(0.25, …)，配了 0.05 时会创建 0.25 的周期，代码与实际行为对不上。
+      const storage = { data: { intervalMinutes: 0.05 } };
+      const { api, chrome } = loadBackground(storage, async () => ({ ok: true, status: 200 }));
+      await api.setEnabled(true);
+      check('过小的 intervalMinutes 被抬到 0.5 分钟', () => {
+        const alarm = chrome.__alarms.find(a => a.name === 'campusnet-check');
+        truthy(alarm, '创建了闹钟');
+        eq(alarm.periodInMinutes, 0.5, 'periodInMinutes');
+      });
+    }
+
+    describe('⑦ onAlarm：Worker 回收后先 load 再判掉线');
+
+    console.log('\n[首轮掉线判定（模块状态为初值）]');
+    {
+      // 模拟 MV3 回收 worker 后 alarm 再次触发：新建 sandbox，模块级 state 回到初值
+      // （online: null），但 storage 里持久化的状态是「已掉线」。旧代码直接读
+      // state.online（null），而 null !== false 恒成立，于是每轮都判成「刚刚掉线」，
+      // 只要当前掉线就反复弹通知。新代码先 await load() 把持久化状态读回来，
+      // before 就是 false，判定为「持续掉线」，不再通知。
+      const storage = {
+        data: { enabled: true, __state: { online: false, lastCheckedAt: 0, lastMessage: '未放行' } },
+      };
+      const { chrome } = loadBackground(storage, async () => ({
+        status: 302, headers: { get: () => '/p' },
+      }));
+      await chrome.__listeners.alarm({ name: 'campusnet-check' });
+      check('持久化状态本就掉线 → 不再重复通知', () => {
+        eq(chrome.__notifications.length, 0, '通知条数');
+      });
+      // state.notified 是只写不读的死字段，已彻底删除；saveState 只持久化
+      // online / lastCheckedAt / lastMessage。旧代码在 onAlarm 里写
+      // state.notified = dropped 并 saveState，会留下这个键。
+      check('持久化状态里不含已删除的 notified 字段', () => {
+        eq(Object.hasOwn(storage.data.__state || {}, 'notified'), false, 'notified 键');
+      });
+    }
+    {
+      // 正向对照：持久化状态是在线，本轮探活失败 → 恰好通知 1 次，
+      // 确认修复没有把该报的掉线也一起吞掉。（此条在新旧代码下都应通过。）
+      const storage = {
+        data: { enabled: true, __state: { online: true, lastCheckedAt: 0, lastMessage: '网络已放行' } },
+      };
+      const { chrome } = loadBackground(storage, async () => ({
+        status: 302, headers: { get: () => '/p' },
+      }));
+      await chrome.__listeners.alarm({ name: 'campusnet-check' });
+      check('持久化状态在线且本轮掉线 → 恰好通知一次', () => {
+        eq(chrome.__notifications.length, 1, '通知条数');
+      });
+    }
+
     console.log(`\n=== 结果：${passed} 通过，${failures.length} 失败 ===\n`);
     for (const [name, s] of groupStats) {
       const mark = s.failed === 0 ? 'OK  ' : 'FAIL';
