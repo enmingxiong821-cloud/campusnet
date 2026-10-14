@@ -103,7 +103,11 @@ def _decode_body(raw: bytes, headers: Any = None) -> str:
             raw = gzip.GzipFile(fileobj=io.BytesIO(raw)).read()
         elif "deflate" in encoding:
             raw = zlib.decompress(raw, -zlib.MAX_WBITS)
-    except OSError:
+    except (OSError, EOFError, zlib.error):
+        # 三种异常都要收：头部坏掉是 gzip.BadGzipFile（OSError 子类），
+        # 流被截断是 EOFError，deflate 数据坏掉是 zlib.error——后两个都不是
+        # OSError 子类，只写 except OSError 会漏出去，把一次「解压失败就按原文
+        # 解码」的小状况升级成整个探活判成异常。
         pass
     return charset_mod.decode(raw, content_type=content_type)
 

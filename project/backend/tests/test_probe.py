@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gzip
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -257,3 +258,23 @@ def test_probe_rejects_non_http_scheme() -> None:
     assert result.online is False
     assert result.status == "unsupported_scheme"
     assert "file" in result.detail
+
+
+@pytest.mark.parametrize(
+    ("raw", "encoding"),
+    [
+        (b"\x00\x01\x02\x03\x04", "deflate"),  # zlib.error，不是 OSError 子类
+        (gzip.compress(b"hello world" * 20)[:12], "gzip"),  # 截断 → EOFError，也不是
+        (b"not gzip at all", "gzip"),  # BadGzipFile，这个才是 OSError 子类
+    ],
+)
+def test_decode_body_survives_broken_compression(raw: bytes, encoding: str) -> None:
+    """压缩流坏掉时要退回「按原文解码」，不能把异常漏出去。
+
+    原来只写 `except OSError`，而 deflate 坏数据抛 zlib.error、gzip 流被截断抛
+    EOFError，都不是 OSError 子类——它们会穿过兜底，把一次可恢复的解码小状况
+    升级成整个探活报异常。
+    """
+    text = probe_mod._decode_body(raw, headers={"Content-Encoding": encoding})
+
+    assert isinstance(text, str)
