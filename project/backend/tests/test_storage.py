@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import os
 import sqlite3
+import stat
+from pathlib import Path
 
 import pytest
 from campusnet import storage as storage_mod
@@ -333,3 +336,26 @@ def test_setting_string_roundtrip_keeps_type(store: Store) -> None:
     assert store.get_setting("note") == "123"
     assert store.get_setting("flag") == "true"
     assert store.get_setting("blank") == "null"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Windows 不看 POSIX 权限位")
+def test_store_restricts_db_permissions_to_0600(tmp_db) -> None:  # noqa: ANN001
+    """库里存着加密后的账号密码与通知密钥，库文件（含 WAL 旁挂文件）要收紧到 0600。"""
+    Store(tmp_db)
+
+    assert stat.S_IMODE(tmp_db.stat().st_mode) == 0o600
+    for suffix in ("-wal", "-shm"):
+        side = Path(f"{tmp_db}{suffix}")
+        if side.exists():  # 旁挂文件按访问时序出现，存在就必须是 0600
+            assert stat.S_IMODE(side.stat().st_mode) == 0o600
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Windows 不看 POSIX 权限位")
+def test_restrict_permissions_swallows_oserror(tmp_db, monkeypatch) -> None:  # noqa: ANN001
+    """收紧权限失败（只读挂载、权限不足）不能让服务起不来。"""
+
+    def boom(path, mode):  # noqa: ANN001
+        raise OSError("只读挂载")
+
+    monkeypatch.setattr(storage_mod.os, "chmod", boom)
+    Store(tmp_db)  # 不该抛

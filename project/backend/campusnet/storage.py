@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import threading
 from contextlib import contextmanager
@@ -171,6 +172,25 @@ class Store:
         self.db_path = Path(db_path) if db_path else db_path_default()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.init_db()
+        self._restrict_permissions()
+
+    def _restrict_permissions(self) -> None:
+        """库文件收紧到 0600。
+
+        库里存着账号密码（加密后）与通知 Webhook 的密钥，而 sqlite 建文件用的是
+        umask（通常 0644）——同机其他用户读得到。加密密钥文件本来就是 0600 建出来的
+        （见 crypto），库却一直敞着。WAL 模式下还有 -wal / -shm 两个旁挂文件，
+        正文会落在那里，一并收紧。Windows 不看 POSIX 权限位，跳过。
+        """
+        if os.name != "posix":
+            return
+        for suffix in ("", "-wal", "-shm"):
+            target = Path(f"{self.db_path}{suffix}")
+            try:
+                if target.exists():
+                    os.chmod(target, 0o600)
+            except OSError:  # 只读挂载、权限不足等：收紧失败不该让服务起不来
+                pass
 
     def connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, timeout=10)
