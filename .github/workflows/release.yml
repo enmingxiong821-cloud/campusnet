@@ -26,9 +26,11 @@ jobs:
       - name: Python 测试
         env:
           PYTHONIOENCODING: utf-8
+        # 与 ci.yml 同款门禁：tag 不一定打在 main 的绿色提交上（补发旧版本、
+        # 直接往 tag 推提交都会绕过 CI），发布前这一遍是最后一道网。
         run: |
-          python -m pip install --upgrade pip pytest
-          python -m pytest project/backend/tests -q
+          python -m pip install --upgrade pip pytest pytest-cov
+          python -m pytest project/backend/tests -q --cov=campusnet --cov-fail-under=90
 
       - name: 扩展测试
         run: |
@@ -43,7 +45,7 @@ jobs:
           echo "NAME=${NAME}" >> "$GITHUB_ENV"
           mkdir -p "dist/${NAME}"
           # 注意：cp -r 不受 .gitignore 约束，本地 *.log 会被一起带进来
-          cp -r project utils database/schema.sql database/config.example.yml README.md LICENSE install.bat install.sh install.ps1 "dist/${NAME}/"
+          cp -r project utils database/schema.sql database/config.example.yml README.md CHANGELOG.md CONTRIBUTING.md LICENSE install.bat install.sh install.ps1 "dist/${NAME}/"
           # 容器部署用的三个文件也随包发：解压后就能 docker compose up，
           # 不必再回仓库拿。.dockerignore 要跟着走——少了它，用户从解压目录
           # 构建时会把 config.json 一起 COPY 进镜像层。
@@ -55,9 +57,10 @@ jobs:
           mkdir -p "dist/${NAME}/doc"
           cp -r doc/images "dist/${NAME}/doc/"
           cp "doc/自测指南.md" "dist/${NAME}/doc/"
-          # README 里每个 doc/ 引用都必须真的在包里，否则解压后就是死链。
-          # 以后加内部文档不会再误伤，漏发用户文档也会当场失败。
-          for ref in $(grep -oE '\(doc/[^)]+\)' "dist/${NAME}/README.md" | tr -d '()'); do
+          # README 里每个相对链接都必须真的在包里，否则解压后就是死链。
+          # 只排除 http/mailto/页内锚点，其余一律当相对路径查——原来只查 doc/ 前缀，
+          # CHANGELOG.md、CONTRIBUTING.md 这类根目录文档漏发过，谁都没拦住。
+          for ref in $(grep -oE '\]\([^)]+\)' "dist/${NAME}/README.md" | sed -e 's/^](//' -e 's/)$//' | grep -vE '^(https?:|mailto:|#)'); do
             if [ ! -e "dist/${NAME}/${ref}" ]; then
               echo "::error::README 引用了未打包的文件: ${ref}"
               exit 1
@@ -221,6 +224,22 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # 标签在 shell 里拼：把 ${{ github.ref_name }} 直接插进 run 里是 Actions 的
+      # 注入口子，走 env 传递。顺带把 :latest 只留给正式版——预发布（v2.1.0-rc1
+      # 这类带连字符的）要是顶掉了 latest，docker compose pull 的人就拿到未定版了。
+      - name: 生成镜像标签
+        id: image_tags
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -e
+          tags="ghcr.io/${GITHUB_REPOSITORY}:${REF_NAME}"
+          case "$REF_NAME" in
+            *-*) ;;
+            *) tags="${tags},ghcr.io/${GITHUB_REPOSITORY}:latest" ;;
+          esac
+          echo "tags=${tags}" >> "$GITHUB_OUTPUT"
+
       # 多架构镜像必须在一次构建里直接推送：buildx 没法把异架构产物 --load
       # 到本地（只有本机架构那份能加载），所以不能先构建再单独推。
       - name: 构建并推送
@@ -229,9 +248,7 @@ jobs:
           context: .
           platforms: linux/amd64,linux/arm64
           push: ${{ startsWith(github.ref, 'refs/tags/v') }}
-          tags: |
-            ghcr.io/${{ github.repository }}:${{ github.ref_name }}
-            ghcr.io/${{ github.repository }}:latest
+          tags: ${{ steps.image_tags.outputs.tags }}
 
   release:
     name: 创建 Release

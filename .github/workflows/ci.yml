@@ -10,6 +10,9 @@ jobs:
   python:
     name: Python ${{ matrix.python-version }}
     runs-on: ${{ matrix.os }}
+    # 六格矩阵里任何一格挂住（探活用例真的去连网、或某个平台等超时）
+    # 都会把整轮 CI 拖到 GitHub 的 6 小时上限；全套本地约 5 分钟，30 分钟够宽。
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
