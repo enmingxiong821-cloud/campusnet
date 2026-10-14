@@ -367,8 +367,18 @@ def test_relaunch_elevated_swallows_oserror(monkeypatch) -> None:  # noqa: ANN00
 
 
 def test_register_bootstart_aborts_on_interrupt(monkeypatch) -> None:  # noqa: ANN001
-    """Ctrl+C / 输入流结束等同于取消，返回 2 而不是抛出去。"""
+    """Ctrl+C / 输入流结束等同于取消，返回 2 而不是抛出去。
+
+    必须注入 Windows：只有计划任务那条路才会去读密码，打断点才有意义。
+    不注入的话 Linux 上平台名是 linux、`mode="auto"`，压根不走 getpass——
+    会真的往 `~/.config/systemd/user/` 写单元文件，然后返回 0。
+    同理 `install` 也替掉，免得哪天分支改回去时用例变成往盘上写东西的副作用。
+    """
     import getpass
+
+    monkeypatch.setenv("CAMPUSNET_FORCE_PLATFORM", "windows")
+    installed: list[dict] = []
+    monkeypatch.setattr(boot_mod, "install", lambda **kwargs: installed.append(kwargs))
 
     def abort(_prompt: str = "") -> str:
         raise EOFError
@@ -376,6 +386,7 @@ def test_register_bootstart_aborts_on_interrupt(monkeypatch) -> None:  # noqa: A
     monkeypatch.setattr(getpass, "getpass", abort)
 
     assert menu_mod.register_bootstart(_feed([]), lambda *_: None) == 2
+    assert installed == []  # 密码都没拿到手，绝不能走到安装
 
 
 # ---------------------------------------------- 关机 / 重启前的确认
