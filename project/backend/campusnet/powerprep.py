@@ -180,9 +180,12 @@ def _check_wake_on_lan(fix: bool) -> PowerItem:
                 )
             fixed, failed = [], []
             for name in denied:
+                # 网卡名是用户可控的（可以改成带单引号的），直接拼进 -Command 会被
+                # 当成命令分隔；PowerShell 里单引号内写两个单引号才是转义。
+                safe_name = name.replace("'", "''")
                 script = (
-                    f"Set-NetAdapterPowerManagement -Name '{name}' -WakeOnMagicPacket Enabled "
-                    f"-WakeOnPattern Enabled"
+                    f"Set-NetAdapterPowerManagement -Name '{safe_name}'"
+                    f" -WakeOnMagicPacket Enabled -WakeOnPattern Enabled"
                 )
                 if _run(["powershell", "-NoProfile", "-Command", script])[0]:
                     fixed.append(name)
@@ -229,7 +232,11 @@ def _check_sleep_timeout(fix: bool) -> PowerItem:
     ok, text = _run(["powercfg", "/query", "SCHEME_CURRENT", "SUB_SLEEP", "STANDBYIDLE"])
     if not ok:
         return PowerItem("睡眠超时", MANUAL, "无法读取（powercfg /query 失败）")
-    match = re.search(r"当前交流电源设置索引:\s*(0x[0-9a-fA-F]+|\d+)", text)
+    match = re.search(
+        r"(?:当前交流电源设置索引|Current AC Power Setting Index)\s*:\s*"
+        r"(0x[0-9a-fA-F]+|\d+)",
+        text,
+    )
     if not match:
         return PowerItem("睡眠超时", MANUAL, "无法解析睡眠超时设置")
     raw = match.group(1)
