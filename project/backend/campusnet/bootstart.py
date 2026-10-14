@@ -223,7 +223,11 @@ def register_task(host: str, port: int, password: str) -> tuple[bool, str]:
 
     为什么要密码：Windows 只有两条路能让任务不经登录运行——把密码交给
     任务计划程序保存（它存进 LSA），或者让机器自动登录（密码会落到注册表）。
-    这里选前者，并且密码只从 stdin 传给 PowerShell，不进命令行、不进环境变量。
+    这里选前者。密码**不进命令行**（`-Command` 后面的字符串谁都能从进程列表里
+    读到），只经子进程环境变量传给 PowerShell；同机同用户的进程理论上仍能读到
+    那个变量，但不走 stdin 是有原因的——`-Command -` 会把 stdin 整体当脚本来执行，
+    而 `[Console]::In.ReadLine()` 的输入编码在 Windows 上默认是 OEM 代码页，
+    非 ASCII 密码会被转坏成错的密码。详见 `_run_powershell_script` 的说明。
 
     三个容易踩的设置项，都必须显式写死：
     - `-ExecutionTimeLimit 0`：默认上限是 **3 天**，到点任务会被直接终止——

@@ -67,8 +67,10 @@ class _Handler(BaseHTTPRequestHandler):
         self.wfile.write(raw)
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 def portal_server():
+    # 每个用例一套空 pages 的服务。别改回 scope="module"：pages 是可变字典，
+    # 模块级共享时上游用例塞进去的页面会漏给下游，断言绿不绿就取决于执行顺序了。
     handler = type("H", (_Handler,), {"pages": {}})
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
     httpd.daemon_threads = True
@@ -287,7 +289,11 @@ def test_scan_gateway_uses_candidate_paths(portal_server) -> None:  # noqa: ANN0
 
 
 def test_scan_gateway_on_dead_port_is_empty() -> None:
-    assert discovery.scan_gateway("127.0.0.1:9", timeout=1.0) == []
+    # 端口 9（discard）上没有监听者，但各系统对「连一个没人的端口」反应不同：
+    # Linux 立刻 ECONNREFUSED，Windows 上低端口常被过滤成丢包，每次连接都要等满
+    # timeout——沿用 1.0 时这条在本机单跑要 40 秒（24 条路径 × 2 协议），
+    # 看着像卡死。断言只关心「什么都没扫到」，超时给短只是让结论更快拿到。
+    assert discovery.scan_gateway("127.0.0.1:9", timeout=0.2) == []
 
 
 def test_scan_all_gateways_stops_after_first_hit(portal_server) -> None:  # noqa: ANN001
@@ -315,7 +321,8 @@ def test_scan_all_gateways_respects_total_limit(portal_server) -> None:  # noqa:
 
 
 def test_scan_all_gateways_on_dead_ports_is_empty() -> None:
-    assert discovery.scan_all_gateways(["127.0.0.1:9"], timeout=1.0) == []
+    # 同上：短超时只为在本机（低端口丢包）也能秒回，断言与超时长短无关。
+    assert discovery.scan_all_gateways(["127.0.0.1:9"], timeout=0.2) == []
 
 
 # ---------- 一站式发现 ----------

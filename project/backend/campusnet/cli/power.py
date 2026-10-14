@@ -30,7 +30,16 @@ def cmd_power(args: argparse.Namespace) -> int:
             print("将尝试自动修复：")
             for item in pending:
                 print(f"  - {item.name}：{item.detail}")
-            if input("确认执行？[y/N] ").strip().lower() not in ("y", "yes"):
+            try:
+                answer = input("确认执行？[y/N] ")
+            except (EOFError, KeyboardInterrupt):
+                # 没有终端时（双击快捷方式、计划任务、stdin 被重定向）input 直接抛
+                # EOFError，Ctrl-C 抛 KeyboardInterrupt——以前这两种都会带着整条栈
+                # 冒到用户面前。与 menu.py 的处理一致按「取消」算：读不到确认就等于
+                # 没确认，绝不顺着往下走去改注册表和 powercfg。
+                print("\n已取消，未做任何修改。")
+                return 0
+            if answer.strip().lower() not in ("y", "yes"):
                 print("已取消，未做任何修改。")
                 return 0
         items = powerprep_mod.run(fix=args.fix, yes=args.yes)

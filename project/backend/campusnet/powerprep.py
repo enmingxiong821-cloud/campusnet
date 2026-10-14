@@ -163,12 +163,17 @@ def _check_wake_on_lan(fix: bool) -> PowerItem:
     allowed, denied = _wake_magic_adapters()
     if not allowed and not denied:
         # PowerShell 或模块不可用：无法判定，报「需人工」而不是假装 OK。
+        # fixable 必须是 False：读网卡状态靠 Get-NetAdapterPowerManagement，改它靠同
+        # 一模块的 Set-*，模块不可用时 --fix 会落回这条分支，什么也改不了。标成可修会
+        # 让 CLI（cli/power.py 的「将尝试自动修复」）和控制台（index.html 的确认框）都
+        # 把它算进待修清单，用户确认一圈却什么都没发生；这条 detail 自己也写着
+        # 「请手动…」，前后矛盾。
         return PowerItem(
             "网卡魔术包唤醒",
             MANUAL,
             "无法读取网卡电源管理（PowerShell 的 NetAdapter 模块不可用或命令失败）；"
             "请手动在设备管理器 → 网卡 → 电源管理里勾选「允许此设备唤醒计算机」",
-            fixable=True,
+            fixable=False,
             undo=undo,
         )
     if denied:
@@ -396,12 +401,20 @@ def _check_linux_wol(fix: bool) -> PowerItem:
         supports_g = match and "g" in match.group(1)
         (enabled if supports_g else disabled).append(iface)
     if disabled:
-        if fix and _run(["sudo", "-n", exe, "-s", disabled[0], "wol", "g"])[0]:
-            return PowerItem(
-                "网卡 WOL", FIXED, f"已为 {', '.join(disabled)} 打开魔术包唤醒",
-                fixable=True, undo=undo,
-            )
         if fix:
+            # 逐块试：多网卡时只修第一块却报「已为 a, b 打开」是假消息，
+            # 用户会以为 b 也开了，回头唤醒失败根本想不到是这里。
+            fixed = [
+                iface
+                for iface in disabled
+                if _run(["sudo", "-n", exe, "-s", iface, "wol", "g"])[0]
+            ]
+            if fixed:
+                rest = [iface for iface in disabled if iface not in fixed]
+                detail = f"已为 {', '.join(fixed)} 打开魔术包唤醒"
+                if rest:
+                    detail += f"；{', '.join(rest)} 未能修改（免密 sudo 不可用）"
+                return PowerItem("网卡 WOL", FIXED, detail, fixable=True, undo=undo)
             return PowerItem(
                 "网卡 WOL", MANUAL,
                 "需要 sudo 权限才能打开，本次未能修改（免密 sudo 不可用）",

@@ -133,11 +133,12 @@ def run_setup(
         report.lines.append("    - 已跳过")
 
     report.lines.append("")
-    report.lines.append("下一步：")
+    report.lines.append("下一步（都在桌面「校园网自连」这个入口的菜单里；没生成就改跑"
+                        " python utils/run.py menu）：")
     report.lines.append(
-        "  1. 双击桌面「注册开机自启-无需登录(需管理员)」，同意 UAC 并输入密码"
+        "  1. 选「注册开机自启」，同意 UAC 并输入密码"
     )
     report.lines.append("     —— 做完这一步，通电就会自动认证，不需要任何人登录")
-    report.lines.append("  2. 双击「打开控制台」添加账号（门户地址 + 账号密码）")
-    report.lines.append("  3. 手机访问：双击「查看多端访问」，拿到地址与令牌")
+    report.lines.append("  2. 选「添加账号」（门户地址 + 账号密码）")
+    report.lines.append("  3. 手机访问：选「查看多端访问」，拿到地址与令牌")
     return report

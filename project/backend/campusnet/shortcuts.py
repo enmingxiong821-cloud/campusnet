@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .bootstart import launch_command_line, platform_name, python_executable
-from .paths import ROOT
+from .paths import ROOT, frozen_prefix
 
 
 @dataclass(frozen=True)
@@ -187,10 +187,11 @@ def create_posix(
     directory.mkdir(parents=True, exist_ok=True)
     created: list[str] = []
     for item in shortcuts:
-        command = " ".join(
-            shlex.quote(part)
-            for part in [str(python_executable()), str(run_script()), *item.args]
-        )
+        # 冻结运行时没有 utils/run.py 可指，前缀必须走 frozen_prefix()（= 单文件自身）。
+        # 也不能复用 launch_command_line：它按 Windows 规则加引号（list2cmdline），
+        # 在 sh 里碰上带空格的路径会解析错，所以要自己 shlex.quote。
+        prefix = frozen_prefix() or [str(python_executable()), str(run_script())]
+        command = " ".join(shlex.quote(part) for part in [*prefix, *item.args])
         if darwin:
             path = directory / f"{item.name}.command"
             path.write_text(

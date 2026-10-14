@@ -10,6 +10,7 @@ import pytest
 
 from campusnet import cli as cli_mod
 from campusnet import power
+from campusnet import powerprep
 
 
 def _proc(returncode: int = 0, stdout: str = "") -> SimpleNamespace:
@@ -409,3 +410,176 @@ def test_wake_rejects_out_of_range_port() -> None:
 def test_wake_rejects_non_numeric_port() -> None:
     with pytest.raises(power.PowerError):
         power.wake("AA:BB:CC:DD:EE:FF", port="abc")
+
+
+# ------------------------------------------- CLI 分派与「电源体检」的确认路径（补测）
+
+
+def test_cli_power_reboot_dry_run_reports_verb(capsys) -> None:  # noqa: ANN001
+    """reboot 走的是 off 之外的 else 分支，之前没被任何用例走到。"""
+    assert cli_mod.main(["power", "reboot", "--dry-run"]) == 0
+
+    out = capsys.readouterr().out
+    assert "试运行" in out
+    assert "重启" in out
+
+
+def test_cli_power_wake_reports_target(
+    monkeypatch: pytest.MonkeyPatch, capsys  # noqa: ANN001
+) -> None:
+    sent: list[tuple] = []
+
+    class FakeSocket:
+        def setsockopt(self, *args: object) -> None:
+            pass
+
+        def sendto(self, payload: bytes, target: tuple) -> None:
+            sent.append(target)
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(power.socket, "socket", lambda *a, **k: FakeSocket())
+
+    code = cli_mod.main(
+        ["power", "wake", "--mac", "00:11:22:33:44:55", "--broadcast", "192.168.1.255"]
+    )
+
+    assert code == 0
+    assert sent == [("192.168.1.255", 9)]
+    assert "192.168.1.255:9" in capsys.readouterr().out
+
+
+def test_cli_power_off_wraps_power_error(
+    monkeypatch: pytest.MonkeyPatch, capsys  # noqa: ANN001
+) -> None:
+    def boom(*args: object, **kwargs: object) -> str:
+        raise power.PowerError("拒绝访问")
+
+    monkeypatch.setattr(power, "shutdown", boom)
+    # 万一上面的替换没生效，宁可测试报红也不能真把这台机器关掉。
+    monkeypatch.setattr(power, "_run", lambda args: pytest.fail("不该真的执行关机命令"))
+
+    assert cli_mod.main(["power", "off"]) == 1
+    assert "操作失败" in capsys.readouterr().err
+
+
+def _pending_item() -> powerprep.PowerItem:
+    return powerprep.PowerItem(
+        "快速启动", powerprep.WARN, "已开启，用 --fix 可关闭", fixable=True
+    )
+
+
+def _fake_prep_run(calls: list[bool], pending: powerprep.PowerItem):
+    """记录每次 run 拿到的 fix 值；fix=True 时返回「已修复」。"""
+
+    def fake_run(fix: bool = False, yes: bool = False, plat=None):
+        calls.append(fix)
+        if fix:
+            return [powerprep.PowerItem("快速启动", powerprep.FIXED, "已关闭")]
+        return [pending]
+
+    return fake_run
+
+
+@pytest.mark.parametrize("answer", ["y", "Y", "yes", "YES", " y "])
+def test_cli_power_prep_fix_asks_first_then_fixes(
+    monkeypatch: pytest.MonkeyPatch, capsys, answer: str  # noqa: ANN001
+) -> None:
+    """--fix 不带 --yes：先只读预览，确认之后才真改。"""
+    calls: list[bool] = []
+    monkeypatch.setattr(powerprep, "run", _fake_prep_run(calls, _pending_item()))
+    monkeypatch.setattr("builtins.input", lambda _prompt: answer)
+
+    assert cli_mod.main(["power", "prep", "--fix"]) == 0
+
+    out = capsys.readouterr().out
+    assert calls == [False, True], "必须先只读预览再执行修复"
+    assert "将尝试自动修复" in out
+    assert "已关闭" in out  # 修复后的报告
+
+
+@pytest.mark.parametrize("answer", ["", "n", "no", "Y 后面还有别的内容", "yes!"])
+def test_cli_power_prep_declining_never_fixes(
+    monkeypatch: pytest.MonkeyPatch, capsys, answer: str  # noqa: ANN001
+) -> None:
+    """回答不是 y/yes 时绝不能执行修复——那条路径会改注册表与 powercfg。"""
+    calls: list[bool] = []
+    monkeypatch.setattr(powerprep, "run", _fake_prep_run(calls, _pending_item()))
+    monkeypatch.setattr("builtins.input", lambda _prompt: answer)
+
+    assert cli_mod.main(["power", "prep", "--fix"]) == 0
+
+    assert calls == [False], "未确认时不能调用 run(fix=True)"
+    assert "已取消" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("error", [EOFError, KeyboardInterrupt])
+def test_cli_power_prep_without_a_tty_cancels_instead_of_crashing(
+    monkeypatch: pytest.MonkeyPatch, capsys, error: type[BaseException]  # noqa: ANN001
+) -> None:
+    """双击快捷方式 / 计划任务 / stdin 被重定向时，input 直接抛异常而不是返回空串。
+
+    以前这里没有兜底，EOFError 会带着整条栈冒到用户面前，Ctrl-C 同理。读不到确认
+    就等于没确认，必须当成取消，绝不能顺着往下跑 run(fix=True)。
+    """
+
+    def no_input(_prompt: str) -> str:
+        raise error()
+
+    calls: list[bool] = []
+    monkeypatch.setattr(powerprep, "run", _fake_prep_run(calls, _pending_item()))
+    monkeypatch.setattr("builtins.input", no_input)
+
+    assert cli_mod.main(["power", "prep", "--fix"]) == 0
+
+    assert calls == [False], "读不到确认时不能调用 run(fix=True)"
+    assert "已取消" in capsys.readouterr().out
+
+
+def test_cli_power_prep_yes_skips_confirmation(
+    monkeypatch: pytest.MonkeyPatch, capsys  # noqa: ANN001
+) -> None:
+    """--yes 是给无人值守用的：不该提问（那种场合也没有终端可问）。"""
+    calls: list[bool] = []
+    monkeypatch.setattr(powerprep, "run", _fake_prep_run(calls, _pending_item()))
+    monkeypatch.setattr("builtins.input", lambda _prompt: pytest.fail("--yes 不该提问"))
+
+    assert cli_mod.main(["power", "prep", "--fix", "--yes"]) == 0
+
+    assert calls == [True]
+    assert "将尝试自动修复" not in capsys.readouterr().out
+
+
+def test_cli_power_prep_without_fixable_item_does_not_ask(
+    monkeypatch: pytest.MonkeyPatch, capsys  # noqa: ANN001
+) -> None:
+    """全是 OK 项时连问都不问，直接出报告（改动前的 27-29 行分支）。"""
+    items = [powerprep.PowerItem("快速启动", powerprep.OK, "已关闭，关机就是真关机")]
+
+    def fake_run(fix: bool = False, yes: bool = False, plat=None):
+        return items
+
+    monkeypatch.setattr(powerprep, "run", fake_run)
+    monkeypatch.setattr("builtins.input", lambda _prompt: pytest.fail("无可修项不该提问"))
+
+    assert cli_mod.main(["power", "prep", "--fix"]) == 0
+    assert "已关闭，关机就是真关机" in capsys.readouterr().out
+
+
+def test_wake_on_lan_unreadable_is_not_marked_fixable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PowerShell / NetAdapter 模块不可用时 --fix 也修不了，不能标成「可自动修复」。
+
+    fixable=True 会让 CLI 的「将尝试自动修复」和控制台的确认框都把它算进去，用户
+    确认一圈却什么都没发生；这条 detail 自己也写着「请手动…」，前后矛盾。
+    """
+    monkeypatch.setattr(powerprep, "_wake_magic_adapters", lambda: ([], []))
+
+    item = powerprep._check_wake_on_lan(fix=False)
+
+    assert item.status == powerprep.MANUAL
+    assert item.fixable is False
+    # 这就是「修不了」的证据：fix=True 走回同一条分支，状态毫无变化。
+    assert powerprep._check_wake_on_lan(fix=True).status == powerprep.MANUAL

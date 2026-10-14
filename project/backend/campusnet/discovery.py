@@ -338,6 +338,23 @@ def analyze_portal(url: str, html_text: str, timeout: float = 6.0) -> PortalCand
 # ---------------------------------------------------------------- 扫描门户
 
 
+def _tcp_reachable(url: str, timeout: float) -> bool:
+    """该 URL 的 host:port 上有没有服务在听。只做 TCP 连接，不发请求。
+
+    给路径扫描提前止损用：同一 host:port 下的 20 多条候选路径共用同一个
+    TCP 连接结果，连都连不上时逐条去试只是把同一个失败重复 20 多遍。
+    """
+    parts = urlsplit(url)
+    if not parts.hostname:
+        return False
+    port = parts.port or (443 if parts.scheme == "https" else 80)
+    try:
+        with socket.create_connection((parts.hostname, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
 def scan_gateway(
     gateway: str,
     paths: tuple[str, ...] = PORTAL_PATHS,
@@ -351,6 +368,12 @@ def scan_gateway(
     """
     found: list[PortalCandidate] = []
     for scheme in ("http", "https"):
+        # 上面那句「避免空转」靠 limit 只在**扫到东西**时才成立：一个都扫不到
+        # 时是 24 条路径 × timeout 全跑满（默认 4 秒 → 单协议 96 秒、双协议 192 秒），
+        # 而断网、网关黑洞、大面积丢包恰好都是这种一个都扫不到的情形。
+        # 先探一次 TCP 止损：host:port 上没人听，逐条路径不可能有不同结果。
+        if not _tcp_reachable(f"{scheme}://{gateway}/", timeout):
+            continue
         for path in paths:
             url = f"{scheme}://{gateway}{path}"
             got = _fetch(url, timeout=timeout)
