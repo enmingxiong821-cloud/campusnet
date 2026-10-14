@@ -43,7 +43,9 @@ def shutdown_command(delay: int = 0) -> list[str]:
     if sys.platform == "win32":
         return ["shutdown", "/s", "/t", str(delay)]
     if sys.platform == "darwin":
-        return ["osascript", "-e", 'tell application "System Events" to shut down']
+        if _macos_gui_session():
+            return ["osascript", "-e", 'tell application "System Events" to shut down']
+        return ["shutdown", "-h", "now"]
     if shutil.which("systemctl"):
         return ["systemctl", "poweroff"]
     return ["shutdown", "-h", "now"]
@@ -54,7 +56,9 @@ def reboot_command(delay: int = 0) -> list[str]:
     if sys.platform == "win32":
         return ["shutdown", "/r", "/t", str(delay)]
     if sys.platform == "darwin":
-        return ["osascript", "-e", 'tell application "System Events" to restart']
+        if _macos_gui_session():
+            return ["osascript", "-e", 'tell application "System Events" to restart']
+        return ["shutdown", "-r", "now"]
     if shutil.which("systemctl"):
         return ["systemctl", "reboot"]
     return ["shutdown", "-r", "now"]
@@ -91,6 +95,27 @@ def _run_capture(args: list[str]) -> tuple[bool, str]:
         return False, ""
     text = ((proc.stdout or b"") + (proc.stderr or b"")).decode("utf-8", "replace")
     return proc.returncode == 0, text
+
+
+def _macos_gui_session() -> bool:
+    """当前进程有没有图形登录会话。
+
+    macOS 的 `osascript` 要经 Apple Events 找到 System Events，而它只存在于
+    Aqua 会话里。LaunchDaemon（无人登录）与 SSH 会话都拿不到，这时 osascript
+    会失败，用户看到的是「点了关机，什么都没发生」——而这两种恰恰是
+    「无需登录」的目标场景本身，所以不能只认 osascript。
+
+    `launchctl managername` 是最省事的判据：图形会话是 Aqua，
+    LaunchDaemon 是 System，SSH 是 Background / StandardIO。
+    这里只认「输出里有 Aqua」，不去逐字比对某个固定串——判据的关键是
+    「在不在图形域里」，多几个空白或前缀都不该让它失效。
+    """
+    if os.environ.get("SSH_CONNECTION") or os.environ.get("SSH_TTY"):
+        return False
+    if not shutil.which("launchctl"):
+        return False
+    ok, text = _run_capture(["launchctl", "managername"])
+    return ok and "aqua" in text.strip().lower()
 
 
 def local_macs(platform: str | None = None) -> list[str]:

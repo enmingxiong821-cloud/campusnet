@@ -177,6 +177,7 @@ def test_run_wraps_oserror(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_shutdown_command_darwin(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(power.sys, "platform", "darwin")
+    monkeypatch.setattr(power, "_macos_gui_session", lambda: True)
 
     assert power.shutdown_command() == [
         "osascript",
@@ -187,12 +188,68 @@ def test_shutdown_command_darwin(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_reboot_command_darwin(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(power.sys, "platform", "darwin")
+    monkeypatch.setattr(power, "_macos_gui_session", lambda: True)
 
     assert power.reboot_command() == [
         "osascript",
         "-e",
         'tell application "System Events" to restart',
     ]
+
+
+def test_darwin_without_gui_session_uses_shutdown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """LaunchDaemon / SSH 场景：没有 Aqua 会话，osascript 会静默失败。
+
+    这正是「无需登录」的目标场景，所以必须回退到 shutdown 而不是照发 osascript。
+    """
+    monkeypatch.setattr(power.sys, "platform", "darwin")
+    monkeypatch.setattr(power, "_macos_gui_session", lambda: False)
+
+    assert power.shutdown_command() == ["shutdown", "-h", "now"]
+    assert power.reboot_command() == ["shutdown", "-r", "now"]
+
+
+def test_macos_gui_session_detects_ssh(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SSH_CONNECTION", "10.0.0.2 50000 10.0.0.1 22")
+    monkeypatch.setattr(power.shutil, "which", lambda _name: "/bin/launchctl")
+
+    assert power._macos_gui_session() is False
+
+
+def test_macos_gui_session_on_plain_ssh_tty(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("SSH_CONNECTION", raising=False)
+    monkeypatch.setenv("SSH_TTY", "/dev/ttys003")
+    monkeypatch.setattr(power.shutil, "which", lambda _name: "/bin/launchctl")
+
+    assert power._macos_gui_session() is False
+
+
+def test_macos_gui_session_without_launchctl(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("SSH_CONNECTION", raising=False)
+    monkeypatch.delenv("SSH_TTY", raising=False)
+    monkeypatch.setattr(power.shutil, "which", lambda _name: None)
+
+    assert power._macos_gui_session() is False
+
+
+def test_macos_gui_session_reads_launchctl_manager(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("SSH_CONNECTION", raising=False)
+    monkeypatch.delenv("SSH_TTY", raising=False)
+    monkeypatch.setattr(power.shutil, "which", lambda _name: "/bin/launchctl")
+
+    monkeypatch.setattr(power, "_run_capture", lambda _args: (True, "Aqua\n"))
+    assert power._macos_gui_session() is True
+
+    # LaunchDaemon 是 System，SSH 是 Background，都不算图形会话。
+    monkeypatch.setattr(power, "_run_capture", lambda _args: (True, "System\n"))
+    assert power._macos_gui_session() is False
+
+    monkeypatch.setattr(power, "_run_capture", lambda _args: (False, ""))
+    assert power._macos_gui_session() is False
 
 
 def test_linux_uses_systemctl_when_available(monkeypatch: pytest.MonkeyPatch) -> None:
