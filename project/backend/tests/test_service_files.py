@@ -114,3 +114,42 @@ def test_launchdaemon_runs_unprivileged_and_pins_utf8() -> None:
 def test_service_files_use_lf_endings() -> None:
     for path in (UNIT, PLIST):
         assert b"\r" not in path.read_bytes(), f"{path.name} 含 CR，应为 LF"
+
+
+def _install_dest(text: str) -> tuple[str, list[str]]:
+    """从文件自带的安装步骤里读出「拷到哪」和「拷了哪几样」。"""
+    for raw in text.splitlines():
+        if "cp -r" not in raw:
+            continue
+        after = raw.split("cp -r", 1)[1].split("#", 1)[0].split()
+        return after[-1].rstrip("/") + "/", after[:-1]
+    raise AssertionError("文件里没有 `cp -r` 安装步骤，测试本身需要更新")
+
+
+def _check_referenced_script(text: str, tokens: list[str]) -> None:
+    dest, copied = _install_dest(text)
+    refs = [t for t in tokens if t.startswith(dest)]
+    assert len(refs) == 1, f"启动命令里应恰好有一个位于 {dest} 的路径，实为 {refs}"
+    rel = refs[0][len(dest) :]
+    assert rel.split("/")[0] in copied, f"{rel} 不在安装步骤会拷过去的 {copied} 里"
+    assert (REPO_ROOT / rel).exists(), (
+        f"启动命令指向 {refs[0]}，但仓库里没有 {rel}——照这份文件自带的安装步骤装完，"
+        f"那个文件根本不存在，systemd / launchd 只会报一行「找不到」，服务起不来。"
+    )
+
+
+def test_systemd_unit_starts_a_file_the_install_steps_actually_create() -> None:
+    """启动命令引用的脚本必须真实存在于仓库、且落在安装步骤会拷过去的目录下。
+
+    这条是补的一个真洞：默认原来写的是冻结单文件 `/opt/campusnet/campusnet`，
+    而同一份文件里的安装步骤只有 `cp -r project utils database`，仓库里也没有
+    任何构建产物——照抄装完，ExecStart 指的文件不存在。注释里另给了一行替代写法
+    不解决问题：默认那行才是用户会用的。
+    """
+    text = UNIT.read_text(encoding="utf-8")
+    _check_referenced_script(text, _single(_unit_entries(text), "Service", "ExecStart").split())
+
+
+def test_launchdaemon_starts_a_file_the_install_steps_actually_create() -> None:
+    text = PLIST.read_text(encoding="utf-8")
+    _check_referenced_script(text, list(plistlib.loads(text.encode("utf-8"))["ProgramArguments"]))

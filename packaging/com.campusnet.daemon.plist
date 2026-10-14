@@ -29,8 +29,14 @@
 
     <key>ProgramArguments</key>
     <array>
-        <!-- 冻结版（单文件）。源码安装改成 /usr/bin/python3 加 utils/run.py 两个元素。 -->
-        <string>/opt/campusnet/campusnet</string>
+        <!-- 默认按上面的安装步骤「拷源码」装出来的写法：跑安装目录里的 utils/run.py。
+             换成冻结版（单文件）安装的话，把这两个元素改成单个
+             /opt/campusnet/campusnet 即可。
+             解释器要写绝对路径（launchd 不做 PATH 查找），且路径得真实存在——
+             先 `command -v python3` 看一眼；macOS 上只有在装过 Xcode 命令行工具
+             之后才有 /usr/bin/python3。 -->
+        <string>/usr/bin/python3</string>
+        <string>/opt/campusnet/utils/run.py</string>
         <string>serve</string>
         <!-- 127.0.0.1 表示默认只有本机能访问控制台；要从手机连，换成 0.0.0.0。 -->
         <string>--host</string>

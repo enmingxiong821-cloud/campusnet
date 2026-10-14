@@ -32,12 +32,16 @@ Group=campusnet
 WorkingDirectory=/opt/campusnet
 Environment=PYTHONIOENCODING=utf-8
 Environment=PYTHONUTF8=1
-# 下面是冻结版（单文件）的写法。
-# 源码安装改成：/usr/bin/python3 /opt/campusnet/utils/run.py serve --host 127.0.0.1 --port 2268
+# 默认按上面第 11 行那样「拷源码」装出来的写法：跑安装目录里的 utils/run.py
+# （它自己会把 project/backend 加进 sys.path）。换成冻结版（单文件）安装的话，
+# 把这一行改成 /opt/campusnet/campusnet serve --host 127.0.0.1 --port 2268。
+#
+# 用绝对路径 /usr/bin/python3：systemd 的 ExecStart 不做 PATH 查找，
+# 写 python3 会直接 "executable not found"。
 #
 # 这里是 127.0.0.1：默认只有本机能访问控制台。要从手机连，
 # 把 --host 换成 0.0.0.0，并先确认控制台令牌已设好。
-ExecStart=/opt/campusnet/campusnet serve --host 127.0.0.1 --port 2268
+ExecStart=/usr/bin/python3 /opt/campusnet/utils/run.py serve --host 127.0.0.1 --port 2268
 # 只负责进程被异常终止后拉起来；门户登录的重试由程序自己的监控循环做，
 # 不把单次认证失败当成进程退出，免得触发 systemd 的启动频率限制。
 Restart=on-failure
