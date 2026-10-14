@@ -80,6 +80,11 @@
     outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(79,140,255,.13);
   }
   label{display:block;margin-bottom:14px}
+  /* 作者写的 display:block 会盖过浏览器自带的 [hidden]{display:none}——
+     优先级不参与比较，作者样式一律胜过 UA 样式。少了这一行，
+     设置页的「渠道 Key」「Webhook 地址」两个 label 上的 .hidden 切换完全不起作用，
+     不管选哪个渠道两个都一直显示。 */
+  label[hidden]{display:none}
   label span.lbl{display:block;font-size:12px;color:var(--txt-dim);margin-bottom:5px}
   .form-grid{display:grid;gap:0 16px;grid-template-columns:repeat(auto-fit,minmax(210px,1fr))}
   table{width:100%;border-collapse:collapse;font-size:13px}
@@ -1439,10 +1444,12 @@ async function loadPowerPrep() {
 
 async function runPowerPrep() {
   $('powerPrepResult').innerHTML = '<div class="empty">体检中…</div>';
+  let rendered = false;
   try {
     const { items } = await api('/api/doctor/power');
     _prepLoaded = true;
     renderPowerPrep(items);
+    rendered = true;
     const fixable = items.filter(i => i.fixable && ['warn', 'manual'].includes(i.status));
     if (fixable.length && confirm(`有 ${fixable.length} 项可自动修复（快速启动 / 网卡唤醒 / 睡眠超时 / 远程桌面等），是否执行？`)) {
       await api('/api/doctor/power/fix', { method:'POST', body:{ confirm:true } });
@@ -1450,7 +1457,13 @@ async function runPowerPrep() {
       renderPowerPrep(after);
       toast('修复完成', 'ok');
     }
-  } catch (e) { toast('体检失败: ' + e.message, 'err'); }
+  } catch (e) {
+    // 第一个请求就失败时，面板会永远停在「体检中…」——用户看不出是还在跑还是挂了。
+    // 但已经渲染出结果之后再失败（例如「一键修复」那一步）不能把结果擦掉，
+    // 所以只在还没渲染过的时候补错误态。toast 会自己消失，面板得留着。
+    if (!rendered) $('powerPrepResult').innerHTML = '<div class="empty">体检失败: ' + esc(e.message) + '</div>';
+    toast('体检失败: ' + e.message, 'err');
+  }
 }
 
 $('btnPowerOff').onclick = () => powerAction('off');
