@@ -396,3 +396,16 @@ def test_wake_wraps_socket_error(monkeypatch: pytest.MonkeyPatch) -> None:
         power.wake("AA:BB:CC:DD:EE:FF")
 
     assert "OSError" in str(excinfo.value)
+
+
+def test_wake_rejects_out_of_range_port() -> None:
+    """越界端口在 sendto 抛的是 OverflowError（不是 OSError），得先挡成 PowerError。"""
+    with pytest.raises(power.PowerError) as excinfo:
+        power.wake("AA:BB:CC:DD:EE:FF", port=70000)
+
+    assert "65535" in str(excinfo.value)
+
+
+def test_wake_rejects_non_numeric_port() -> None:
+    with pytest.raises(power.PowerError):
+        power.wake("AA:BB:CC:DD:EE:FF", port="abc")

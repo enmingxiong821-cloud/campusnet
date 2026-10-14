@@ -187,13 +187,21 @@ def wake_info(port: int = WOL_PORT) -> dict[str, object]:
 
 def wake(mac: str, broadcast: str = "255.255.255.255", port: int = WOL_PORT) -> str:
     """发一个 WOL 魔术包：必须由同一二层里的设备执行才有用。"""
+    try:
+        port_num = int(port)
+    except (TypeError, ValueError) as exc:
+        raise PowerError(f"端口非法：{port!r}") from exc
+    # 越界端口 sendto 抛的是 OverflowError（不是 OSError），不先挡掉的话会一路
+    # 冒到调用方，计划里那条也只能留下一条看不懂的 warning。
+    if not 1 <= port_num <= 65535:
+        raise PowerError(f"端口 {port_num} 超出 1-65535")
     packet = magic_packet(mac)
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-        sock.sendto(packet, (broadcast, int(port)))
+        sock.sendto(packet, (broadcast, port_num))
     except OSError as exc:
         raise PowerError(f"{type(exc).__name__}: {exc}") from exc
     finally:
         sock.close()
-    return f"{broadcast}:{port}"
+    return f"{broadcast}:{port_num}"
