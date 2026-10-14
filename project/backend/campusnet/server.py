@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import os
 import sys
 import threading
 import time
@@ -103,6 +104,7 @@ class ApiHandler(BaseHTTPRequestHandler):
     routes: dict[tuple[str, str], Handler]
     auth: ApiAuth | None
     auth_required: bool
+    trust_proxy: bool = False
 
     # ---------- 基础工具 ----------
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A002, D102
@@ -511,6 +513,48 @@ def routes_events(store: Store) -> dict[tuple[str, str], Handler]:
     }
 
 
+# PUT /api/settings 允许写入的键及其类型。没有白名单时任何 JSON 都能落进
+# settings 表，而 MonitorManager.ensure() 会 `int(get_setting("interval", ...))`
+# ——一条 {"interval": "abc"} 就足以让服务从此起不来（坏值进了库，重启也一样）。
+# 校验放在 API 边界上：这是外部输入进入系统的入口。
+_SETTING_KINDS: dict[str, type] = {
+    "interval": int,
+    "headless": bool,
+    "autostart": bool,
+    "max_events": int,
+    "notify_channel": str,
+    "notify_url": str,
+    "notify_key": str,
+    "notify_after_failures": int,
+    "notify_events": list,
+}
+
+
+def _coerce_setting(key: str, value: Any) -> Any:
+    """按白名单校验设置值，非法直接 400，不让坏值进库。"""
+    kind = _SETTING_KINDS.get(key)
+    if kind is None:
+        raise ApiError(
+            HTTPStatus.BAD_REQUEST,
+            f"设置项 {key} 不可写（可写：{'、'.join(sorted(_SETTING_KINDS))}）",
+        )
+    # bool 是 int 的子类，不单独判的话 True 会当成 1 悄悄写进去。
+    if kind is bool:
+        if not isinstance(value, bool):
+            raise ApiError(HTTPStatus.BAD_REQUEST, f"{key} 需要 true/false")
+    elif kind is int:
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ApiError(HTTPStatus.BAD_REQUEST, f"{key} 需要整数")
+    elif kind is str:
+        if not isinstance(value, str):
+            raise ApiError(HTTPStatus.BAD_REQUEST, f"{key} 需要字符串")
+    elif not isinstance(value, list) or not all(
+        isinstance(item, str) for item in value
+    ):
+        raise ApiError(HTTPStatus.BAD_REQUEST, f"{key} 需要字符串数组")
+    return value
+
+
 def routes_system(store: Store) -> dict[tuple[str, str], Handler]:
     def health(_: dict[str, Any], h: ApiHandler) -> None:
         h._send(
@@ -527,8 +571,11 @@ def routes_system(store: Store) -> dict[tuple[str, str], Handler]:
 
     def settings_update(ctx: dict[str, Any], h: ApiHandler) -> None:
         payload = h._read_body()
-        for key, value in payload.items():
-            store.set_setting(str(key), value)
+        # 先整批校验再落库：一条坏值不该让前面几条写进去、后面几条没写。
+        checked = {str(key): _coerce_setting(str(key), value)
+                   for key, value in payload.items()}
+        for key, value in checked.items():
+            store.set_setting(key, value)
         h._send(HTTPStatus.OK, {"ok": True, "settings": store.all_settings()})
 
     def settings_get(_: dict[str, Any], h: ApiHandler) -> None:
@@ -984,6 +1031,7 @@ def build_handler(
     manager: MonitorManager,
     auth: ApiAuth | None = None,
     auth_required: bool = False,
+    trust_proxy: bool = False,
 ) -> type[ApiHandler]:
     routes: dict[tuple[str, str], Handler] = {}
     for group in (
@@ -1007,6 +1055,7 @@ def build_handler(
             "routes": routes,
             "auth": auth,
             "auth_required": auth_required,
+            "trust_proxy": trust_proxy,
         },
     )
     return handler_cls
@@ -1101,6 +1150,41 @@ def require_same_origin(h: ApiHandler, *, token_ok: bool = False) -> None:
         raise ApiError(HTTPStatus.FORBIDDEN, "写操作不接受跨来源请求")
 
 
+def require_loopback_host(h: ApiHandler) -> None:
+    """免令牌模式下要求 Host 指向回环地址。
+
+    服务只绑回环、又没开鉴权时，唯一的信任锚是「请求确实发向本机」。DNS 重绑定
+    让这条不成立：攻击者把自己的域名解析到 127.0.0.1，浏览器于是认为「页面
+    evil.com」与「被访问的 evil.com:2268（实为本机服务）」同源——Origin 与 Host
+    自然相等，上面那条同源校验和浏览器本身都看不出异常，页面却能读回
+    /api/settings、直接调用 /api/power/off。重绑定改得了 DNS，改不了 Host 头。
+    """
+    if not _host_is_loopback(h.headers.get("Host", "")):
+        h.close_connection = True
+        raise ApiError(
+            HTTPStatus.FORBIDDEN,
+            "未启用令牌时只接受来自本机回环地址的请求（请用 127.0.0.1 或 "
+            "localhost 访问；确实在服务前面放了反向代理，则设 "
+            "CAMPUSNET_TRUST_PROXY=1）",
+        )
+
+
+def _trust_proxy_enabled() -> bool:
+    """部署者是否声明「服务前面有反向代理」。默认否。
+
+    反代场景下浏览器看到的 Host 是外面的域名，与本机服务收到的 Host 一致，
+    同源校验必然通过——这与 DNS 重绑定的流量在服务端长得一模一样，无法区分，
+    只能由部署者显式声明。开了这个开关就等于把「同源」重新当作信任锚，
+    因此必须由反代那一层自己保证鉴权。
+    """
+    return os.environ.get("CAMPUSNET_TRUST_PROXY", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 def _install_dispatch(handler: type[ApiHandler]) -> None:
     public_api = {
         ("GET", "/healthz"),
@@ -1150,6 +1234,17 @@ def _install_dispatch(handler: type[ApiHandler]) -> None:
             )
             return
         try:
+            # 免令牌（服务绑在回环上）时，唯一的信任锚是「请求确实发向本机」。
+            # 放在这里而不是更靠前，是为了让 ApiError 走下面那条统一出口变成
+            # 403——抛到 _dispatch 外面就只有连接重置，客户端读不到原因。
+            # 必须连 GET 一起挡：重绑定下浏览器认为页面与被访问的服务同源，
+            # 读 /api/settings 的响应它照样能拿到手里。
+            if (
+                not handler.auth
+                and not handler.trust_proxy
+                and path.startswith("/api/")
+            ):
+                require_loopback_host(self)
             if method in ("POST", "PUT", "DELETE", "PATCH"):
                 require_same_origin(
                     self,
@@ -1222,7 +1317,11 @@ def serve(
             auth_required = host not in ("127.0.0.1", "localhost", "::1")
         auth = ApiAuth() if auth_required else None
         handler_cls = build_handler(
-            store, manager, auth=auth, auth_required=bool(auth_required)
+            store,
+            manager,
+            auth=auth,
+            auth_required=bool(auth_required),
+            trust_proxy=_trust_proxy_enabled(),
         )
         _install_dispatch(handler_cls)
 

@@ -295,7 +295,9 @@ def test_loop_survives_exception(store, account, monkeypatch) -> None:  # noqa: 
 def test_loop_catches_exception_from_iteration(store, account, monkeypatch) -> None:  # noqa: ANN001
     """直接驱动 _loop，验证它自己吞掉异常后继续下一轮。"""
     store.add_account(account)
-    mon = Monitor(store, interval=10)
+    # 热身间隔默认 15 秒，而这轮只想看到「异常被吞掉、第二轮照样跑」，
+    # 不必真等满：关掉热身窗口、把重试压到 1 秒，走的是同一个分支。
+    mon = Monitor(store, interval=10, warmup_seconds=0, retry_interval=1)
     calls = {"n": 0}
 
     def check_all_then_stop():
@@ -329,6 +331,26 @@ def test_manager_ensure_is_idempotent(store) -> None:  # noqa: ANN001
     first = mgr.ensure(store)
     assert mgr.ensure(store) is first
     mgr.stop()
+
+
+@pytest.mark.parametrize("poison", ["abc", None, [1], {"a": 1}])
+def test_manager_survives_poisoned_settings(store, poison) -> None:  # noqa: ANN001
+    """库里存着脏值也要能建出 Monitor，退回默认间隔。
+
+    旧版 /api/settings 不校验类型，{"interval": "abc"} 能直接落库；此后
+    `int(get_setting("interval"))` 每次都抛异常，服务再也起不来——而且坏值在
+    库里，重启、重装程序都没用。校验已在 API 边界补上，这条兜的是存量数据。
+    """
+    store.set_setting("interval", poison)
+    mon = MonitorManager().ensure(store)
+    assert mon.interval == 60
+
+
+def test_prune_stats_survives_poisoned_max_events(store) -> None:  # noqa: ANN001
+    """同一类脏值：max_events 被写成非整数时，统计接口不该 500。"""
+    store.set_setting("max_events", "abc")
+    mon = Monitor(store, interval=60, warmup_seconds=0)
+    assert mon.prune_stats()["keep"] == 2000
 
 
 def test_check_outcome_as_dict_shape() -> None:

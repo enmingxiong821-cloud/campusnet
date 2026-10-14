@@ -97,6 +97,19 @@ class CheckOutcome:
         }
 
 
+def _int_setting(store: Any, key: str, default: int) -> int:
+    """读一个整数设置，库里是脏值时退回默认值。
+
+    旧版 /api/settings 不校验类型，一条 {"interval": "abc"} 就能落库，
+    此后 MonitorManager.ensure() 每次 int() 都抛异常、服务再也起不来。
+    校验已在 API 边界补上，这里兜的是存量数据。
+    """
+    try:
+        return int(store.get_setting(key, default) or default)
+    except (TypeError, ValueError):
+        return default
+
+
 class Monitor:
     """后台线程循环器；同一时刻只允许一个 check_all 在跑。"""
 
@@ -702,10 +715,7 @@ class Monitor:
         settings 是单行覆盖，不增长也不参与裁剪。
         """
         try:
-            keep = int(
-                self.store.get_setting("max_events", DEFAULT_MAX_EVENTS)
-                or DEFAULT_MAX_EVENTS
-            )
+            keep = _int_setting(self.store, "max_events", DEFAULT_MAX_EVENTS)
             removed = self.store.prune_events(keep)
             if not removed:
                 return
@@ -756,10 +766,7 @@ class Monitor:
             "last_removed": 0,
             "last_at": None,
             "total_removed": self._prune_total_removed,
-            "keep": int(
-                self.store.get_setting("max_events", DEFAULT_MAX_EVENTS)
-                or DEFAULT_MAX_EVENTS
-            ),
+            "keep": _int_setting(self.store, "max_events", DEFAULT_MAX_EVENTS),
             "suppressed": self._prune_log_suppressed,
         }
 
@@ -783,9 +790,7 @@ class MonitorManager:
 
     def ensure(self, store: Store) -> Monitor:
         if self.monitor is None:
-            interval = int(
-                store.get_setting("interval", DEFAULT_INTERVAL) or DEFAULT_INTERVAL
-            )
+            interval = _int_setting(store, "interval", DEFAULT_INTERVAL)
             headless = bool(store.get_setting("headless", True))
             self.monitor = Monitor(store, interval=interval, headless=headless)
             self.store = store

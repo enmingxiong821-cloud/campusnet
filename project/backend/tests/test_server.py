@@ -70,6 +70,31 @@ def auth_api(store: Store):  # noqa: ANN001
     assert not thread.is_alive()
 
 
+@pytest.fixture()
+def proxy_api(store: Store):  # noqa: ANN001
+    """声明了「前面有反向代理」的服务，Host 允许是外面的域名。
+
+    默认（没这个声明）会按 DNS 重绑定挡掉同样形状的请求，
+    见 test_write_rejects_foreign_host_without_proxy_trust。
+    """
+    manager = MonitorManager()
+    handler = server_mod.build_handler(store, manager, trust_proxy=True)
+    server_mod._install_dispatch(handler)
+    from http.server import ThreadingHTTPServer
+
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    httpd.daemon_threads = True
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    out = _Api(f"http://127.0.0.1:{httpd.server_address[1]}")
+    out.manager = manager
+    yield out
+    httpd.shutdown()
+    httpd.server_close()
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+
+
 def call(url: str, method: str = "GET", body: dict | None = None) -> tuple[int, dict]:  # noqa: ANN001
     data = json.dumps(body).encode("utf-8") if body is not None else None
     req = urllib.request.Request(url, data=data, method=method)
@@ -213,9 +238,9 @@ def test_extension_origin_still_needs_token_when_auth_required(auth_api) -> None
 @pytest.mark.parametrize(
     "origin", ["https://console.example", "http://console.example"]
 )
-def test_write_origin_supports_proxy_scheme(api, origin):
+def test_write_origin_supports_proxy_scheme(proxy_api, origin):
     request = urllib.request.Request(
-        str(api) + "/api/settings",
+        str(proxy_api) + "/api/settings",
         data=b"{}",
         method="PUT",
         headers={
@@ -226,6 +251,73 @@ def test_write_origin_supports_proxy_scheme(api, origin):
     )
     with urllib.request.urlopen(request, timeout=5) as response:
         assert response.status == 200
+
+
+def test_write_rejects_foreign_host_without_proxy_trust(api) -> None:  # noqa: ANN001
+    """没声明反代时，Host 是外部域名的写请求要按 DNS 重绑定挡掉。
+
+    这不是「反代用不了」的副作用，而是它的另一半：攻击者把自己的域名解析到
+    127.0.0.1，浏览器眼里页面与被访问的服务同源，Origin 与 Host 自然相等，
+    同源校验必然通过——这条请求与反代流量在服务端一模一样，
+    所以只能靠部署者显式声明来区分。
+    """
+    request = urllib.request.Request(
+        str(api) + "/api/power/off",
+        data=b"{}",
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "Host": "evil.example:2268",
+            "Origin": "http://evil.example:2268",
+        },
+    )
+    with pytest.raises(urllib.error.HTTPError) as error:
+        urllib.request.urlopen(request, timeout=5)
+    assert error.value.code == 403
+    error.value.close()
+
+
+def test_read_rejects_foreign_host_without_proxy_trust(api) -> None:  # noqa: ANN001
+    """GET 也要挡：重绑定下浏览器认为同源，读回的响应它拿得到手里。
+
+    /api/settings 里有 webhook 的密钥，读得到就等于泄露出去。
+    """
+    request = urllib.request.Request(
+        str(api) + "/api/settings",
+        headers={"Host": "evil.example:2268"},
+    )
+    with pytest.raises(urllib.error.HTTPError) as error:
+        urllib.request.urlopen(request, timeout=5)
+    assert error.value.code == 403
+    error.value.close()
+
+
+def test_loopback_hosts_still_pass_without_proxy_trust(api) -> None:  # noqa: ANN001
+    """本机自己的三种写法都要照常放行，别把正常访问一起挡了。"""
+    for host in ("127.0.0.1", "localhost", "[::1]:2268"):
+        request = urllib.request.Request(
+            str(api) + "/api/health", headers={"Host": host}
+        )
+        with urllib.request.urlopen(request, timeout=5) as response:
+            assert response.status == 200, host
+
+
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        ("1", True),
+        ("true", True),
+        ("YES", True),
+        ("on", True),
+        ("", False),
+        ("0", False),
+        ("no", False),
+    ],
+)
+def test_trust_proxy_env_flag(monkeypatch, value: str, expected: bool) -> None:
+    """开关只认明确的真值：写错的字符串（如 off 之外的任意文本）按关闭处理。"""
+    monkeypatch.setenv("CAMPUSNET_TRUST_PROXY", value)
+    assert server_mod._trust_proxy_enabled() is expected
 
 
 def test_health(api: _Api) -> None:
@@ -851,6 +943,51 @@ def test_settings_get_and_put(api: _Api) -> None:
 
     status, data = call(f"{api}/api/settings")
     assert status == 200 and data["settings"]["headless"] is False
+
+
+def test_settings_rejects_unknown_key(api: _Api) -> None:
+    """不在白名单里的键要 400，而不是悄悄落库。
+
+    没有白名单时任何 JSON 都能写进 settings 表，而 MonitorManager.ensure()
+    会 `int(get_setting("interval"))`——一条 {"interval": "abc"} 就够让服务
+    从此起不来，坏值在库里，重启也没用。
+    """
+    status, data = call(f"{api}/api/settings", "PUT", {"whatever": 1})
+    assert status == 400
+    assert "不可写" in data["error"]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"interval": "abc"},
+        {"interval": True},
+        {"interval": 1.5},
+        {"headless": "yes"},
+        {"max_events": None},
+        {"notify_url": 123},
+        {"notify_events": "failing"},
+        {"notify_events": [1, 2]},
+    ],
+)
+def test_settings_rejects_bad_type(api: _Api, payload: dict) -> None:
+    """类型不对一律 400。
+
+    True 单列一条：bool 是 int 的子类，不单独判就会当成 1 悄悄写进去。
+    """
+    status, data = call(f"{api}/api/settings", "PUT", payload)
+    assert status == 400, payload
+    assert data["ok"] is False
+
+
+def test_rejected_setting_never_reaches_the_store(api: _Api, store: Store) -> None:
+    """校验要在落库之前，且同一请求里合法的键也不能先写进去一半。"""
+    status, _ = call(
+        f"{api}/api/settings", "PUT", {"headless": True, "interval": "abc"}
+    )
+    assert status == 400
+    assert store.get_setting("interval", None) is None, "坏值不该落库"
+    assert store.get_setting("headless", None) is None, "整批都该被拒，不能写一半"
 
 
 def test_static_index_is_served(api: _Api) -> None:
