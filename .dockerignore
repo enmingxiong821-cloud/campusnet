@@ -18,6 +18,9 @@ database/logs/
 _tmp/
 utils/_tmp/
 utils/tmp/
+# 本机自用的真实账号与口令就写在这份 local_sensitive.txt 里；
+# 仓库里进版本控制的只有 .example 模板，镜像里一份都不该有。
+utils/local_sensitive.txt
 交付文件/
 
 # 开发与测试（运行时不读测试，也不读覆盖率产物）

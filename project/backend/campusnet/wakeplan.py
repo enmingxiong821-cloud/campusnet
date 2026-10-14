@@ -102,7 +102,10 @@ def should_fire(
         return False
     if last_run is None:
         return True
-    return last_run < today_fire
+    # 按「日期」判今天发过没有，而不是按时刻：last_run 是无时区的本地时间，
+    # 时钟被 NTP 或手动回拨到今天的触发点之前时，时刻比较会判成「还没发过」，
+    # 同一天就会二次发 WOL，砸掉「每天每档最多一次」的承诺。
+    return last_run.date() < today_fire.date()
 
 
 def parse_last_run(text: str | None) -> datetime | None:

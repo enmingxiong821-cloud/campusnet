@@ -36,11 +36,12 @@ def test_doctor_detects_live_lock_holder(store, tmp_path, monkeypatch) -> None: 
     lock_path = tmp_path / "held.lock"
     helper_code = textwrap.dedent(
         """
-        import sys, time
+        import os, sys, time
         sys.path.insert(0, sys.argv[1])
         from campusnet.lockfile import SingleInstance
         lock = SingleInstance(sys.argv[2])
         print('ACQUIRED' if lock.acquire() else 'BLOCKED', flush=True)
+        print(os.getpid(), flush=True)
         time.sleep(30)
         """
     )
@@ -51,12 +52,16 @@ def test_doctor_detects_live_lock_holder(store, tmp_path, monkeypatch) -> None: 
     )
     try:
         assert helper.stdout.readline().strip() == "ACQUIRED"
+        # 用子进程自报的 PID，不用 helper.pid：Windows 上 venv 的 python.exe 是个启动器，
+        # 真正跑解释器的是它拉起的子进程，Popen.pid 与锁文件里记的那个根本不是一个数。
+        # 原先断言 helper.pid 等于在赌「两者必相等」，这个前提在 venv 里不成立。
+        holder_pid = helper.stdout.readline().strip()
         monkeypatch.setenv("CAMPUSNET_INSTANCE_LOCK_FILE", str(lock_path))
 
         check = _by_name(doctor_mod.run(probe=False))["实例锁"]
 
         assert check.status == doctor_mod.WARN
-        assert str(helper.pid) in check.detail
+        assert holder_pid in check.detail
     finally:
         helper.terminate()
         helper.wait(timeout=10)

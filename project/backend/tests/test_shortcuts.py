@@ -104,20 +104,22 @@ def test_create_rejects_unknown_platform(tmp_path: Path) -> None:
 def test_desktop_dir_uses_userprofile_on_windows(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setattr(shortcuts_mod.os, "name", "nt")
     monkeypatch.setenv("USERPROFILE", str(tmp_path))
 
-    assert shortcuts_mod.desktop_dir() == tmp_path / "Desktop"
+    assert shortcuts_mod.desktop_dir(platform="windows") == tmp_path / "Desktop"
 
 
 def test_desktop_dir_falls_back_to_home(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """USERPROFILE 没设（或被清空）时回落到 home，不能拼出相对路径。"""
-    monkeypatch.setattr(shortcuts_mod.os, "name", "nt")
     monkeypatch.setenv("USERPROFILE", "")
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
 
-    assert shortcuts_mod.desktop_dir().name == "Desktop"
+    fallback = shortcuts_mod.desktop_dir(platform="windows")
+
+    assert fallback.name == "Desktop"
+    assert fallback.is_absolute()
 
 
 def test_remove_legacy_skips_unremovable(

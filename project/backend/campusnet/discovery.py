@@ -213,6 +213,11 @@ def detect_dns_hijack(hostname: str) -> str | None:
     host = (urlsplit("http://" + hostname).hostname or "").strip()
     if not host:
         return None
+    # 回环与 IP 字面量都谈不上「域名被劫持」：前者就是本机，后者压根没有域名。
+    # 少了这一句，seed 是回环时这里会凭空造出 http://127.0.0.1/ 去扫，
+    # 于是调用方的红绿取决于那个端口有没有人应答——本机没有所以绿，CI 上有所以红。
+    if host == "localhost" or host == "::1" or host.startswith("127."):
+        return None
     try:
         infos = socket.getaddrinfo(host, None)
     except OSError:
@@ -415,6 +420,11 @@ def discover(
         "probe_candidates": list(PROBE_CANDIDATES),
     }
 
+    # 种子来自 API 参数，先挡掉非 http/https：往下 probe/scan_urls 都会真的发请求，
+    # file:// 这类 schemes 会把本地文件当门户页读进来。挡掉后退回默认探活地址。
+    if seed and not is_url(seed):
+        report["hints"].append(f"忽略非 http/https 的种子地址：{seed}")
+        seed = ""
     seed = seed or PROBE_CANDIDATES[0]
     check = probe_mod.probe(seed, timeout=timeout)
     report["probe_status"] = check.status
