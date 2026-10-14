@@ -113,11 +113,31 @@ function escapeHtml(s) {
     ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
 }
 
+let msgUntil = 0;
+
+// 底部这块提示每 4 秒被轮询结果覆盖一次。用户主动点按钮得到的结果（或错误）
+// 不该被下一次轮询悄悄抹掉，holdMs 让它多留几秒。
+function say(text, cls = '', holdMs = 0) {
+  const now = Date.now();
+  if (holdMs) {
+    msgUntil = now + holdMs;
+  } else if (now < msgUntil) {
+    return;
+  }
+  $('msg').textContent = text;
+  $('msg').className = cls;
+}
+
+// 后台是 service worker，随时可能被回收。那时 sendMessage 会 resolve undefined
+// 而不是抛错，直接取字段就是 TypeError，界面上一点反应都没有。
+function why(resp, fallback) {
+  return (resp && resp.error) || fallback;
+}
+
 async function refresh() {
   const resp = await send({ type: 'getState' });
   if (!resp || !resp.ok) {
-    $('msg').textContent = '后台未响应';
-    $('msg').className = 'err';
+    say('后台未响应', 'err');
     return;
   }
   const { state, settings } = resp;
@@ -126,20 +146,16 @@ async function refresh() {
   const dot = $('dot');
   if (state.checking) {
     dot.className = 'dot busy';
-    $('msg').textContent = '检测中…';
-    $('msg').className = '';
+    say('检测中…');
   } else if (state.online === true) {
     dot.className = 'dot on';
-    $('msg').textContent = state.lastMessage || '网络已放行';
-    $('msg').className = 'ok';
+    say(state.lastMessage || '网络已放行', 'ok');
   } else if (state.online === false) {
     dot.className = 'dot off';
-    $('msg').textContent = state.lastMessage || '网络已断';
-    $('msg').className = 'err';
+    say(state.lastMessage || '网络已断', 'err');
   } else {
     dot.className = 'dot';
-    $('msg').textContent = '监控未开启';
-    $('msg').className = '';
+    say('监控未开启');
   }
 
   const on = !!settings.enabled;
@@ -152,30 +168,61 @@ async function refresh() {
 }
 
 $('btnToggle').onclick = async () => {
-  const resp = await send({ type: 'getState' });
-  const on = resp.settings.enabled;
-  const r = await send({ type: 'setEnabled', enabled: !on });
-  $('msg').textContent = r.enabled ? '监控已开启' : '监控已关闭';
-  $('msg').className = r.enabled ? 'ok' : '';
-  refresh();
+  const btn = $('btnToggle');
+  btn.disabled = true;
+  try {
+    // 取反要以后台当前状态为准：按钮上显示的是几秒前轮询到的值，中间可能被
+    // 设置页或另一个窗口改过，拿旧值取反会切错方向。
+    const cur = await send({ type: 'getState' });
+    if (!cur || !cur.ok) {
+      say(why(cur, '后台未响应，无法切换'), 'err', 5000);
+      return;
+    }
+    const r = await send({ type: 'setEnabled', enabled: !cur.settings.enabled });
+    if (!r || !r.ok) {
+      say(why(r, '切换失败，请重试'), 'err', 5000);
+      return;
+    }
+    await refresh();
+    say(r.enabled ? '监控已开启' : '监控已关闭', r.enabled ? 'ok' : '', 5000);
+  } finally {
+    btn.disabled = false;
+  }
 };
 
 $('btnCheck').onclick = async () => {
-  $('btnCheck').disabled = true;
-  await send({ type: 'checkNow' });
-  $('btnCheck').disabled = false;
-  refresh();
+  const btn = $('btnCheck');
+  btn.disabled = true;
+  say('检测中…');
+  try {
+    const r = await send({ type: 'checkNow' });
+    if (!r || !r.ok) {
+      say(why(r, '检测失败'), 'err', 5000);
+      return;
+    }
+    await refresh();
+  } finally {
+    btn.disabled = false;
+  }
 };
 
 $('btnPortal').onclick = async () => {
   const r = await send({ type: 'openPortal' });
-  if (!r.ok) $('msg').textContent = r.error, $('msg').className = 'err';
-  refresh();
+  if (!r || !r.ok) {
+    say(why(r, '打不开门户页'), 'err', 5000);
+    return;
+  }
+  await refresh();
 };
 
 $('btnClear').onclick = async () => {
-  await send({ type: 'clearEvents' });
-  refresh();
+  const r = await send({ type: 'clearEvents' });
+  if (!r || !r.ok) {
+    say(why(r, '清空失败'), 'err', 5000);
+    return;
+  }
+  await refresh();
+  say('日志已清空', '', 3000);
 };
 
 $('linkOptions').onclick = e => {

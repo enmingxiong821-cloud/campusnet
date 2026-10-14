@@ -189,8 +189,16 @@ async function saveSettings() {
     toast('至少需要一个探测地址', 'err');
     return;
   }
+  const portalUrl = $('portalUrl').value.trim();
+  // 留空是合法状态（只探活、登录交给本地服务），但填了就必须是 http/https：
+  // 后端只接受这两种 scheme，存一个用不了的地址，监控会一直安静地跳过登录，
+  // 而用户以为已经配好了。
+  if (portalUrl && !/^https?:\/\//i.test(portalUrl)) {
+    toast('门户地址要以 http:// 或 https:// 开头', 'err');
+    return;
+  }
   await chrome.storage.local.set({
-    portalUrl: $('portalUrl').value.trim(),
+    portalUrl,
     username: $('username').value.trim(),
     password: $('password').value,
     fields: {
