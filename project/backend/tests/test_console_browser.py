@@ -101,3 +101,76 @@ def test_bootstart_interaction(store, monkeypatch, width):
         httpd.shutdown()
         httpd.server_close()
         thread.join(timeout=5)
+
+
+def test_console_settings_save_persists_interval_headless_autostart(store):
+    """保存设置时，间隔 / 无头 / 开机自启必须真的落库。
+
+    这三个键原来只挂在 `monitor/start` 的请求体上，而那个请求只在监控正在跑时才发
+    （没在跑的分支根本不发），于是监控没开时改它们会被静默丢弃，提示语却照样说
+    「设置已保存」——用户改完、重启程序，看到的还是老值。
+    """
+    channel = os.environ.get("CAMPUSNET_BROWSER_CHANNEL")
+    if not channel:
+        pytest.skip("Set CAMPUSNET_BROWSER_CHANNEL to enable real browser checks")
+    from playwright.sync_api import expect, sync_playwright
+
+    handler = server.build_handler(store, MonitorManager())
+    server._install_dispatch(handler)
+    # 先把库里的值设成一组「已知且与将要改成的值都不同」的数：切到设置页会异步拉一次
+    # /api/settings 回填输入框，那一手要是落在我们填完之后，就会把刚填的 33 冲掉，
+    # 于是保存的还是老值——用例会随机红。下面等回填落地再改，拿这组老值当锚点。
+    store.set_setting("interval", 45)
+    store.set_setting("headless", True)
+    store.set_setting("autostart", False)
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    httpd.daemon_threads = True
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(channel=channel, headless=True)
+            try:
+                page = browser.new_page(viewport={"width": 1280, "height": 844})
+                errors = []
+                page.on("pageerror", lambda error: errors.append(str(error)))
+                started = []
+                page.on(
+                    "request",
+                    lambda request: (
+                        started.append(request.url)
+                        if request.url.endswith("/api/monitor/start")
+                        else None
+                    ),
+                )
+                page.goto(f"http://127.0.0.1:{httpd.server_port}/")
+                page.locator('[data-tab="settings"]').click()
+                page.wait_for_function(
+                    "() => document.querySelector('#setInterval').value === '45'"
+                )
+                page.fill("#setInterval", "33")
+                page.select_option("#setHeadless", "0")
+                page.select_option("#setAutostart", "1")
+                # 控制台会周期性刷新，也会打 /api/settings——只按网址匹配会抓到那个
+                # GET（然后就变成一条随机失败的用例），这里连方法一起判。
+                with page.expect_response(
+                    lambda response: response.request.method == "PUT"
+                    and response.url.endswith("/api/settings")
+                ) as response:
+                    page.locator("#btnSaveSettings").click()
+                assert response.value.status == 200
+
+                saved = store.all_settings()
+                assert saved["interval"] == 33, saved
+                assert saved["headless"] is False, saved
+                assert saved["autostart"] is True, saved
+                # 监控没在跑，就只落库：别顺手把它开起来（无头关着时会当场弹窗口）
+                assert started == []
+                expect(page.locator("#toast")).to_contain_text("设置已保存")
+                assert errors == []
+            finally:
+                browser.close()
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join(timeout=5)

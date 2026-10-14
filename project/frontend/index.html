@@ -1132,7 +1132,12 @@ async function saveSettings() {
   const wasAlive = state.monitor.alive;
   await once($('btnSaveSettings'), async () => {
     try {
+      // 这三个键必须跟着 PUT 一起落库。它们原来只挂在 monitor/start 的请求体上，
+      // 而那个请求只在「监控正在跑」时才发（下面的 else 分支根本不发），于是
+      // 监控没开时改「间隔 / 无头 / 开机自启」会被静默丢弃，提示语却照样说
+      // 「设置已保存」——用户改完、重启程序，看到的还是老值。
       await api('/api/settings', { method:'PUT', body: {
+        ...body,
         notify_channel: $('setNotifyChannel').value,
         notify_url: $('setNotifyUrl').value.trim(),
         notify_key: $('setNotifyKey').value.trim(),
@@ -1140,7 +1145,8 @@ async function saveSettings() {
       }});
       // 原来这里无条件调 monitor/start：只想改个通知渠道的人会连带把监控开起来，
       // 而「浏览器登录」在无头关着的时候会当场弹出一个窗口。监控本来就在跑，
-      // 才重启它来套用新间隔；没在跑就只存下来，并说清楚要等启动才生效。
+      // 才重启它来套用新间隔（PUT 只落库，热更新要靠这一步）；没在跑就只存下来，
+      // 并说清楚要等启动才生效。
       if (wasAlive) {
         await api('/api/monitor/start', { method:'POST', body });
         toast('设置已保存并应用', 'ok');
