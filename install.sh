@@ -84,7 +84,27 @@ elif [ "$IN_PLACE" -eq 0 ]; then
       say "[信息] 正在 git clone --depth 1（约几 MB）……"
       git clone --depth 1 --branch "$BRANCH" "$REPO" "$INSTALL_DIR"
     else
-      die "没找到 git，请先安装 git（或手动下载仓库 zip）"
+      # 没 git：拉分支归档兜底。raw.githubusercontent.com 只发单个文件，
+      # 取分支要用 codeload 的归档地址；这里的归档没有随附校验和，
+      # 完整性靠 HTTPS 传输本身（Release 分发包才有 sha256）。
+      ARCHIVE_URL="https://github.com/enmingxiong821-cloud/campusnet/archive/refs/heads/$BRANCH.tar.gz"
+      TMP_DIR=$(mktemp -d)
+      say "[信息] 没找到 git，改用归档下载……"
+      if command -v curl >/dev/null 2>&1; then
+        curl -fsSL "$ARCHIVE_URL" -o "$TMP_DIR/repo.tar.gz"
+      elif command -v wget >/dev/null 2>&1; then
+        wget -qO "$TMP_DIR/repo.tar.gz" "$ARCHIVE_URL"
+      else
+        die "没找到 git / curl / wget，装一个再跑，或手动下载仓库归档"
+      fi
+      tar -xzf "$TMP_DIR/repo.tar.gz" -C "$TMP_DIR"
+      # 归档里套着一层 campusnet-<分支>/，把它里面的东西平铺进安装目录
+      INNER=$(find "$TMP_DIR" -maxdepth 1 -type d -name 'campusnet-*' | head -n 1)
+      [ -n "$INNER" ] || die "归档解出来的目录结构不认识，请手动下载仓库归档"
+      mkdir -p "$INSTALL_DIR"
+      cp -R "$INNER"/. "$INSTALL_DIR"/
+      rm -rf "$TMP_DIR"
+      say "[OK]  已获取仓库文件"
     fi
   fi
 fi
