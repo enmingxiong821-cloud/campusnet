@@ -91,7 +91,8 @@ def _check_admin() -> PowerItem:
         "管理员权限",
         MANUAL,
         "当前不是管理员：快速启动、网卡唤醒、远程桌面这些项需要一次提权才能改"
-        "（用「自我提权」快捷方式，或右键以管理员身份运行）",
+        "（右键桌面上的「校园网自连」快捷方式选「以管理员身份运行」，"
+        "或在管理员终端里执行 python utils/run.py power prep --fix）",
         fixable=False,
     )
 

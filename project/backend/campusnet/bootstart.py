@@ -300,9 +300,9 @@ def register_task(host: str, port: int, password: str) -> tuple[bool, str]:
     if not ok and _looks_like_permission_denied(message):
         return False, (
             "需要管理员权限才能注册「开机触发、无需登录」的任务"
-            "（Windows 拒绝为该账户保存凭据）。请右键桌面上的"
-            "「校园网自连（以管理员身份）」快捷方式，或在管理员 PowerShell 里执行："
-            "python utils/run.py bootstart install --mode task"
+            "（Windows 拒绝为该账户保存凭据）。在本机双击桌面上的「校园网自连」"
+            "进菜单选「注册开机自启」，它会主动提出提权重试；也可以在管理员 "
+            "PowerShell 里执行：python utils/run.py bootstart install --mode task"
         )
     return ok, message
 
