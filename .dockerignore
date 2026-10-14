@@ -27,7 +27,11 @@ utils/local_sensitive.txt
 project/backend/tests/
 .pytest_cache/
 .ruff_cache/
-.coverage
+.coverage*
+# 本机的 .pyc 会被 COPY project/backend 与 COPY utils 直接带进镜像层：
+# 跨平台/陈旧的字节码进镜像只会让人对着「改了没生效」发懵。
+__pycache__/
+*.py[cod]
 *.log
 nul
 

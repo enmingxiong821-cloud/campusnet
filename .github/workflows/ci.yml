@@ -6,6 +6,16 @@ on:
   pull_request:
     branches: [main]
 
+# 作业只需要读代码，显式收到只读，不继承仓库默认的宽权限。
+# codeql.yml 早就这么做了，这里原来漏了。
+permissions:
+  contents: read
+
+# 同一分支连着推两次时，前一轮已经没意义了：让位给新的，省 runner 也省等待。
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   python:
     # 名字里必须带 OS：同一版本在 ubuntu 与 windows 各跑一格，只写版本号会产出两个
@@ -115,6 +125,8 @@ jobs:
   extension:
     name: 浏览器扩展逻辑
     runs-on: ubuntu-latest
+    # 这三步都是 node 本地跑，正常几十秒；给个上限免得异常时干等 6 小时。
+    timeout-minutes: 10
 
     steps:
       - uses: actions/checkout@v7
@@ -135,6 +147,8 @@ jobs:
   secrets:
     name: 仓库不得包含凭据
     runs-on: ubuntu-latest
+    # git ls-files / git log --all 在大仓库里可能变慢，给个上限。
+    timeout-minutes: 15
 
     steps:
       - uses: actions/checkout@v7
