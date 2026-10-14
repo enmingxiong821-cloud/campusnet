@@ -1121,7 +1121,9 @@ def _is_extension_origin(origin: str) -> bool:
 
 
 def require_same_origin(h: ApiHandler, *, token_ok: bool = False) -> None:
-    """校验浏览器写请求；允许无 Origin 的本地 CLI 客户端。
+    """校验浏览器请求的来源；允许无 Origin 的本地 CLI 客户端。
+
+    覆盖写请求与有副作用的 GET（后者见 `_dispatch` 里的说明）：两种都值得防跨站。
 
     两条豁免，前提都是「请求方确实拿到了凭据」，网页拿不到：
 
@@ -1134,7 +1136,9 @@ def require_same_origin(h: ApiHandler, *, token_ok: bool = False) -> None:
        永远不可能等于 Host，于是被一刀切拦掉——这正是扩展「优先把检测交给本地服务」
        从来没生效过、一直静默回落的原因。网页的 Origin 只会是 http(s) 或 null，
        伪造不出这个 scheme，所以按 scheme 放行不会给网页写权限；再限定 Host 是回环，
-       跨机访问仍然必须带令牌。
+       跨机访问仍然必须带令牌。不校验扩展 id：本机任何进程本来就能不带 Origin、不带
+       令牌直连 127.0.0.1:2268，卡 id 挡不住任何真实攻击者，只会让开发期加载未打包的
+       扩展变得麻烦。
     """
     if token_ok:
         return
@@ -1159,7 +1163,7 @@ def require_same_origin(h: ApiHandler, *, token_ok: bool = False) -> None:
             valid = False
     if not valid or h.headers.get("Sec-Fetch-Site") == "cross-site":
         h.close_connection = True
-        raise ApiError(HTTPStatus.FORBIDDEN, "写操作不接受跨来源请求")
+        raise ApiError(HTTPStatus.FORBIDDEN, "不接受跨来源请求")
 
 
 def require_loopback_host(h: ApiHandler) -> None:
@@ -1177,7 +1181,8 @@ def require_loopback_host(h: ApiHandler) -> None:
             HTTPStatus.FORBIDDEN,
             "未启用令牌时只接受来自本机回环地址的请求（请用 127.0.0.1 或 "
             "localhost 访问；确实在服务前面放了反向代理，则设 "
-            "CAMPUSNET_TRUST_PROXY=1）",
+            "CAMPUSNET_TRUST_PROXY=1——注意那等于放弃回环这一信任锚，"
+            "改由反代那一层自己负责鉴权）",
         )
 
 
@@ -1266,7 +1271,16 @@ def _install_dispatch(handler: type[ApiHandler]) -> None:
                 and path.startswith("/api/")
             ):
                 require_loopback_host(self)
-            if method in ("POST", "PUT", "DELETE", "PATCH"):
+            # 跨来源的 GET 与写请求一样要挡。下面这些 GET 是有副作用的：
+            # /api/probe 与 /api/discover 会去扫网段、连端口，/api/doctor/power 会跑
+            # powercfg / PowerShell。响应被同源策略挡着、又没有 CORS 头，页面读不到，
+            # 但它不必读到也能借着这些接口驱动本机做事——这正是「盲打 CSRF」。
+            # public_api 里那几条无副作用的探活与状态接口除外：Docker 的
+            # HEALTHCHECK、扩展的存活探测、控制台启动前的「服务起来了没」都走它们，
+            # 而扩展的 fetch 也会带上 cross-site 标记。
+            if method in ("POST", "PUT", "DELETE", "PATCH") or (
+                path.startswith("/api/") and (method, path) not in public_api
+            ):
                 require_same_origin(
                     self,
                     token_ok=bool(

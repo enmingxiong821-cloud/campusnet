@@ -302,6 +302,105 @@ def test_loopback_hosts_still_pass_without_proxy_trust(api) -> None:  # noqa: AN
             assert response.status == 200, host
 
 
+# —— 跨站 GET ---------------------------------------------------------------
+# 浏览器能自动发起的跨站请求不止 POST：`<img src>`、`<script src>`、
+# `fetch(mode:'no-cors')` 都能打出一个 GET，而页面拿不到响应（同源策略挡着，
+# 这里也不发 CORS 头）。但拿不到响应不等于做不成事——/api/probe、/api/discover
+# 会去扫网段、连端口，/api/doctor/power 会跑 powercfg / PowerShell，
+# 页面看不见结果也能借着它们驱动本机干活。这就是「盲打 CSRF」。
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["/api/probe", "/api/discover", "/api/detect-portal", "/api/doctor/power"],
+)
+def test_side_effecting_get_rejects_foreign_origin(api, path):  # noqa: ANN001
+    """有副作用的 GET 与写请求一样要挡：这些接口不用读响应也能起作用。"""
+    request = urllib.request.Request(
+        str(api) + path, headers={"Origin": "https://foreign.invalid"}
+    )
+    with pytest.raises(urllib.error.HTTPError) as error:
+        urllib.request.urlopen(request, timeout=5)
+    assert error.value.code == 403
+    error.value.close()
+
+
+def test_get_rejects_cross_site_marker_without_origin(api) -> None:  # noqa: ANN001
+    """跨站的子资源请求不带 Origin，只认 Origin 会漏掉一整类请求。
+
+    `<script src="http://127.0.0.1:2268/api/discover">` 这种就是：没有 Origin，
+    但浏览器一定附上 `Sec-Fetch-Site: cross-site`。
+    """
+    request = urllib.request.Request(
+        f"{api}/api/discover", headers={"Sec-Fetch-Site": "cross-site"}
+    )
+    with pytest.raises(urllib.error.HTTPError) as error:
+        urllib.request.urlopen(request, timeout=5)
+    assert error.value.code == 403
+    error.value.close()
+
+
+def test_read_get_rejects_foreign_origin(api) -> None:  # noqa: ANN001
+    """只读的 GET 也一起挡：跨站页确实读不到响应，但服务端没有理由给它开这个口子。"""
+    request = urllib.request.Request(
+        f"{api}/api/accounts", headers={"Origin": "https://foreign.invalid"}
+    )
+    with pytest.raises(urllib.error.HTTPError) as error:
+        urllib.request.urlopen(request, timeout=5)
+    assert error.value.code == 403
+    error.value.close()
+
+
+def test_foreign_origin_get_with_valid_token_is_allowed(auth_api) -> None:  # noqa: ANN001
+    """令牌有效时 GET 也放行，与写请求同一套豁免。"""
+    request = urllib.request.Request(
+        f"{auth_api}/api/accounts",
+        headers={"Origin": "https://evil.example", "X-CampusNet-Token": "t" * 43},
+    )
+    with urllib.request.urlopen(request, timeout=5) as response:
+        assert response.status == 200
+
+
+@pytest.mark.parametrize("path", ["/healthz", "/api/health", "/api/auth/status"])
+def test_public_get_allowed_cross_site(api, path):  # noqa: ANN001
+    """白名单里的探活与状态接口必须不受同源校验约束。
+
+    Docker 的 HEALTHCHECK、扩展的存活探测、控制台启动前的「服务起来了没」都走它们，
+    而扩展的 fetch 还会带上 cross-site 标记——一刀切会把这三条正常链路一起挡掉，
+    而它们都没有副作用，挡下来也换不到安全性。
+    """
+    request = urllib.request.Request(
+        str(api) + path,
+        headers={"Origin": "https://foreign.invalid", "Sec-Fetch-Site": "cross-site"},
+    )
+    with urllib.request.urlopen(request, timeout=5) as response:
+        assert response.status == 200
+
+
+def test_same_origin_get_still_allowed(api) -> None:  # noqa: ANN001
+    """同源 GET 照常放行。浏览器同源请求本就不带 Origin，带了也必须通过——
+    别把控制台自己的正常读取一起挡了。"""
+    request = urllib.request.Request(
+        f"{api}/api/accounts", headers={"Origin": str(api)}
+    )
+    with urllib.request.urlopen(request, timeout=5) as response:
+        assert response.status == 200
+
+
+def test_extension_origin_get_allowed_on_loopback(api) -> None:  # noqa: ANN001
+    """扩展来源的 GET 同样放行：它读的是同一批接口，挡掉只会让扩展静默回落。
+
+    这不是提权——任何本机进程本来就能不带令牌直连 127.0.0.1:2268（设计如此），
+    而远端网页伪造不出 chrome-extension:// 这个 scheme。
+    """
+    request = urllib.request.Request(
+        f"{api}/api/accounts",
+        headers={"Origin": EXTENSION_ORIGIN, "Sec-Fetch-Site": "cross-site"},
+    )
+    with urllib.request.urlopen(request, timeout=5) as response:
+        assert response.status == 200
+
+
 @pytest.mark.parametrize(
     "value, expected",
     [
