@@ -327,8 +327,10 @@ Windows 上还会多出一行「免登录启动」——在浏览器里填一次
 | macOS | `packaging/com.campusnet.daemon.plist` | 装到 `/Library/LaunchDaemons/`，`launchctl load -w` |
 
 两份文件的开头都写了逐步命令（含如何建独立账号、文件该放哪）。它们默认用非 root 账号
-运行；远程开关机需要额外授权，文件末尾给了最小化的 polkit 规则。Linux 用户会话自启动
-本身不要求 linger，走系统级单元也不需要它。
+运行；**Linux 那份**的末尾另给了最小化的 polkit 规则——远程开关机实际执行的是
+`systemctl poweroff|reboot`，非 root 会被 polkit 拦下（macOS 走的是 `shutdown` /
+`osascript`，不涉及 polkit）。Linux 用户会话自启动本身不要求 linger，走系统级单元也
+不需要它。
 
 安装前会干跑一次「解释器 + 导入本体」自检，装不上时如实报失败，而不是留下一个
 起不来的启动项。`status` 会区分「已写入」与「在本机是否会生效」——没有桌面会话的

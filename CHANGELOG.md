@@ -34,6 +34,22 @@
   「已在线 / 已经在线 / already online / 请勿重复登录」这类完整措辞，并把这条判定挪到
   密码错误、账号被拒两条之后（仍排在通用失败标记之前，Dr.COM 的已在线应答可能就长
   成 `{"result":0,"msg":"您已在线"}`）。
+- **照 `packaging/` 里的步骤装完，系统级服务起不来**：systemd 单元与 LaunchDaemon
+  的启动命令默认写的是冻结单文件 `/opt/campusnet/campusnet`，而**同一份文件里的安装
+  步骤只有 `cp -r project utils database`**——仓库里根本没有这个构建产物，也没有任何
+  一步会生成它。注释里另给了一行替代写法不解决问题：默认那行才是用户会照着用的。
+  现在默认改成跑安装目录里的 `utils/run.py`（冻结版作为替代写法留在注释里），并补了
+  一条测试：启动命令引用的文件必须在仓库里真实存在、且落在安装步骤会拷过去的目录下。
+- **`install.sh` 每次普通安装都往 stderr 吐一行 `[: : integer expected`**：`DRY_RUN`
+  只在 `--dry-run` 分支里赋值、没有默认值，而三处都在拿它做整数比较。`--dry-run` 自己
+  那条路反而是好的，所以只有真正安装的人会看到。
+- **Windows 上 clone 出来的 `.sh` 是 CRLF**：`.gitattributes` 只钉了 `*.bat` / `*.cmd`
+  和 `packaging/` 下的两个配置，漏了 `*.sh`——而 `install.sh`、`utils/start.sh` 是要在
+  Linux/macOS 上被 `sh` 直接执行的。现在补 `*.sh text eol=lf`。
+- **探活碰到坏的压缩流会假报异常**：解压那段的兜底只写了 `except OSError`，而 deflate
+  数据坏掉抛的是 `zlib.error`、gzip 流被截断抛 `EOFError`，两个都不是 `OSError` 子类
+  （`gzip.BadGzipFile` 才是）。它们会穿过兜底，把一次「解压失败就按原文解码」的小状况
+  升级成整次探活判成异常。现在三种都收。
 
 ### 人机交互
 
@@ -78,6 +94,19 @@
   才生效。
 - 电源体检（`powercfg` / PowerShell，秒级）每次切到电源页都重跑，来回切就来回跑。
   结果改为缓存，手动点「重新体检」才刷新。
+- **设置页的「渠道 Key」永远显示**：`label{display:block}` 是作者样式，一律压过浏览器
+  自带的 `[hidden]{display:none}`（这里比的是样式来源，不是优先级），于是
+  `#notifyKeyLabel` / `#notifyUrlLabel` 上的 `hidden` 切换完全不起作用——不选 bark 也
+  一直显示 Key 输入框，反过来选 bark 时 Webhook 地址也照显示。补一条
+  `label[hidden]{display:none}`。
+- **电源体检失败后，面板永远停在「体检中…」**：`runPowerPrep` 的 catch 只弹一个几秒
+  就消失的 toast，不碰结果面板，用户分不清是还在跑还是已经挂了。现在第一个请求就失败
+  时把错误写进面板；已经渲染出结果之后再失败（例如「一键修复」那一步）不擦掉结果，
+  只弹提示。
+- **扩展的登录与检测请求没有超时**：校园门户或本地服务卡住（半开连接、服务挂起）时，
+  没有 `signal` 的 `fetch` 会一直悬着，service worker 也跟着什么都不做，用户看到的是
+  「点了没反应」。现在四处请求都有超时，登录超时给出的是人话而不是
+  `The operation was aborted.`。
 
 ### 多端入口
 
@@ -142,6 +171,13 @@
 - 首次配置报告（`setup`）的「下一步」原来在三个平台上共用一句话：「选『注册开机
   自启』，同意 UAC 并输入密码 → 通电就会自动认证，不需要任何人登录」。Linux / macOS
   上既没有 UAC 也没有密码，做完也不是「不需要任何人登录」。现在按平台给对应的一步。
+
+### 文档
+
+- README 说「两份服务文件……文件末尾给了最小化的 polkit 规则」——实际只有 Linux 那份
+  （`packaging/campusnet.service`）有，macOS 走的是 `shutdown` / `osascript`，与 polkit
+  无关。措辞改成只说 Linux 那份，并把「为什么需要」补上：非 root 执行
+  `systemctl poweroff|reboot` 会被 polkit 拦下。
 
 ### 内部
 
