@@ -323,17 +323,22 @@ def test_check_headless_flag_propagates(isolated_store, monkeypatch: pytest.Monk
     """--headful 应让 monitor.headless 为 False。"""
     from campusnet.monitor import MonitorManager
 
-    captured = {}
+    holders: list = []
     original = MonitorManager.ensure
 
     def spy(self, store):  # noqa: ANN001
         mon = original(self, store)
+        holders.append(mon)
         return mon
 
+    monkeypatch.setattr(MonitorManager, "ensure", spy)
     _patch_online(monkeypatch)
     cli.main(["check", "--account", "1", "--headful"])
-    # headful 只影响 browser 模式，http 模式观察不到，但至少不应崩
-    assert True
+
+    # headless 只影响 browser 模式，http 模式的检测结果里看不到，所以断言打在
+    # monitor 实例上——cmd_check 拿到 ensure 的返回值之后就地把 headless 改了。
+    assert holders, "没有走到 MonitorManager.ensure"
+    assert holders[0].headless is False
 
 
 # ---------- events ----------
