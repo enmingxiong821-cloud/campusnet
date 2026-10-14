@@ -1216,7 +1216,16 @@ def _install_dispatch(handler: type[ApiHandler]) -> None:
             self._send(exc.status, {"ok": False, "error": exc.message})
             return
         parsed = urllib.parse.urlsplit(self.path)
-        path = parsed.path.rstrip("/") or "/"
+        path = parsed.path
+        # RFC 9112 的 origin-form 必须以 / 开头，但 stdlib 的 parse_request 不校验
+        # （它只把开头的 // 折叠成一个 /），而下面 _match_route 用的是 strip("/") 匹配
+        # 模板。于是 `GET api/settings` 这种目标照样命中路由，却绕开所有
+        # path.startswith("/api/") 的门禁——鉴权与回环校验一起跳过，服务绑到 0.0.0.0
+        # 时局域网内零令牌就能读设置（含 notify_key）、读账号、关机。
+        # 先补齐成绝对路径，让下游（门禁 / 版本别名 / 路由 / 静态）只见到一种形状。
+        if not path.startswith("/"):
+            path = "/" + path
+        path = path.rstrip("/") or "/"
         if path.startswith("/api/v1/"):
             # 版本化别名：/api/v1/accounts → /api/accounts。
             # 老前端与扩展继续用不带版本的路径，互不影响。

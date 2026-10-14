@@ -1406,6 +1406,35 @@ def test_duplicate_content_length_is_rejected(api: _Api) -> None:
     assert b"400" in raw
 
 
+def test_request_target_without_leading_slash_cannot_skip_auth(
+    auth_api: _Api,
+) -> None:
+    """request-target 不带前导斜杠，不能绕过鉴权与回环校验。
+
+    RFC 9112 要求 origin-form 以 `/` 开头，但 stdlib 的 `parse_request` 不校验
+    （只把开头的 `//` 折叠成一个 `/`）。而路由匹配用的是 `strip("/")`，于是
+    `GET api/settings` 照样命中模板，却绕开所有 `path.startswith("/api/")` 的
+    门禁——鉴权与 Host 回环校验一起跳过，服务绑到 `0.0.0.0` 时局域网内零令牌
+    就能读设置（含 notify_key）、读账号、关机。
+    """
+    import socket
+
+    def raw_get(target: str, token: str = "") -> bytes:
+        host, port = "127.0.0.1", int(auth_api.rsplit(":", 1)[1])
+        auth = f"Authorization: Bearer {token}\r\n" if token else ""
+        request = f"GET {target} HTTP/1.1\r\nHost: 127.0.0.1\r\n{auth}Connection: close\r\n\r\n"
+        with socket.create_connection((host, port), timeout=5) as sock:
+            sock.sendall(request.encode("ascii"))
+            return sock.recv(4096).split(b"\r\n", 1)[0]
+
+    for target in ("api/settings", "//api/settings"):
+        assert b" 401 " in raw_get(target), target
+
+    # 同样这条斜杠缺失的路径，带上真令牌就该正常工作：证明 401 来自鉴权门，
+    # 而不是这条路径被归一化改坏了（否则「一律 401」也能骗过上面两行）。
+    assert b" 200 " in raw_get("api/settings", token="t" * 43)
+
+
 # ---------- 旧版 _dispatch 分支 ----------
 
 
