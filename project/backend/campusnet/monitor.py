@@ -423,6 +423,14 @@ class Monitor:
         from .notify import refresh
 
         self.notifier = refresh(self.notifier, self.store)
+        if outcome.state == STATE_UNKNOWN:
+            # 「门户会话还在、只是探活没放行」这一轮我们对连通性其实一无所知，
+            # 而门户自己说会话仍然活着。把它按失败计数，人不在机器旁边会先收到
+            # 一条「连续 3 次未连上」、下一轮又收到「已恢复在线」，而期间什么都没发生。
+            # 不计入也不清零，保持计数原样等下一轮的真结论——与 _loop 里
+            # 「STATE_UNKNOWN 不算失败」是同一套口径。每轮都有一条
+            # stage=portal_state 的 warning 事件可查，不是把它藏起来。
+            return
         try:
             kind = self.notifier.observe(
                 account.id, account.name, outcome.online, outcome.state, outcome.message
@@ -602,7 +610,19 @@ class Monitor:
             if attempt < max(1, account.max_retries):
                 wait = min(3 * attempt, 8)
                 self.emit_progress(account, "wait", f"{wait} 秒后重试")
-                time.sleep(wait)
+                # 用 _stop.wait 而不是 time.sleep：这是重试退避，最长 8 秒，
+                # 而 stop() 只 join 5 秒——sleep 会把停止指令挡在门外，
+                # stop() 报「没停下来」，退出还得陪着它睡完。
+                # 手动「立即检测」时监控本来就没开（判断同上），那时 _stop 可能
+                # 早已置位，不能拿它打断退避，否则用户会看到重试次数凭空变少。
+                if self.running_loop:
+                    if self._stop.wait(wait):
+                        # 被打断就回到循环顶部——那里有「收到停止指令」的完整处理
+                        # （上报 abort、置 aborted）。就地 break 会跳过它，一路落到
+                        # 下面的失败分支，等于用户主动停一次监控就凭空多一个红标。
+                        continue
+                else:
+                    time.sleep(wait)
 
         if last.terminal:
             with self._cooldown_lock:
@@ -691,7 +711,29 @@ class Monitor:
             accounts = self.store.list_accounts(enabled_only=True)
             results: list[dict[str, Any]] = []
             for account in accounts:
-                outcome = self.check_account(account)
+                try:
+                    outcome = self.check_account(account)
+                except Exception as exc:  # noqa: BLE001 - 单个账号崩了不能带走这一轮
+                    # 一个账号配置坏掉（门户地址畸形、WiFi 查询抛错、库里字段是
+                    # 脏值）会让异常穿到 _loop，那一轮剩下的账号一个都不检测——
+                    # 用户看到的是「其它账号也一起掉线」，而真相只是其中一个炸了。
+                    # 这里按「本轮未知」记：不写 offline（_check_account 可能在
+                    # 任何一步抛，我们并不知道它到底在不在线），也就不进连续失败
+                    # 计数、不误发掉线通知。
+                    self.store.add_event(
+                        f"{account.name}: 本轮检测异常 - {type(exc).__name__}: {exc}",
+                        level="error",
+                        stage="monitor",
+                        state=STATE_UNKNOWN,
+                        account_id=account.id,
+                    )
+                    outcome = CheckOutcome(
+                        account.id,
+                        account.name,
+                        False,
+                        STATE_UNKNOWN,
+                        f"检测异常：{type(exc).__name__}: {exc}",
+                    )
                 results.append(outcome.as_dict())
                 if self.on_event:
                     self.on_event(outcome.as_dict())
@@ -787,14 +829,19 @@ class MonitorManager:
     monitor: Monitor | None = None
     store: Store | None = None
     _saved: dict[str, Any] = field(default_factory=dict)
+    # HTTP 服务是多线程的：两个请求同时进来，可能都看到 monitor is None，
+    # 于是各建一个 Monitor 并各自 start()——两个循环线程轮流检测，
+    # 事件和通知都翻倍。建实例这一步必须串行。
+    _lock: Any = field(default_factory=threading.Lock, compare=False, repr=False)
 
     def ensure(self, store: Store) -> Monitor:
-        if self.monitor is None:
-            interval = _int_setting(store, "interval", DEFAULT_INTERVAL)
-            headless = bool(store.get_setting("headless", True))
-            self.monitor = Monitor(store, interval=interval, headless=headless)
-            self.store = store
-        return self.monitor
+        with self._lock:
+            if self.monitor is None:
+                interval = _int_setting(store, "interval", DEFAULT_INTERVAL)
+                headless = bool(store.get_setting("headless", True))
+                self.monitor = Monitor(store, interval=interval, headless=headless)
+                self.store = store
+            return self.monitor
 
     def start(self, store: Store) -> Monitor:
         monitor = self.ensure(store)

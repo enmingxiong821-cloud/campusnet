@@ -16,6 +16,7 @@ from campusnet.storage import (
     STATE_LOGGED_IN,
     STATE_OFFLINE,
     STATE_ONLINE,
+    STATE_UNKNOWN,
     Account,
 )
 
@@ -837,3 +838,175 @@ def test_dispatch_wake_plans_skips_disabled(store: Store, monkeypatch: pytest.Mo
     Monitor(store, interval=10)._dispatch_wake_plans()
 
     assert sent == []
+
+
+# ---------- 逐账号隔离 / STATE_UNKNOWN 口径 / 退避可中断 / ensure 加锁 ----------
+
+
+def test_check_all_isolates_account_failure(
+    store, account, online_probe, monkeypatch
+) -> None:  # noqa: ANN001
+    """一个账号配置坏掉时，不能带走这一轮剩下的账号。
+
+    回归防护：原来 check_all 没有逐账号 try，第一个账号抛异常会穿到 _loop，
+    那一轮剩下的账号一个都不检测——用户看到「其它账号一起掉线」，而真相只是
+    其中一个炸了。这条用例让第一个账号必抛，断言第二个仍被检测到。
+    """
+    good_id = store.add_account(account)
+    bad = Account(name="坏账号", portal_url="http://bad", username="u", password="p")
+    bad_id = store.add_account(bad)
+
+    mon = Monitor(store, interval=10)
+    original = mon.check_account
+
+    def fake_check_account(acc):  # noqa: ANN001
+        if acc.name == "坏账号":
+            raise ValueError("门户地址畸形")
+        return original(acc)
+
+    monkeypatch.setattr(mon, "check_account", fake_check_account)
+
+    results = mon.check_all()
+
+    # 两个账号都要出现在结果里：坏的那个不检测，好的那个照常检测
+    assert len(results) == 2
+    by_name = {r["account_name"]: r for r in results}
+    assert set(by_name) == {"宿舍", "坏账号"}
+    assert by_name["宿舍"]["online"] is True
+
+    bad_outcome = by_name["坏账号"]
+    assert bad_outcome["online"] is False
+    assert bad_outcome["state"] == STATE_UNKNOWN
+    assert "检测异常" in bad_outcome["message"]
+    assert "ValueError" in bad_outcome["message"]
+
+    # 该账号要留下一条 error 级的 monitor 事件，且状态记为「本轮未知」
+    events = store.list_events(limit=50)
+    assert any(
+        e["level"] == "error"
+        and e["stage"] == "monitor"
+        and e["state"] == STATE_UNKNOWN
+        and e["account_id"] == bad_id
+        for e in events
+    )
+    assert good_id != bad_id
+
+
+def test_unknown_round_leaves_failure_counter_untouched(
+    store, account, monkeypatch
+) -> None:  # noqa: ANN001
+    """STATE_UNKNOWN 的一轮既不算失败也不清零计数。
+
+    回归防护：_notify 里 STATE_UNKNOWN 必须直接早退。少了这句，outcome.online
+    为 False 会落进失败分支、把计数又加一次；而若被当成在线，则会把刚攒起来的
+    连续失败次数清零——两种都会让「连续 N 次未连上」这条通知的计数错乱。
+    """
+    from campusnet import notify as notify_mod
+
+    # 让 refresh 建出一个真正启用的 Notifier（url 非空），计数才有地方累积。
+    store.set_setting("notify_url", "http://hook/x")
+    store.set_setting("notify_after_failures", 3)
+    sent: list[dict] = []
+    monkeypatch.setattr(
+        notify_mod, "_post", lambda url, payload: sent.append(payload) or True
+    )
+
+    acc_id = store.add_account(account)
+    acc = store.get_account(acc_id)
+    mon = Monitor(store, interval=10)
+
+    offline = CheckOutcome(acc_id, acc.name, False, STATE_OFFLINE, "掉线")
+    for _ in range(3):
+        mon._notify(acc, offline)
+
+    notifier = mon.notifier
+    assert notifier._failures[acc_id] == 3
+    assert acc_id in notifier._notified
+    assert len(sent) == 1  # 达阈值时发了一条掉线通知
+
+    # 插入一轮 STATE_UNKNOWN：不清零、不增加、不重复发
+    unknown = CheckOutcome(
+        acc_id, acc.name, False, STATE_UNKNOWN, "门户会话存在，但网络连通未确认"
+    )
+    mon._notify(acc, unknown)
+
+    assert notifier._failures[acc_id] == 3, "UNKNOWN 那轮不该增减计数"
+    assert acc_id in notifier._notified
+    assert len(sent) == 1
+
+    # 紧接着的真实失败按原计数推进（从 3 到 4，而不是被 UNKNOWN 搅成别的值）
+    mon._notify(acc, offline)
+    assert notifier._failures[acc_id] == 4
+    assert len(sent) == 1  # 已在 _notified，不重复轰炸
+
+
+def test_retry_backoff_wait_honors_stop(
+    store, account, offline_probe, monkeypatch
+) -> None:  # noqa: ANN001
+    """重试退避等待必须能被 stop 打断，而不是裸 sleep 干等。
+
+    回归防护：旧实现 sleep(min(3*attempt, 8))，第一次退避就要等满 3 秒；
+    改用 self._stop.wait 后，stop 一置位就立刻返回。这里不替换 time.sleep——
+    若实现退回裸 sleep，这条用例会真的睡满 3 秒而超时。
+    """
+    account.max_retries = 3
+    acc_id = store.add_account(account)
+    offline_probe["online"] = False
+
+    mon = Monitor(store, interval=10)
+    mon.running_loop = True
+
+    calls = {"n": 0}
+
+    def fake_login(*_a, **_k):
+        calls["n"] += 1
+        # 第一次登录后即叫停：随后进入退避等待，等待应立即被这个标志打断
+        mon._stop.set()
+        return LoginResult("failed", "密码错误")
+
+    monkeypatch.setattr(monitor_mod.portal, "login", fake_login)
+
+    started = time.monotonic()
+    mon.check_account(store.get_account(acc_id))
+    elapsed = time.monotonic() - started
+
+    assert calls["n"] == 1, "叫停后不该继续重试"
+    assert elapsed < 1.0, "退避应被 stop 立即打断，而不是等满 3 秒"
+
+
+def test_manager_ensure_creates_single_monitor_under_concurrency(
+    store, monkeypatch
+) -> None:  # noqa: ANN001
+    """并发调 ensure 只能建出一个 Monitor。
+
+    回归防护：HTTP 服务是多线程的，两个请求同时进来都可能看到 monitor is None，
+    于是各建一个并各自 start()——两个循环线程轮流检测，事件与通知都翻倍。
+    ensure 必须在锁里判断并创建。
+    """
+    created: list[int] = []
+    real_init = Monitor.__init__
+
+    def slow_init(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+        created.append(1)
+        time.sleep(0.05)  # 放大竞态窗口，让无锁实现更容易露出第二个实例
+        real_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(monitor_mod.Monitor, "__init__", slow_init)
+
+    manager = MonitorManager()
+    barrier = threading.Barrier(8)
+    results: list[Monitor] = []
+
+    def worker() -> None:
+        barrier.wait(timeout=5)
+        results.append(manager.ensure(store))
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+
+    assert len(results) == 8
+    assert len(created) == 1, "并发调用 ensure 只应创建一个 Monitor"
+    assert all(item is results[0] for item in results)
