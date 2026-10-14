@@ -8,6 +8,8 @@
 
 ## [未发布]
 
+## [2.0.1] - 2026-10-14
+
 一次全项目体检后的加固：三处安全口子、若干只在特定环境下才现形的行为 bug，
 以及分发与安装链路上几处已经断掉的东西。
 
@@ -66,7 +68,7 @@
   `install.sh` 补上没装 git 时的分支归档兜底。
 - 镜像 `:latest` 只由正式版更新，预发布 tag 不再顶掉它；
   Release 前置校验加上与 CI 同款的覆盖率门禁；CI 的 Python 作业加超时上限。
-- `.dockerignore` 补上 `utils/local_sensitive.txt`；扩展清单版本号与 2.0.0 对齐、
+- `.dockerignore` 补上 `utils/local_sensitive.txt`；扩展清单版本号与后端版本对齐、
   去掉用不到的 `tabs` 权限；控制台两个「立即检测」入口共用一把锁，连点不会再并发跑两轮。
 - **分支保护的必过检查从 2 项扩到 8 项**：六个测试矩阵格（`Linux`/`Windows` ×
   Python 3.10/3.12/3.13）纳入必过。矩阵格的检查名因此带上 OS——原来同一版本在
@@ -263,7 +265,8 @@ GHCR 多架构镜像、四平台单文件分发）、**远程开关机**（前�
 - 开源发布准备（README / LICENSE / CI / Release）、自测指南、
   端口冲突应对说明，以及「提交目标为 `origin/main`」的入库约定。
 
-[未发布]: https://github.com/enmingxiong821-cloud/campusnet/compare/v2.0.0...HEAD
+[未发布]: https://github.com/enmingxiong821-cloud/campusnet/compare/v2.0.1...HEAD
+[2.0.1]: https://github.com/enmingxiong821-cloud/campusnet/compare/v2.0.0...v2.0.1
 [2.0.0]: https://github.com/enmingxiong821-cloud/campusnet/compare/v1.6.0...v2.0.0
 [1.6.0]: https://github.com/enmingxiong821-cloud/campusnet/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/enmingxiong821-cloud/campusnet/compare/v1.4.0...v1.5.0
