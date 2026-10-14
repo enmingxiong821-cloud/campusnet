@@ -443,3 +443,92 @@ def test_discover_ignores_non_http_seed() -> None:
     assert any("忽略非 http/https" in hint for hint in report["hints"])
     # 种子被换成了默认探活地址：真拿 file:// 去探的话状态会是 unsupported_scheme
     assert report["probe_status"] != "unsupported_scheme"
+
+
+# ---------- _fetch 的编码嗅探（GBK 老门户） ----------
+
+
+class _RawHandler(BaseHTTPRequestHandler):
+    """直接吐原始字节 + 可控 Content-Type，用来喂 GBK 页面。"""
+
+    protocol_version = "HTTP/1.1"
+    routes: dict[str, tuple[int, str, bytes]] = {}
+
+    def log_message(self, format: str, *args: object) -> None:  # noqa: A002
+        return
+
+    def do_GET(self) -> None:  # noqa: N802
+        path = self.path.split("?")[0]
+        status, content_type, body = self.routes.get(path, (404, "text/html", b""))
+        self.send_response(status)
+        if content_type:
+            self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        if body:
+            self.wfile.write(body)
+
+
+@pytest.fixture
+def raw_server():
+    handler = type("H", (_RawHandler,), {"routes": {}})
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    httpd.daemon_threads = True
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    host, port = httpd.server_address[0], httpd.server_address[1]
+    yield f"http://{host}:{port}", handler
+    httpd.shutdown()
+    httpd.server_close()
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+
+
+GBK_PORTAL_HTML = "<html><head><title>校园网认证</title></head><body>请登录</body></html>"
+
+
+def test_fetch_sniffs_gbk_without_charset_header(raw_server) -> None:  # noqa: ANN001
+    """没有 charset 头的老门户：GBK 字节必须靠嗅探解出正确中文，而不是乱码。
+
+    回归防护：原来 _fetch 按固定 utf-8 errors=replace 解码，GBK 中文整片变成
+    U+FFFD，identify_vendor / _title_of / needs_captcha 全部落空——发现流程对
+    这类门户等于全程瞎着走。
+    """
+    base, handler = raw_server
+    handler.routes["/portal"] = (200, "text/html", GBK_PORTAL_HTML.encode("gbk"))
+
+    got = discovery._fetch(f"{base}/portal", timeout=3.0)
+
+    assert got is not None
+    status, body, _final, _hdrs = got
+    assert status == 200
+    assert "校园网认证" in body
+    assert "�" not in body
+
+
+def test_fetch_honors_gbk_content_type(raw_server) -> None:  # noqa: ANN001
+    """头里写了 charset=gbk 时按头解，同样不能出乱码。"""
+    base, handler = raw_server
+    handler.routes["/portal"] = (
+        200,
+        "text/html; charset=gbk",
+        GBK_PORTAL_HTML.encode("gbk"),
+    )
+
+    status, body, _final, _hdrs = discovery._fetch(f"{base}/portal", timeout=3.0)
+
+    assert status == 200
+    assert "校园网认证" in body
+    assert "�" not in body
+
+
+def test_fetch_decodes_http_error_body_by_sniffing(raw_server) -> None:  # noqa: ANN001
+    """HTTPError 分支同样嗅探解码：错误页也可能是 GBK。"""
+    base, handler = raw_server
+    handler.routes["/portal"] = (404, "text/html", GBK_PORTAL_HTML.encode("gbk"))
+
+    status, body, _final, _hdrs = discovery._fetch(f"{base}/portal", timeout=3.0)
+
+    assert status == 404
+    assert "校园网认证" in body
+    assert "�" not in body

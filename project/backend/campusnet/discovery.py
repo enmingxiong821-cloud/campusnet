@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlsplit
 
+from . import charset as charset_mod
 from . import probe as probe_mod
 from . import profiles as profiles_mod
 from . import tls as tls_mod
@@ -106,23 +107,37 @@ def _fetch_opener() -> urllib.request.OpenerDirector:
 
 def _fetch(url: str, timeout: float, method: str = "GET", data: bytes | None = None,
            referer: str = "") -> tuple[int, str, str, dict[str, str]] | None:
+    """取页面并按页面自己的编码解码。
+
+    这里原来是 `decode("utf-8", errors="replace")`，而门户发现要对付的恰恰是
+    GBK/GB2312 老门户——中文标签整片变成 U+FFFD 之后，identify_vendor 的中文
+    关键词、_title_of 的标题、needs_captcha 的验证码文案就全部落空，
+    发现流程对这类门户等于全程瞎着走。portal/probe 早就在用 charset 嗅探，
+    这里跟上。
+    """
     opener = _fetch_opener()
     if referer:
         opener.addheaders.append(("Referer", referer))
     request = urllib.request.Request(url, data=data, method=method)
     try:
         with opener.open(request, timeout=timeout) as resp:
-            body = resp.read(200_000).decode("utf-8", errors="replace")
+            raw = resp.read(200_000)
             hdrs = {k.lower(): v for k, v in resp.headers.items()}
+            body = charset_mod.decode(raw, content_type=hdrs.get("content-type"))
             return resp.status, body, resp.geturl(), hdrs
     except urllib.error.HTTPError as exc:
-        raw = ""
+        raw = b""
         try:
-            raw = exc.read(50_000).decode("utf-8", errors="replace")
+            raw = exc.read(50_000)
         except Exception:  # noqa: BLE001
             pass
         hdrs = {k.lower(): v for k, v in exc.headers.items()} if exc.headers else {}
-        return exc.code, raw, url, hdrs
+        return (
+            exc.code,
+            charset_mod.decode(raw, content_type=hdrs.get("content-type")),
+            url,
+            hdrs,
+        )
     except Exception:  # noqa: BLE001 - 探测必须永不抛异常
         return None
 
