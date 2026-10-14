@@ -6,7 +6,13 @@
 变更条目取自提交记录。**未发布**一节是 `main` 上已有、尚未打 tag 的内容；
 这里只记「用户能感知到什么变了」，实现细节看对应提交。
 
-## 未发布
+## [2.0.0] - 2026-10-14
+
+1.x 只解决「校园网断了自己重连」。2.0 把它做成「有电就联网、出门也能管」，
+三件事都齐了：**无人值守**（系统级 service / plist 无需登录即启动、容器部署与
+GHCR 多架构镜像、四平台单文件分发）、**远程开关机**（前置条件逐项体检并一键修、
+唤醒计划按时间表发魔术包、macOS 无人登录也能关）、**多端接入**（PWA 加到主屏离线
+可用、扫码配对免手抄令牌、Tailscale / RustDesk 向导）。
 
 ### 新增
 
@@ -47,6 +53,11 @@
 ### 修复
 
 - `notify`：refresh 改用 `getattr` 容错，最小假 Notifier 不再抛 `AttributeError`。
+- **macOS 无人登录时关不掉机**：`power off` / `power reboot` 原先在 macOS 上一律走
+  `osascript`，而它只在图形登录会话里可用——LaunchDaemon（无人登录）与 SSH 会话
+  都拿不到 Apple Events，命令失败后表现为「点了关机，什么都没发生」，而那正是
+  「无需登录」要解决的场景。现在无图形会话时回退到 `shutdown`；有图形会话时仍走
+  `osascript`，保留「应用能正常退出」的优雅关机语义。
 
 ### 变更
 
@@ -185,7 +196,8 @@
 - 开源发布准备（README / LICENSE / CI / Release）、自测指南、
   端口冲突应对说明，以及「提交目标为 `origin/main`」的入库约定。
 
-[未发布]: https://github.com/enmingxiong821-cloud/campusnet/compare/v1.6.0...HEAD
+[未发布]: https://github.com/enmingxiong821-cloud/campusnet/compare/v2.0.0...HEAD
+[2.0.0]: https://github.com/enmingxiong821-cloud/campusnet/compare/v1.6.0...v2.0.0
 [1.6.0]: https://github.com/enmingxiong821-cloud/campusnet/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/enmingxiong821-cloud/campusnet/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/enmingxiong821-cloud/campusnet/compare/v1.3.0...v1.4.0
