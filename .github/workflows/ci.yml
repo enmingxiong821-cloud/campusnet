@@ -8,7 +8,10 @@ on:
 
 jobs:
   python:
-    name: Python ${{ matrix.python-version }}
+    # 名字里必须带 OS：同一版本在 ubuntu 与 windows 各跑一格，只写版本号会产出两个
+    # 同名的检查（main 上实测每个版本都出现两次），而分支保护的必过检查是按名字匹配的，
+    # 同名时 windows 那格的红会被 ubuntu 那格的绿顶掉——正是要防的那种漏网。
+    name: ${{ matrix.os == 'windows-latest' && 'Windows' || 'Linux' }} Python ${{ matrix.python-version }}
     runs-on: ${{ matrix.os }}
     # 六格矩阵里任何一格挂住（探活用例真的去连网、或某个平台等超时）
     # 都会把整轮 CI 拖到 GitHub 的 6 小时上限；全套本地约 5 分钟，30 分钟够宽。
