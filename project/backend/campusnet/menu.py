@@ -10,6 +10,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Callable
 
 Ask = Callable[[str], str]
@@ -174,6 +175,14 @@ ITEMS: tuple[MenuItem, ...] = (
     MenuItem("立即检测网络", "掉线会自动重连", "启动与检测", ("check",)),
     MenuItem("添加账号", "自动发现门户并引导建号", "账号", handler=guided_add),
     MenuItem("查看多端访问", "手机该访问哪个地址、令牌多少", "账号", ("access",)),
+    # 与上一条分开、而不是把 --guide 并进去：向导会拿掉令牌那一行，而令牌正是手机
+    # 首次登录要用的。两件事各给一个入口，比一条命令按参数变脸更好懂。
+    MenuItem(
+        "远程接入向导",
+        "Tailscale + 远程桌面 + 添加到主屏幕，三步走",
+        "账号",
+        ("access", "--guide"),
+    ),
     MenuItem("查看自检报告", "含版本更新提示（联网时）", "状态", ("doctor",)),
     MenuItem("查看运行日志", "最近 40 行", "状态", ("logs", "--lines", "40")),
     # 体检排在关机前面：没确认过前置条件就关机，很可能再也开不回来。
@@ -202,11 +211,92 @@ def index_of(keyword: str) -> int:
     return 0
 
 
+def service_running(port: int | None = None, timeout: float = 0.5) -> bool:
+    """本机服务在不在跑：连一下 /healthz。
+
+    短超时是必须的——本机未监听的端口是丢包而不是立刻拒绝，不给超时菜单会卡在
+    那儿，而「双击桌面图标半天没反应」比不报状态更糟。这个端点在免认证名单里，
+    不需要令牌。
+    """
+    import urllib.error
+    import urllib.request
+
+    from .paths import API_PORT
+
+    url = f"http://127.0.0.1:{API_PORT if port is None else port}/healthz"
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
+            return 200 <= int(getattr(resp, "status", 0)) < 300
+    except (OSError, urllib.error.URLError, ValueError):
+        return False
+
+
+def _ago(text: str | None, now: datetime | None = None) -> str:
+    """把库里存的时间戳说成「多久前」，与控制台顶栏的口径保持一致。"""
+    from .wakeplan import parse_last_run
+
+    when = parse_last_run(text)
+    if when is None:
+        return ""
+    seconds = ((now or datetime.now()) - when).total_seconds()
+    if seconds < 60:  # 也兜住时钟回拨出的负数，别显示「-3 分钟前」
+        return "刚刚"
+    if seconds < 3600:
+        return f"{int(seconds // 60)} 分钟前"
+    if seconds < 86400:
+        return f"{int(seconds // 3600)} 小时前"
+    return f"{int(seconds // 86400)} 天前"
+
+
+def status_line(
+    store: object | None = None,
+    *,
+    running: Callable[[], bool] | None = None,
+    now: datetime | None = None,
+) -> str:
+    """进菜单先报一句现状：账号几个、最近一次检测在什么时候、服务在不在跑。
+
+    双击桌面快捷方式进来的用户，在一列功能之前最想知道的正是这几件事；没有这一行，
+    得先选「查看自检报告」才知道自己处在哪。读不到的项直接省略——菜单不能因为
+    读库失败或端口探不通就起不来。
+    """
+    parts: list[str] = []
+    try:
+        from .storage import Store
+
+        accounts = list((store or Store()).list_accounts())  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001 - 只影响这一行，不该拦住菜单
+        accounts = None
+    if accounts is not None:
+        if not accounts:
+            parts.append("还没有账号（选「添加账号」）")
+        else:
+            enabled = sum(1 for a in accounts if a.enabled)
+            parts.append(f"账号 {len(accounts)} 个（启用 {enabled}）")
+            newest = max(
+                (a.last_checked_at for a in accounts if a.last_checked_at),
+                default=None,
+            )
+            ago = _ago(newest, now)
+            if ago:
+                parts.append(f"最近检测 {ago}")
+    try:
+        alive = (running or service_running)()
+    except Exception:  # noqa: BLE001
+        alive = None
+    if alive is not None:
+        parts.append("服务运行中" if alive else "服务未启动（选「启动服务」）")
+    return " · ".join(parts)
+
+
 def run_menu(ask: Ask = input, out: Out = print) -> int:
     """主循环：输入数字执行对应动作，0 退出。ask/out 可注入，便于测试。"""
     from . import cli
 
     out("校园网自连 · 主菜单")
+    summary = status_line()
+    if summary:
+        out(summary)
     section = ""
     while True:
         for position, item in enumerate(ITEMS, start=1):
@@ -229,10 +319,22 @@ def run_menu(ask: Ask = input, out: Out = print) -> int:
             continue
         item = ITEMS[int(choice) - 1]
         out("")
-        if item.handler is not None:
-            item.handler(ask, out)
-        else:
-            cli.main(list(item.args))
+        try:
+            if item.handler is not None:
+                code = item.handler(ask, out)
+            else:
+                code = cli.main(list(item.args))
+        except SystemExit as exc:
+            # 菜单里的动作会 SystemExit：`serve` 发现「已有实例在跑」或端口被占时
+            # 就是这么退的。不接住的话整个菜单进程跟着结束——桌面快捷方式双击进来的
+            # 窗口会直接关掉，用户连那句错误都来不及看，正是本模块开头说要避免的
+            # 那种劝退点。接住之后仍如实报退出码。
+            raw = exc.code
+            code = raw if isinstance(raw, int) else (0 if raw is None else 1)
+        # 2 在本项目里是「用户取消」（guided_add、register_bootstart 取消时返回它），
+        # 不当失败报，否则每次按 Ctrl+C 取消都要多挨一句。
+        if code and code != 2:
+            out(f"（上一步没有成功，退出码 {code}）")
         out("")
         try:
             ask("按回车返回菜单...")

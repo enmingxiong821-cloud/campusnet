@@ -2,9 +2,25 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
+import pytest
+
 from campusnet import bootstart as boot_mod
 from campusnet import cli as cli_mod
 from campusnet import menu as menu_mod
+from campusnet.storage import Account
+
+
+@pytest.fixture(autouse=True)
+def menu_isolated(tmp_db, monkeypatch: pytest.MonkeyPatch):  # noqa: ANN001, ANN201
+    """菜单一进来就读库，测试必须换成临时库。
+
+    不换的话读的是用户真实的 `database/*.db`——本机 2268 上确实常驻着一个实例，
+    账号数、最近检测时间都会随环境变。端口探测不在这里挡：只有断言到那一行的
+    用例自己替换 `service_running`，其余用例走真实探测也无妨（探不通就是 0.5 秒）。
+    """
+    return tmp_db
 
 
 def _feed(answers: list[str]):
@@ -25,6 +41,7 @@ def test_menu_lists_every_capability() -> None:
         "立即检测",
         "添加账号",
         "多端访问",
+        "远程接入向导",
         "自检报告",
         "运行日志",
         "电源体检",
@@ -452,6 +469,155 @@ def test_run_menu_dispatches_handler(monkeypatch) -> None:  # noqa: ANN001
 
     assert menu_mod.run_menu(_feed(["1", "0"]), lambda *_: None) == 0
     assert calls == [1]
+
+
+# ---------- 动作返回码 ----------
+
+
+def test_run_menu_survives_action_systemexit(monkeypatch, tmp_db) -> None:  # noqa: ANN001
+    """动作抛 SystemExit 时菜单要活下来。
+
+    `serve` 发现已有实例在跑、或端口被占时会 `raise SystemExit(1)`；桌面快捷方式
+    双击进来的是一个 cmd 窗口，让它穿出去就等于窗口一闪而过，用户看不到那句错误。
+    """
+    monkeypatch.setattr(
+        cli_mod, "main", lambda argv: (_ for _ in ()).throw(SystemExit(1))
+    )
+
+    out: list[str] = []
+    index = menu_mod.index_of("启动服务")
+    code = menu_mod.run_menu(_feed([str(index), "", "0"]), out.append)
+
+    assert code == 0  # 菜单本身正常退出，不是被 SystemExit 带跑
+    assert any("退出码 1" in line for line in out)
+
+
+def test_run_menu_reports_failed_action(monkeypatch) -> None:  # noqa: ANN001
+    monkeypatch.setattr(cli_mod, "main", lambda argv: 1)
+
+    out: list[str] = []
+    index = menu_mod.index_of("立即检测")
+    menu_mod.run_menu(_feed([str(index), "", "0"]), out.append)
+
+    assert any("退出码 1" in line for line in out)
+
+
+def test_run_menu_keeps_quiet_on_cancel(monkeypatch) -> None:  # noqa: ANN001
+    """退出码 2 在本项目里是「用户取消」，不该被说成失败。"""
+    monkeypatch.setattr(cli_mod, "main", lambda argv: 2)
+
+    out: list[str] = []
+    index = menu_mod.index_of("立即检测")
+    menu_mod.run_menu(_feed([str(index), "", "0"]), out.append)
+
+    assert not any("退出码" in line for line in out)
+
+
+def test_run_menu_prints_status_summary(monkeypatch, store) -> None:  # noqa: ANN001
+    store.add_account(Account(name="宿舍", username="2024", password="p"))
+    monkeypatch.setattr(menu_mod, "service_running", lambda *a, **kw: False)
+    out: list[str] = []
+
+    menu_mod.run_menu(_feed(["0"]), out.append)
+
+    assert out[0] == "校园网自连 · 主菜单"
+    assert "账号 1 个（启用 1）" in out[1]
+    assert "服务未启动" in out[1]
+
+
+# ---------- 状态行 ----------
+
+
+def test_status_line_without_accounts(store) -> None:
+    line = menu_mod.status_line(store, running=lambda: False)
+
+    assert "还没有账号" in line
+    assert "服务未启动" in line
+
+
+def test_status_line_counts_enabled_and_checked() -> None:
+    """`add_account` 不落 last_checked_at（那是每次检测才写的），所以这里用假 store
+    直接喂一个时间戳——要验的正是「取出最新那个再折算成多久前」。"""
+
+    class FakeStore:
+        def list_accounts(self):
+            return [
+                Account(
+                    name="宿舍",
+                    username="1",
+                    password="p",
+                    last_checked_at="2026-10-14 12:00:00",
+                ),
+                Account(name="实验室", username="2", password="p", enabled=False),
+            ]
+
+    line = menu_mod.status_line(
+        FakeStore(), running=lambda: True, now=datetime(2026, 10, 14, 12, 7, 0)
+    )
+
+    assert "账号 2 个（启用 1）" in line
+    assert "最近检测 7 分钟前" in line
+    assert "服务运行中" in line
+
+
+def test_status_line_uses_newest_check() -> None:
+    class FakeStore:
+        def list_accounts(self):
+            return [
+                Account(last_checked_at="2026-10-14 12:00:00"),
+                Account(last_checked_at="2026-10-14 11:30:00"),
+            ]
+
+    line = menu_mod.status_line(
+        FakeStore(), running=lambda: True, now=datetime(2026, 10, 14, 12, 5, 0)
+    )
+
+    assert "最近检测 5 分钟前" in line
+
+
+def test_status_line_swallows_store_failure(monkeypatch) -> None:  # noqa: ANN001
+    """读库炸了也要给出一行，菜单不能因此起不来。"""
+    import campusnet.storage as storage_mod
+
+    monkeypatch.setattr(
+        storage_mod, "Store", lambda *a, **kw: (_ for _ in ()).throw(OSError("db 坏了"))
+    )
+
+    line = menu_mod.status_line(None, running=lambda: False)
+
+    assert line == "服务未启动（选「启动服务」）"
+
+
+@pytest.mark.parametrize(
+    ("seconds_ago", "expected"),
+    [
+        (0, "刚刚"),
+        (59, "刚刚"),
+        (60, "1 分钟前"),
+        (3599, "59 分钟前"),
+        (3600, "1 小时前"),
+        (86399, "23 小时前"),
+        (86400, "1 天前"),
+        (-120, "刚刚"),  # 时钟回拨出负数，不能显示「-2 分钟前」
+    ],
+)
+def test_ago_buckets(seconds_ago: int, expected: str) -> None:
+    import datetime as dt
+
+    now = dt.datetime(2026, 10, 14, 12, 0, 0)
+    stamp = (now + dt.timedelta(seconds=-seconds_ago)).strftime("%Y-%m-%d %H:%M:%S")
+
+    assert menu_mod._ago(stamp, now) == expected
+
+
+def test_ago_handles_missing_and_bad_values() -> None:
+    assert menu_mod._ago(None) == ""
+    assert menu_mod._ago("不是时间") == ""
+
+
+def test_service_running_false_when_nothing_listens() -> None:
+    """给一个几乎不可能有人监听的端口，探不通要返回 False 而不是抛。"""
+    assert menu_mod.service_running(port=9, timeout=0.2) is False
 
 
 def test_run_menu_returns_zero_when_return_prompt_interrupted(

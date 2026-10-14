@@ -211,6 +211,16 @@
   .qa:active{transform:scale(.97)}
   .qa.danger{background:rgba(229,83,75,.16);color:#f28b82;border-color:rgba(229,83,75,.42)}
   .qa.ok{background:rgba(47,191,113,.14);color:#6fdc9a;border-color:rgba(47,191,113,.4)}
+  /* 手机「添加到主屏幕」提示条。display:flex 会盖掉 hidden 属性，所以要单独写一条
+     [hidden] —— 否则这个条子永远挂在首屏上。 */
+  .install-bar{
+    display:flex;align-items:center;gap:10px;margin:14px 18px 0;padding:10px 12px;
+    border:1px solid rgba(47,191,113,.3);border-radius:var(--radius);
+    background:rgba(47,191,113,.1);font-size:13px;line-height:1.5;
+  }
+  .install-bar[hidden]{display:none}
+  .install-bar span{flex:1 1 auto}
+  .install-bar button{flex:0 0 auto;padding:7px 12px;font-size:13px}
 </style>
 </head>
 <body>
@@ -237,6 +247,12 @@
 </header>
 
 <main>
+  <div class="install-bar" id="installBar" hidden>
+    <span id="installText"></span>
+    <button id="btnInstall" hidden>安装</button>
+    <button class="ghost" id="btnInstallLater">不再提示</button>
+  </div>
+
   <div class="quick-actions">
     <button class="qa danger" id="btnQuickOff">关机</button>
     <button class="qa" id="btnQuickReboot">重启</button>
@@ -474,6 +490,63 @@ const state = {
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('/service-worker.js').catch(() => {});
 }
+
+/* ---------- 手机「添加到主屏幕」引导 ----------
+   手机每次开控制台都要翻浏览历史/重敲长网址。manifest 与 service worker 早就位了，
+   缺的只是没人告诉用户可以把它加到主屏幕。这里只在触屏设备、且还没加过时提示一次。
+   桌面端不提示——那边有书签和扩展，弹这个纯属碍事。
+   iOS 的 Safari 没有 beforeinstallprompt（只能手动走「分享」菜单），所以按钮只在
+   浏览器愿意给事件时才出现，否则退化成一句指路文案。 */
+const INSTALL_KEY = 'cns.hideInstallHint';
+let installPrompt = null;
+
+function installHintHidden() {
+  // localStorage 在隐私模式下会抛，读不到就当成「没关过」。
+  try { return localStorage.getItem(INSTALL_KEY) === '1'; } catch (e) { return false; }
+}
+function rememberInstallHint() {
+  try { localStorage.setItem(INSTALL_KEY, '1'); } catch (e) { /* 存不下就下次再说 */ }
+}
+function isStandalone() {
+  const mq = window.matchMedia;
+  return (mq && mq('(display-mode: standalone)').matches) || navigator.standalone === true;
+}
+function isTouchDevice() {
+  if (window.matchMedia && window.matchMedia('(pointer:coarse)').matches) return true;
+  return /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
+}
+function isIOS() {
+  // iPadOS 13+ 的 UA 是 Macintosh，靠触点数区分。
+  return /iPad|iPhone|iPod/.test(navigator.userAgent)
+    || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+}
+
+function renderInstallHint() {
+  const bar = $('installBar');
+  if (!bar || installHintHidden() || isStandalone() || !isTouchDevice()) return;
+  const btn = $('btnInstall');
+  if (installPrompt) {
+    $('installText').textContent = '把控制台加到主屏幕，以后像 App 一样一键打开。';
+    btn.hidden = false;
+  } else if (isIOS()) {
+    $('installText').textContent = '加到主屏幕：点底部「分享」，再选「添加到主屏幕」。';
+    btn.hidden = true;
+  } else {
+    $('installText').textContent = '加到主屏幕：打开浏览器菜单，选「添加到主屏幕」。';
+    btn.hidden = true;
+  }
+  bar.hidden = false;
+}
+
+window.addEventListener('beforeinstallprompt', e => {
+  e.preventDefault();          // 拦下来，等用户点我们自己的按钮再弹
+  installPrompt = e;
+  renderInstallHint();         // 事件可能来得比首次渲染晚，来了就把「安装」补上
+});
+window.addEventListener('appinstalled', () => {
+  rememberInstallHint();
+  $('installBar').hidden = true;
+});
 
 const STATE_TEXT = {
   online:'在线', logged_in:'已登录', offline:'掉线', failed:'登录失败', unknown:'在线未确认'
@@ -1342,6 +1415,19 @@ $('btnAddDevice').onclick = addDevice;
 $('btnQuickOff').onclick = () => powerAction('off');
 $('btnQuickReboot').onclick = () => powerAction('reboot');
 $('btnQuickProbe').onclick = probeNow;
+$('btnInstall').onclick = async () => {
+  if (!installPrompt) return;
+  installPrompt.prompt();
+  const choice = await installPrompt.userChoice.catch(() => null);
+  installPrompt = null;
+  // 用户点了「取消」就先把条子收起来，同一次会话里不再追问；真要装可以再刷新。
+  if (choice && choice.outcome === 'accepted') rememberInstallHint();
+  $('installBar').hidden = true;
+};
+$('btnInstallLater').onclick = () => {
+  rememberInstallHint();
+  $('installBar').hidden = true;
+};
 $('btnSaveSettings').onclick = saveSettings;
 $('btnTestNotify').onclick = testNotify;
 $('setNotifyChannel').onchange = toggleNotifyFields;
@@ -1423,6 +1509,8 @@ async function claimPairFromHash() {
   return true;
 }
 $('btnGenPair').onclick = generatePair;
+
+renderInstallHint();
 
 initAuth().then(async data => {
   if (await claimPairFromHash()) return;

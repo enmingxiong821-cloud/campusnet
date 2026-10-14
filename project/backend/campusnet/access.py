@@ -63,6 +63,10 @@ def report(host: str = API_HOST, port: int = API_PORT) -> list[str]:
         lines.append(f"Tailscale 地址  http://{tailscale}:{port}   （任何网络下都能用）")
     lines.append(f"控制台令牌      {token_text() or '（读不到，可跑 run.py token）'}")
     lines.append("手机端建议      装 Tailscale；远程桌面用 RDP 客户端或 RustDesk")
+    lines.append(
+        "手机快捷方式    控制台打开后点「添加到主屏幕」，以后像 App 一样一键打开"
+        "（远程接入看 run.py access --guide）"
+    )
     if host in ("127.0.0.1", "localhost", "::1"):
         lines.append(
             "提示            服务当前只监听本机，手机访问不了："
