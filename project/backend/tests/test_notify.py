@@ -211,3 +211,103 @@ def test_send_event_respects_event_toggle(monkeypatch: pytest.MonkeyPatch) -> No
     assert notifier.send_event("power", "关机了") is True
     assert notifier.send_event("pair", "配对了") is False  # pair 未开启
     assert len(calls) == 1
+
+
+# ---------- 「发出去了才清账」 ----------
+
+
+def test_recovered_bookkeeping_cleared_only_after_successful_send(
+    sent: list,
+) -> None:
+    """恢复方向：发送成功后才清零计数、摘掉已提醒标记。"""
+    notifier = notify.Notifier("http://hook.test/x", after_failures=1)
+
+    assert notifier.observe(1, "宿舍", False, "offline") == "failing"
+    assert notifier._failures[1] == 1
+    assert 1 in notifier._notified
+
+    assert notifier.observe(1, "宿舍", True, "online", "网络已放行") == "recovered"
+    assert notifier._failures[1] == 0
+    assert 1 not in notifier._notified
+
+
+def test_recovered_send_failure_keeps_bookkeeping_for_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """恢复通知发失败时不能提前清账，否则「好了」这条永远补不上。
+
+    回归防护：原来在发送前就把 _failures 清零、把 _notified 摘掉，发送一失败
+    就再也没机会补——下一轮 online=True 时 was_failing 已是 False，恢复通知消失。
+    """
+    notifier = notify.Notifier("http://hook.test/x", after_failures=1)
+    monkeypatch.setattr(notify, "_post", lambda url, payload: True)
+    assert notifier.observe(1, "宿舍", False, "offline") == "failing"
+
+    monkeypatch.setattr(notify, "_post", lambda url, payload: False)  # webhook 挂了
+    assert notifier.observe(1, "宿舍", True, "online") == ""
+    assert notifier._failures[1] == 1, "没发出去就不该清零"
+    assert 1 in notifier._notified, "没发出去就不该摘标记"
+
+    # webhook 恢复后下一轮能补发，之后才清账
+    monkeypatch.setattr(notify, "_post", lambda url, payload: True)
+    assert notifier.observe(1, "宿舍", True, "online") == "recovered"
+    assert notifier._failures[1] == 0 and 1 not in notifier._notified
+
+
+def test_recovered_event_disabled_clears_without_sending(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """recovered 开关关掉时不发通知，但计数照样清零、标记摘掉。"""
+    calls: list = []
+    monkeypatch.setattr(
+        notify, "_post", lambda url, payload: calls.append(payload) or True
+    )
+    notifier = notify.Notifier(
+        "http://hook.test/x", after_failures=1, events=["failing"]
+    )
+
+    assert notifier.observe(1, "宿舍", False, "offline") == "failing"
+    assert notifier._failures[1] == 1 and 1 in notifier._notified
+
+    assert notifier.observe(1, "宿舍", True, "online") == ""
+    assert notifier._failures[1] == 0
+    assert 1 not in notifier._notified
+    assert len(calls) == 1  # 只发过掉线那一条
+
+
+def test_send_exception_is_swallowed_and_keeps_bookkeeping(
+    store, account, monkeypatch: pytest.MonkeyPatch
+) -> None:  # noqa: ANN001
+    """发送过程抛异常时，异常不能穿出去，恢复方向的记账也不能被改。
+
+    真实链路里 _post / _send 都把异常吞成 False；这里把 _post 换成必抛，
+    验证消费方 Monitor._notify 兜住异常、且恢复方向的清零发生在发送之后——
+    发送炸了自然就没清账，下一轮还会重试。
+    """
+    from campusnet import notify as notify_mod
+    from campusnet.monitor import CheckOutcome, Monitor
+    from campusnet.storage import STATE_OFFLINE, STATE_ONLINE
+
+    store.set_setting("notify_url", "http://hook/x")
+    store.set_setting("notify_after_failures", 1)
+    acc_id = store.add_account(account)
+    acc = store.get_account(acc_id)
+    mon = Monitor(store, interval=10)
+
+    monkeypatch.setattr(notify_mod, "_post", lambda url, payload: True)
+    mon._notify(acc, CheckOutcome(acc_id, acc.name, False, STATE_OFFLINE, "掉线"))
+    assert acc_id in mon.notifier._notified
+    assert mon.notifier._failures[acc_id] == 1
+
+    def boom(url: str, payload: dict) -> bool:
+        raise RuntimeError("webhook 炸了")
+
+    monkeypatch.setattr(notify_mod, "_post", boom)
+    # 不该抛出去：Monitor._notify 必须兜住并留一条告警
+    mon._notify(acc, CheckOutcome(acc_id, acc.name, True, STATE_ONLINE, "已恢复"))
+
+    assert mon.notifier._failures[acc_id] == 1, "发送异常不能提前清零"
+    assert acc_id in mon.notifier._notified, "发送异常不能提前摘标记"
+    assert any(
+        "通知发送异常" in e["message"] for e in store.list_events(limit=10)
+    )

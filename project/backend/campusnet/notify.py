@@ -203,15 +203,16 @@ class Notifier:
             return ""
         with self._lock:
             if online:
-                interrupted = (
+                was_failing = (
                     account_id in self._notified
                     or self._failures.get(account_id, 0) > 0
                 )
-                self._failures[account_id] = 0
-                self._notified.discard(account_id)
-                if not interrupted:
+                if not was_failing:
+                    self._failures[account_id] = 0
                     return ""
                 if not self.event_enabled("recovered"):
+                    self._failures[account_id] = 0
+                    self._notified.discard(account_id)
                     return ""
                 kind = "recovered"
                 text = f"✅ {account_name} 已恢复在线（{message or state}）"
@@ -229,9 +230,16 @@ class Notifier:
             # 也不要在 `_notified` 上落账——落了账下一轮就在这里短路，
             # webhook 恢复后这条「掉线」永远补不上（原来就是先记账再发送）。
             return ""
-        if kind == "failing":
-            with self._lock:
+        with self._lock:
+            if kind == "failing":
                 self._notified.add(account_id)
+            else:
+                # 恢复通知也是「发出去了才清账」。原来在发送前就把失败计数清零、
+                # 把已提醒标记摘掉，发送一失败就再也没机会补：下一轮 online=True
+                # 时 was_failing 已经是 False，这条「已恢复在线」就此消失，
+                # 人不在机器旁边只收到「掉线」、收不到「好了」。
+                self._failures[account_id] = 0
+                self._notified.discard(account_id)
         return kind
 
     def send(
