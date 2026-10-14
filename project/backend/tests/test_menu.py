@@ -237,6 +237,31 @@ def test_register_bootstart_declined_elevation(monkeypatch) -> None:  # noqa: AN
     assert calls == []
 
 
+def test_register_bootstart_passes_paths_api_port(monkeypatch) -> None:  # noqa: ANN001
+    """自启动项的端口必须取自 paths.API_PORT，不能写死 2268。
+
+    回归防护：端口写死时，改了端口（CAMPUSNET_API_PORT）的用户会被注册出一份
+    指向 2268 的自启动项，开机后连的不是自己拉起的服务。这条把 API_PORT 改成
+    非默认值，断言真的被透传下去。
+    """
+    from campusnet import paths
+
+    monkeypatch.setenv("CAMPUSNET_FORCE_PLATFORM", "linux")
+    monkeypatch.setattr(paths, "API_PORT", 12345)
+    seen: list[dict] = []
+    monkeypatch.setattr(
+        boot_mod,
+        "install",
+        lambda **kwargs: seen.append(kwargs)
+        or boot_mod.BootStatus(True, True, None, "已注册开机自启动"),
+    )
+    out: list[str] = []
+
+    assert menu_mod.register_bootstart(_feed([]), out.append) == 0
+
+    assert seen == [{"port": 12345, "mode": "auto", "password": ""}]
+
+
 def test_configure_notify_saves_and_tests(monkeypatch, store) -> None:  # noqa: ANN001
     from campusnet import notify as notify_mod
 

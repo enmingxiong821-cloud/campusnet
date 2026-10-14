@@ -62,6 +62,7 @@ def register_bootstart(ask: Ask, out: Out) -> int:
     from getpass import getpass
 
     from . import bootstart
+    from .paths import API_PORT
 
     # 「无需登录」在 Windows 上只能靠计划任务，代价是交一次账户密码；其它平台的
     # 用户级载体没有对应开关，用默认的就行。原来这里不分平台一律走 Windows 那条路
@@ -76,7 +77,9 @@ def register_bootstart(ask: Ask, out: Out) -> int:
             password = getpass("输入当前 Windows 账户密码（不回显，只交给任务计划程序保存）: ")
         except (EOFError, KeyboardInterrupt):
             return 2
-    result = bootstart.install(port=2268, mode=mode, password=password)
+    # 端口取 paths.API_PORT（认 CAMPUSNET_API_PORT），不能写死 2268：
+    # 改了端口的用户会被注册出一份指向 2268 的自启动项，开机后连不上自己。
+    result = bootstart.install(port=API_PORT, mode=mode, password=password)
     out(bootstart.activate(result))
     if result.installed:
         # 装上了不等于「有电就连接」：用户级载体是登录后语义，这句得说出来，
