@@ -45,7 +45,7 @@ jobs:
           echo "NAME=${NAME}" >> "$GITHUB_ENV"
           mkdir -p "dist/${NAME}"
           # 注意：cp -r 不受 .gitignore 约束，本地 *.log 会被一起带进来
-          cp -r project utils database/schema.sql database/config.example.yml README.md CHANGELOG.md CONTRIBUTING.md LICENSE install.bat install.sh install.ps1 "dist/${NAME}/"
+          cp -r project utils database/schema.sql database/config.example.yml README.md CHANGELOG.md CONTRIBUTING.md SECURITY.md LICENSE install.bat install.sh install.ps1 "dist/${NAME}/"
           # 容器部署用的三个文件也随包发：解压后就能 docker compose up，
           # 不必再回仓库拿。.dockerignore 要跟着走——少了它，用户从解压目录
           # 构建时会把 config.json 一起 COPY 进镜像层。
