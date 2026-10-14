@@ -814,17 +814,19 @@ function probeWith(fetchImpl) {
     // background.js 跑 node --check，这两个页面改坏了要等用户点开才发现。
     // 这里至少把语法解析一遍：模板字符串少个反引号、括号没配对，整页脚本会
     // 一声不响地不执行，页面看上去却一切正常。
-    describe('内联脚本可解析（popup.html / options.html）');
-    for (const file of ['popup.html', 'options.html']) {
-      check(`${file} 的内联脚本能被解析`, () => {
-        const html = fs.readFileSync(path.join(__dirname, file), 'utf8');
+    // 控制台（../index.html）一并纳入：它是一千多行的手写单文件，同样没有构建
+    // 步骤会替你发现语法错误——只有打开页面白屏了才知道。
+    describe('内联脚本可解析（popup.html / options.html / 控制台 index.html）');
+    for (const rel of ['popup.html', 'options.html', '../index.html']) {
+      check(`${rel} 的内联脚本能被解析`, () => {
+        const html = fs.readFileSync(path.join(__dirname, rel), 'utf8');
         const scripts = [...html.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)].map(m => m[1]);
-        if (!scripts.length) throw new Error(`${file} 里没有内联脚本`);
+        if (!scripts.length) throw new Error(`${rel} 里没有内联脚本`);
         scripts.forEach((src, i) => {
           try {
-            new vm.Script(src, { filename: `${file}#${i + 1}` });
+            new vm.Script(src, { filename: `${rel}#${i + 1}` });
           } catch (e) {
-            throw new Error(`${file} 第 ${i + 1} 段脚本解析失败：${e.message}`);
+            throw new Error(`${rel} 第 ${i + 1} 段脚本解析失败：${e.message}`);
           }
         });
       });

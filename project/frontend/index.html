@@ -34,7 +34,12 @@
   .dot.on{background:var(--ok);box-shadow:0 0 0 4px rgba(47,191,113,.16)}
   .dot.off{background:var(--err);box-shadow:0 0 0 4px rgba(229,83,75,.16)}
   .dot.busy{background:var(--warn);box-shadow:0 0 0 4px rgba(226,163,54,.16);animation:pulse 1.1s infinite}
+  /* 「连不上服务」用灰不用红：红已经给了「掉线」（网络断了，需要处理），
+     而连不上服务是另一码事——电脑关着、服务没起来。两个都用红会分不清该修哪个。 */
+  .dot.gone{background:var(--txt-mute);box-shadow:0 0 0 4px rgba(107,118,134,.16)}
   @keyframes pulse{50%{opacity:.35}}
+  .net{font-size:13px;font-weight:550;color:var(--txt-dim)}
+  .net.on{color:var(--ok)} .net.off{color:var(--err)} .net.gone{color:var(--txt-mute)}
   .head-actions{margin-left:auto;display:flex;gap:8px;align-items:center}
   main{max-width:1240px;margin:0 auto;padding:24px}
   .grid{display:grid;gap:16px}
@@ -116,6 +121,7 @@
   .modal .content{padding:20px;overflow-y:auto}
   .modal .foot{padding:14px 20px;border-top:1px solid var(--line);display:flex;gap:8px;justify-content:flex-end}
   .hint{font-size:12px;color:var(--txt-mute);margin-top:4px}
+  .sub-time{font-size:11px;color:var(--txt-mute);margin-top:3px;white-space:nowrap}
   .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
   .flex-end{justify-content:flex-end}
   .auth-bg{
@@ -180,7 +186,6 @@
     main{padding:14px} header{padding:12px 14px;gap:10px}
     /* 状态文字加两个按钮在 375px 下挤不下，不换行就会把两侧顶出去。 */
     header{flex-wrap:wrap}
-    .brand span.full{display:none}
     .card .val{font-size:20px}
     /* 只收窄账号表：它的第三列是「方式」，手机上最不占信息量。
        原来这条没限定表格，等于把每个表的第三列都藏了——自检表的「说明」
@@ -222,7 +227,7 @@
   <div class="brand">
     <div class="dot" id="statusDot"></div>
     <span>校园网自连</span>
-    <span class="full" style="color:var(--txt-mute);font-weight:400">浏览器验证 · 自动重连</span>
+    <span class="net" id="netText">连接中…</span>
   </div>
   <div class="head-actions">
     <span class="mono" id="statusText" style="color:var(--txt-dim)">连接中…</span>
@@ -275,6 +280,12 @@
     <section id="tab-events" hidden>
       <div class="panel-body row">
         <select id="evtAccount" style="max-width:220px"><option value="">全部账号</option></select>
+        <select id="evtLevel" style="max-width:130px">
+          <option value="">全部级别</option>
+          <option value="error">仅错误</option>
+          <option value="warning">仅警告</option>
+          <option value="info">仅信息</option>
+        </select>
         <button class="ghost" id="btnRefreshEvents">刷新</button>
         <button class="ghost danger" id="btnClearEvents">清空</button>
       </div>
@@ -449,7 +460,15 @@
 
 <script>
 const $ = id => document.getElementById(id);
-const state = { accounts: [], monitor: { alive:false, interval:60, checking:false }, editingId: null, timer: null };
+const state = {
+  accounts: [],
+  monitor: { alive:false, interval:60, checking:false },
+  editingId: null,
+  timer: null,
+  // 控制台到本地服务的连通性。手机打开控制台时电脑往往关着，那一整屏 /api 全失败，
+  // 界面不能一直停在「连接中…」——那是「正在加载」的意思，不是「已经连不上了」。
+  link: { ok: true, fails: 0, lastOk: 0 },
+};
 
 // PWA：注册 service worker，缓存外壳让「添加到主屏幕」的窗口离线也能打开。
 if ('serviceWorker' in navigator) {
@@ -469,12 +488,21 @@ const STAGE_TEXT = {
 };
 
 async function api(path, opts = {}) {
-  const res = await fetch(path, {
-    headers: { 'Content-Type': 'application/json' },
-    credentials: 'same-origin',
-    ...opts,
-    body: opts.body ? JSON.stringify(opts.body) : undefined,
-  });
+  let res;
+  try {
+    res = await fetch(path, {
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      ...opts,
+      body: opts.body ? JSON.stringify(opts.body) : undefined,
+    });
+  } catch (e) {
+    // fetch 自己抛错 = 请求根本没到达服务（电脑关着、程序没起、网络断了）。
+    // 打上标记：调用方要靠它区分「连不上服务」和「服务回了错误」——后者说明
+    // 服务是活的，顶栏不该报不可达。
+    e.isNetwork = true;
+    throw e;
+  }
   const data = await res.json().catch(() => ({ ok:false, error:'响应不是 JSON' }));
   if (res.status === 401 && authRequired && !path.startsWith('/api/auth/') && !path.startsWith('/api/pair/')) {
     showAuth('会话已失效，请重新输入控制台令牌');
@@ -502,7 +530,13 @@ function hideAuth() {
 }
 
 async function initAuth() {
-  const res = await fetch('/api/auth/status', { credentials:'same-origin' });
+  let res;
+  try {
+    res = await fetch('/api/auth/status', { credentials:'same-origin' });
+  } catch (e) {
+    e.isNetwork = true;   // 同上：请求没到达，不是服务给了否定答案
+    throw e;
+  }
   // 不检查 res.ok 就把失败读成成功：服务还在启动、或返回了非 JSON 的 500 时，
   // 下面那句 catch 会兜出一个「不需要令牌且已认证」，于是令牌框不弹、直接进
   // 主界面，接着每次轮询都 401 反复触发 showAuth。宁可这里就抛，落到外层去。
@@ -633,10 +667,77 @@ async function once(btns, fn) {
   try { return await fn(); } finally { list.forEach(b => { b.disabled = false; }); }
 }
 
+/**
+ * 后端的时间戳是 SQLite 的 datetime('now','localtime')，形如 "2026-10-14 06:39:26"：
+ * 本地时间、不带时区标记。iOS 的 Safari / WebView 不认这种格式，new Date() 直接给
+ * Invalid Date，相对时间会全变成 NaN。逐段取数字自己构造，绕开各引擎的解析差异。
+ */
+function tsToMs(v) {
+  if (typeof v === 'number') return v;
+  const m = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})/.exec(String(v || ''));
+  if (!m) return 0;
+  return new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]).getTime();
+}
+
+function relTime(v) {
+  const ms = tsToMs(v);
+  if (!ms) return '';
+  const sec = Math.round((Date.now() - ms) / 1000);
+  if (sec < 5) return '刚刚';
+  if (sec < 60) return sec + ' 秒前';
+  if (sec < 3600) return Math.floor(sec / 60) + ' 分钟前';
+  if (sec < 86400) return Math.floor(sec / 3600) + ' 小时前';
+  return Math.floor(sec / 86400) + ' 天前';
+}
+
+function timeOf(ms) {
+  const d = new Date(ms);
+  return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+}
+
+const NET_TEXT = { online:'在线', offline:'掉线', unknown:'在线未确认', none:'未配置账号' };
+
+/**
+ * 网络状态取所有账号里最坏的一档。这里问的是「现在能不能上网」，不是
+ * 「N 个账号里有几个正常」，所以只要有一个掉线，整体就报掉线。
+ */
+function netState() {
+  const list = state.accounts;
+  if (!list.length) return 'none';
+  if (list.some(a => ['offline', 'failed'].includes(a.last_state))) return 'offline';
+  if (list.some(a => ['online', 'logged_in'].includes(a.last_state))) return 'online';
+  return 'unknown';
+}
+
+function lastCheckedAt() {
+  let best = 0;
+  for (const a of state.accounts) best = Math.max(best, tsToMs(a.last_checked_at));
+  return best;
+}
+
 function renderStatus() {
-  const dot = $('statusDot'), m = state.monitor;
-  dot.className = 'dot ' + (m.checking ? 'busy' : m.alive ? 'on' : 'off');
-  $('statusText').textContent = m.checking ? '检测中…' : m.alive ? `监控中 · 每 ${m.interval}s` : '监控未启动';
+  const dot = $('statusDot'), m = state.monitor, link = state.link;
+
+  // 状态点表示「网络通不通」，不是「监控开没开」——手机打开控制台最想知道的是前者。
+  // 监控是否在跑降级到右侧文字里说，两个信息不再挤在一个颜色里。
+  const net = link.ok ? netState() : 'gone';
+  // 点和文字共用同一套状态名。CSS 里是 .on/.off/.gone，别把 netState() 的
+  // 'online'/'offline' 原样拼进 class——那样只有 .gone 会命中，掉线的红字一直是灰的。
+  const tone = !link.ok ? 'gone' : m.checking ? 'busy' : net === 'online' ? 'on' : net === 'offline' ? 'off' : '';
+  dot.className = 'dot ' + tone;
+  $('netText').textContent = !link.ok ? '连不上服务' : m.checking ? '检测中…' : NET_TEXT[net];
+  $('netText').className = 'net ' + (tone === 'busy' ? '' : tone);
+
+  if (!link.ok) {
+    // 服务不可达时右侧改成「最后连上的时刻」：手机用户靠它判断电脑是不是早就关了，
+    // 比一句永远不变的「监控未启动」有用得多。
+    $('statusText').textContent = link.lastOk ? '最后连上 ' + timeOf(link.lastOk) : '服务不可达';
+  } else {
+    $('statusText').textContent = m.checking
+      ? '检测中…'
+      : m.alive ? `监控中 · 每 ${m.interval}s` : '监控未启动';
+  }
+
   $('btnToggleMonitor').textContent = m.alive ? '停止监控' : '启动监控';
   $('btnToggleMonitor').className = m.alive ? 'danger' : 'ok';
   $('cInterval').textContent = m.interval + ' 秒';
@@ -655,8 +756,23 @@ function renderCards() {
   const unknown = list.filter(a => a.last_state === 'unknown' && a.last_checked_at).length;
   const unchecked = list.filter(a => a.last_state === 'unknown' && !a.last_checked_at).length;
   $('cOfflineSub').textContent = offline.length ? '需要关注' : unknown ? `${unknown} 个在线未确认` : unchecked ? `${unchecked} 个未检测` : '一切正常';
+  // 相对时间比原来那句「上次检测 0.8s」有用：用户要知道的是「多久没检测了」。
+  // 耗时仍然留着——它能看出探活是不是开始变慢。
+  const checked = lastCheckedAt();
   const last = (state.monitor.last_results || [])[0];
-  $('cLastRun').textContent = last ? '上次检测 ' + last.elapsed + 's' : '尚未运行';
+  $('cLastRun').textContent = checked
+    ? `上次检测 ${relTime(checked)}${last ? `（${last.elapsed}s）` : ''}`
+    : '尚未运行';
+}
+
+/**
+ * 账号行下方那行小字。掉线时显示「上次在线」——那才是要判断「断了多久」的依据；
+ * 正常时显示这次检测的时间，让人知道这条状态是不是新鲜的。
+ */
+function acctTime(a) {
+  const bad = ['offline', 'failed'].includes(a.last_state);
+  if (bad && a.last_ok_at) return '上次在线 ' + relTime(a.last_ok_at);
+  return a.last_checked_at ? '检测于 ' + relTime(a.last_checked_at) : '';
 }
 
 function renderAccounts() {
@@ -668,7 +784,10 @@ function renderAccounts() {
   const rows = state.accounts.map(a => `
     <tr>
       <td><strong>${esc(a.name)}</strong><div class="hint mono">${esc(a.username)}</div></td>
-      <td><span class="badge s-${a.last_state}">${a.last_state === 'unknown' && !a.last_checked_at ? '未检测' : STATE_TEXT[a.last_state] || a.last_state}</span></td>
+      <td>
+        <span class="badge s-${a.last_state}">${a.last_state === 'unknown' && !a.last_checked_at ? '未检测' : STATE_TEXT[a.last_state] || a.last_state}</span>
+        ${acctTime(a) ? `<div class="sub-time">${esc(acctTime(a))}</div>` : ''}
+      </td>
       <td class="mono" style="color:var(--txt-dim)">${esc(a.login_mode)} / ${esc(a.password_mode)}</td>
       <td class="mono" style="color:var(--txt-mute);max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(a.portal_url)}</td>
       <td>
@@ -717,15 +836,35 @@ async function rowAction(act, id, btn) {
   }
 }
 
-async function loadEvents() {
+let _eventsSig = '';
+let _eventsReq = 0;
+
+async function loadEvents(force = false) {
   const sel = $('evtAccount').value;
-  const q = sel ? `?limit=200&account_id=${sel}` : '?limit=200';
+  const level = $('evtLevel').value;
+  // 级别是前端筛的——后端只认 account_id 与 limit。筛的时候要多取一些，
+  // 否则最近 200 条里可能一条 error 都没有，看着像「从来没出过错」。
+  const limit = level ? 2000 : 200;
+  const q = `?limit=${limit}` + (sel ? `&account_id=${sel}` : '');
+  const req = ++_eventsReq;
   try {
     const { events } = await api('/api/events' + q);
+    // 连着切换筛选会并发发出多个请求。服务忙着登录时前一个可能后回来，
+    // 不丢弃的话会把新筛选的结果覆盖成旧的——序号对不上就说明自己过期了。
+    if (req !== _eventsReq) return;
     const box = $('eventList');
-    if (!events.length) { box.innerHTML = '<div class="empty">暂无事件。</div>'; return; }
+    const shown = level ? events.filter(e => e.level === level) : events;
+    // 10 秒一次的常态轮询也会走到这里（事件页开着的时候）。内容没变就整块跳过：
+    // 重写 innerHTML 会把表格整个重建，用户正在翻的那一屏会跳回去。
+    const sig = `${level}|${sel}|${shown.length}|${shown[0] ? shown[0].ts : ''}`;
+    if (!force && sig === _eventsSig) return;
+    _eventsSig = sig;
+    if (!shown.length) {
+      box.innerHTML = `<div class="empty">${events.length ? '没有符合筛选条件的事件。' : '暂无事件。'}</div>`;
+      return;
+    }
     box.innerHTML = `<table><thead><tr><th>时间</th><th>级别</th><th>阶段</th><th>信息</th></tr></thead><tbody>${
-      events.map(e => `<tr>
+      shown.map(e => `<tr>
         <td class="mono" style="color:var(--txt-mute);white-space:nowrap">${esc(e.ts)}</td>
         <td class="e-${e.level}">${esc(e.level)}</td>
         <td style="color:var(--txt-dim)">${esc(e.stage || '—')}</td>
@@ -744,6 +883,9 @@ async function refresh() {
     const [a, s] = await Promise.all([api('/api/accounts'), api('/api/monitor')]);
     state.accounts = a.accounts;
     state.monitor = s.status;
+    state.link.ok = true;
+    state.link.fails = 0;
+    state.link.lastOk = Date.now();
     renderAccounts(); renderCards(); renderStatus();
     const sel = $('evtAccount');
     const cur = sel.value;
@@ -751,10 +893,26 @@ async function refresh() {
       state.accounts.map(x => `<option value="${x.id}">${esc(x.name)}</option>`).join('');
     sel.value = cur;
   } catch (e) {
-    toast('加载失败: ' + e.message, 'err');
-    // 同上：10 秒一次的轮询偶发失败，不该把上一条成功渲染的账号列表清空。
+    const wasOk = state.link.ok;
+    state.link.fails += 1;
+    // 只有「请求根本没到达」才算连不上服务。服务回了 500 说明它是活的，顶栏不该
+    // 改判。令牌框开着的时候也不改判——用户正在输令牌，此时报「连不上服务」会把人
+    // 引到完全错的方向。
+    const unreachable = e.isNetwork && !authPending;
+    // 从来没连上过（手机上打开时电脑就是关着的）→ 立刻认账，别再说「连接中」；
+    // 之前连上过 → 连续两次失败才改判，免得一次抖动就把顶栏刷成不可达。
+    if (unreachable && (state.link.lastOk === 0 || state.link.fails >= 2)) state.link.ok = false;
+    // 判定不可达之后顶栏会一直写着，这里就不必每 10 秒再弹一条一样的红条了。
+    if (state.link.ok || wasOk) toast('加载失败: ' + e.message, 'err', 'loadfail');
+    renderStatus();
+    // 只在还没有内容时补占位：10 秒一次的轮询偶发失败，不该把已渲染的账号列表清空。
     const box = $('accountTable');
-    if (!box.innerHTML.trim()) box.innerHTML = '<div class="empty">加载失败: ' + esc(e.message) + '</div>';
+    if (!box.innerHTML.trim()) {
+      box.innerHTML = unreachable
+        ? '<div class="empty">连不上本地服务：' + esc(e.message)
+          + '<br><span class="hint">确认电脑已开机、程序正在运行。</span></div>'
+        : '<div class="empty">加载失败: ' + esc(e.message) + '</div>';
+    }
   }
 }
 
@@ -844,7 +1002,7 @@ async function probeNow() {
     toast(bad.length || unconfirmed.length ? summary.join('，') : r.results.length ? '全部在线' : '没有可检测账号', bad.length ? 'err' : unconfirmed.length ? '' : 'ok');
     await pollProgress();        // 收尾再拉一次，拿到最后几条
     refresh();
-    if (!$('tab-events').hidden) loadEvents();
+    if (!$('tab-events').hidden) loadEvents(true);
   } catch (e) { toast('检测失败: ' + e.message, 'err'); }
   finally {
     clearInterval(watcher);
@@ -881,6 +1039,7 @@ async function saveSettings() {
     headless: $('setHeadless').value === '1',
     autostart: $('setAutostart').value === '1',
   };
+  const wasAlive = state.monitor.alive;
   await once($('btnSaveSettings'), async () => {
     try {
       await api('/api/settings', { method:'PUT', body: {
@@ -889,8 +1048,15 @@ async function saveSettings() {
         notify_key: $('setNotifyKey').value.trim(),
         notify_after_failures: +$('setNotifyAfter').value || 3,
       }});
-      await api('/api/monitor/start', { method:'POST', body });
-      toast('设置已保存并应用', 'ok');
+      // 原来这里无条件调 monitor/start：只想改个通知渠道的人会连带把监控开起来，
+      // 而「浏览器登录」在无头关着的时候会当场弹出一个窗口。监控本来就在跑，
+      // 才重启它来套用新间隔；没在跑就只存下来，并说清楚要等启动才生效。
+      if (wasAlive) {
+        await api('/api/monitor/start', { method:'POST', body });
+        toast('设置已保存并应用', 'ok');
+      } else {
+        toast('设置已保存；监控未启动，新间隔要等启动后生效', 'ok');
+      }
       refresh();
     } catch (e) { toast('保存失败: ' + e.message, 'err'); }
   });
@@ -972,15 +1138,17 @@ $('btnSave').onclick = saveAccount;
 $('modalBg').onclick = e => { if (e.target === $('modalBg')) $('modalBg').classList.remove('open'); };
 $('btnToggleMonitor').onclick = toggleMonitor;
 $('btnProbe').onclick = probeNow;
-$('btnRefreshEvents').onclick = loadEvents;
-$('evtAccount').onchange = loadEvents;
+$('btnRefreshEvents').onclick = () => loadEvents(true);
+$('evtAccount').onchange = () => loadEvents(true);
+$('evtLevel').onchange = () => loadEvents(true);
 $('btnClearEvents').onclick = async () => {
   if (!confirm('清空全部事件日志？')) return;
   // api() 失败是抛异常。不接住的话这个 async 回调只留一条 unhandled rejection：
   // 界面既不清空也不报错，用户看到的就是「点了没反应」。
   try {
     await api('/api/events/clear', { method:'POST', body:{} });
-    loadEvents();
+    _eventsSig = '';   // 清空后签名必然变，但显式重置更稳妥
+    loadEvents(true);
   } catch (e) {
     toast('清空失败: ' + e.message, 'err');
   }
@@ -1022,6 +1190,10 @@ async function loadPower() {
   loadWakeHint();
   loadWakePlans();
   loadDevices();
+  // 体检要跑 powercfg / PowerShell，在 Windows 上是几秒级的，而每次切回电源页
+  // 都会调到这里——反复干等同一份结果没有意义。首次进页自动跑一次，之后只靠
+  // 「电源体检」按钮刷新。注意用 loadPowerPrep 而不是 runPowerPrep：后者会为
+  // 「可自动修复」的项目弹确认框，自动跑一次就弹框等于替用户按了按钮。
   loadPowerPrep();
 }
 
@@ -1134,9 +1306,13 @@ function renderPowerPrep(items) {
   }</tbody></table>`;
 }
 
+let _prepLoaded = false;
+
 async function loadPowerPrep() {
+  if (_prepLoaded) return;
   try {
     const { items } = await api('/api/doctor/power');
+    _prepLoaded = true;
     renderPowerPrep(items);
   } catch (e) { $('powerPrepResult').innerHTML = '<div class="empty">体检失败: ' + esc(e.message) + '</div>'; }
 }
@@ -1145,6 +1321,7 @@ async function runPowerPrep() {
   $('powerPrepResult').innerHTML = '<div class="empty">体检中…</div>';
   try {
     const { items } = await api('/api/doctor/power');
+    _prepLoaded = true;
     renderPowerPrep(items);
     const fixable = items.filter(i => i.fixable && ['warn', 'manual'].includes(i.status));
     if (fixable.length && confirm(`有 ${fixable.length} 项可自动修复（快速启动 / 网卡唤醒 / 睡眠超时 / 远程桌面等），是否执行？`)) {
@@ -1250,10 +1427,33 @@ $('btnGenPair').onclick = generatePair;
 initAuth().then(async data => {
   if (await claimPairFromHash()) return;
   if (!authRequired || data.authenticated) refresh();
-}).catch(err => showAuth('无法连接服务：' + err.message));
-// 常态轮询：10 秒刷一次账号与状态，同时低频拉进度，
+}).catch(err => {
+  if (err.isNetwork) {
+    // 请求没到达服务。原来这里弹的是令牌框，方向完全错了——电脑关着的时候根本
+    // 没有令牌可输。改为把顶栏点亮成不可达，并说清该去查什么。
+    state.link.fails = 1;
+    state.link.ok = false;
+    renderStatus();
+    toast('连不上本地服务：' + err.message + '（确认电脑已开机、程序正在运行）', 'err', 'link');
+  } else {
+    // 服务是活的，只是这一下没给出认证状态（多半还在初始化）。谎报「连不上」会让
+    // 人跑去检查电脑，而其实等一下就好；重试交给下面的轮询。
+    renderStatus();
+    toast('无法读取认证状态：' + err.message, 'err', 'authstatus');
+  }
+});
+// 常态轮询：10 秒刷一次账号与状态，事件页开着时顺带刷新它，
 // 这样后台监控触发重连时页面也会自动显示阶段，不必手动点。
-state.timer = setInterval(() => { refresh(); pollProgress(); }, 10000);
+state.timer = setInterval(async () => {
+  // initAuth 只在启动时跑一次。启动那一刻服务可能还没就绪（刚开机、程序在初始化），
+  // 不在这里重试的话页面会永远停在「连不上服务」，哪怕服务几秒后就起来了。
+  if (!authReady) {
+    try { await initAuth(); } catch { /* 还没起来，下一轮再说 */ }
+  }
+  refresh();
+  pollProgress();
+  if (!$('tab-events').hidden) loadEvents();
+}, 10000);
 </script>
 </body>
 </html>
