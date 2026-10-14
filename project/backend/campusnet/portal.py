@@ -335,15 +335,22 @@ def classify_response(body: str, status: int, final_url: str) -> LoginResult:
         if token in low.replace(" ", ""):
             return LoginResult("success", "门户返回成功", token)
 
-    if any(k in low for k in ("already online", "已在线", "already_online", "在线", "重复登录")):
-        return LoginResult("already_online", "账号已在线，无需重复登录", "")
-
     for token in ("passworderror", "密码错误", "密码不正确", "wrongpassword", "invalidpassword"):
         if token in low:
             return LoginResult("failed", "门户提示密码错误", token, terminal=True)
 
     if "userdeny" in low:
         return LoginResult("failed", "门户拒绝（账号被禁用或凭据无效）", "userdeny", terminal=True)
+
+    # 「已在线」必须排在两条凭据失败之后：它是「没登上但看着没事」的兜底判定，
+    # 排在前面就会盖住明确的密码错误——被盖住的那次不落 terminal，600 秒冷却
+    # 不启动，程序拿着错密码一轮轮重登，有锁号风险。原来这一条还收了裸的
+    # 「在线」子串，凡是正文里带「在线客服」「当前在线人数」「在线时长」的页面
+    # 都会被判成已在线——裸子串要换成「已经在线」这类完整措辞。
+    # 判断放在通用失败标记（result:0 等）之前：Dr.COM 的已在线应答可能就长成
+    # {"result":0,"msg":"您已在线"}，那些标记比这条更弱。
+    if any(k in low for k in ("already online", "已在线", "已经在线", "already_online", "重复登录")):
+        return LoginResult("already_online", "账号已在线，无需重复登录", "")
 
     for token in ('"result":0', '"success":false', "登录失败", "认证失败"):
         if token.replace(" ", "") in low.replace(" ", ""):

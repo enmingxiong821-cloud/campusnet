@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from campusnet.portal import (
     LoginResult,
     classify_response,
@@ -142,9 +144,50 @@ def test_classify_userdeny_is_terminal() -> None:
     assert r.terminal is True
 
 
-def test_classify_already_online() -> None:
-    r = classify_response("<div>您已经在线</div>", 200, "http://x/")
+@pytest.mark.parametrize(
+    "body",
+    [
+        "<div>您已经在线</div>",
+        "<div>您已在线</div>",
+        "<div>该账号已在线，请勿重复登录</div>",
+        "<div>You are already online</div>",
+    ],
+)
+def test_classify_already_online(body: str) -> None:
+    """几种真实措辞都要认出来。
+
+    「您已经在线」里没有连续的「已在线」三个字——原来那条裸的「在线」子串
+    恰好蒙对了，换掉裸子串时必须把「已经在线」补上。
+    """
+    r = classify_response(body, 200, "http://x/")
+
     assert r.state == "already_online" and r.ok
+
+
+def test_classify_credential_failure_wins_over_already_online() -> None:
+    """明确的密码错误不能被「已在线」盖掉。
+
+    `already_online` 的 `ok` 为真，且不带 terminal——被盖住的那次不触发
+    600 秒冷却，程序就拿着错密码一轮轮重登（有锁号风险）。
+    """
+    r = classify_response(
+        "<html>密码错误，请重试；如需帮助请点击在线客服</html>", 200, "http://x/"
+    )
+
+    assert r.state == "failed"
+    assert r.terminal is True
+
+
+def test_classify_bare_online_substring_is_not_already_online() -> None:
+    """正文里带「在线」不等于「账号已在线」。
+
+    门户页脚常写「在线客服」「当前在线人数」，登录页也可能带「在线时长」。
+    原来这一条收的是裸的「在线」子串，这些页面全会被判成已在线。
+    """
+    for body in ("<div>当前在线人数：37</div>", "<a>在线客服</a>", "<span>在线时长 2:03</span>"):
+        r = classify_response(body, 200, "http://10.0.0.1/eportal/portal/login")
+
+        assert r.state == "failed", body
 
 
 def test_classify_still_on_login_page_is_failure() -> None:
