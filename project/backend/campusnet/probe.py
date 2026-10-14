@@ -134,6 +134,14 @@ def probe(
     """
     if not url:
         url = DEFAULT_PROBES[0]
+    # 只认 http/https。urllib 的 opener 默认挂着 FileHandler，喂 file:// 进去会把
+    # 本地文件读出来当正文（online 分支的 detail 就是正文前 120 字节），而 API 的
+    # url 参数是外部可控的；ftp:// 同理。这里挡在发请求之前。
+    scheme = urlsplit(url).scheme.lower()
+    if scheme not in ("http", "https"):
+        return ProbeResult(
+            False, "unsupported_scheme", f"只支持 http/https，收到 {scheme or '空'}", url
+        )
     if _depth >= MAX_REDIRECTS:
         return ProbeResult(False, "redirect_loop", f"跳转超过 {MAX_REDIRECTS} 层，判定为跳转环", url)
     # 同一次探活只建一个 opener：每层重建一次，Cookie 与处理器状态

@@ -15,7 +15,9 @@ param(
 
 $ErrorActionPreference = "Stop"
 $Repo = "https://github.com/enmingxiong821-cloud/campusnet.git"
-$RawBase = "https://raw.githubusercontent.com/enmingxiong821-cloud/campusnet"
+# 没有 git 时的兜底走分支归档。raw.githubusercontent.com 只发单个文件，
+# 拿 "$RawBase/$Branch" 去请求等于要仓库根目录下一个叫 main 的文件——404。
+$ZipBase = "https://github.com/enmingxiong821-cloud/campusnet/archive/refs/heads"
 
 function Say($msg) { Write-Host $msg }
 function Die($msg) {
@@ -79,7 +81,7 @@ if (Test-Path $RunPy) {
             # 完整性靠 HTTPS 传输本身；Release 分发包才有 sha256。
             Say "[信息] 没找到 git，改用 zip 下载……"
             $Zip = Join-Path $env:TEMP "campusnet-$Branch.zip"
-            Invoke-WebRequest -Uri "$RawBase/$Branch" -OutFile $Zip
+            Invoke-WebRequest -Uri "$ZipBase/${Branch}.zip" -OutFile $Zip
             Expand-Archive -Path $Zip -DestinationPath $InstallDir -Force
             $inner = Get-ChildItem $InstallDir -Directory | Where-Object { $_.Name -like "campusnet-*" } | Select-Object -First 1
             if ($inner) {

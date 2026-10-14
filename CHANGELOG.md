@@ -6,7 +6,58 @@
 变更条目取自提交记录。**未发布**一节是 `main` 上已有、尚未打 tag 的内容；
 这里只记「用户能感知到什么变了」，实现细节看对应提交。
 
-## 未发布
+## [未发布]
+
+一次全项目体检后的加固：三处安全口子、若干只在特定环境下才现形的行为 bug，
+以及分发与安装链路上几处已经断掉的东西。
+
+### 安全
+
+- **门户探测与发现只接受 http/https**：`probe` 与 `discover` 的地址参数是外部可控的，
+  而 urllib 默认挂着 FileHandler，喂一个 `file://` 进来会把本地文件当门户页读出来
+  （探测结果里的正文就是页面开头一段）。非 http/https 一律拒掉，发现流程退回默认探活地址。
+- **配对码防猜解**：以前只有「码存在但过期」才累计失败次数，猜一个不存在的码不算数——
+  而这正是暴力猜解走的那条路。现在同一个来源猜错也计数（5 分钟窗口内到限即 429）；
+  同一个码被两个请求同时领，也只有第一个能成功。
+- **加密密钥文件以 0600 直接建出**：原来是先按 umask（通常 0644）落盘再 chmod，
+  这中间同机其他用户能读到这把钥匙，而它解开库里所有账号密码。
+
+### 修复
+
+- **windows 上必然失败的 4 条用例**：种子地址是回环（`127.0.0.1`）时会被当成
+  「DNS 劫持」，凭空多扫一个 `http://127.0.0.1/`，用例红绿于是取决于那台机器上
+  80 端口有没有人应答（Windows runner 上有系统服务占着）。回环与 IP 字面量不再参与劫持判定。
+- **唤醒计划一天可能发两次**：判断「今天发过没有」从按时刻改成按日期，
+  时钟被 NTP 或手动回拨到触发点之前时不再重复发 WOL。
+- **锁文件写错人**：抢锁失败的实例会把持有者的 PID 抹掉，导致诊断指错人、
+  锁文件残留在盘上；现在拿到锁之后才写 PID。
+- **网卡名带单引号会让关机前置准备静默失败**：拼 PowerShell 命令前先按 PS 规则转义。
+- **`powercfg` 只认中文输出**：换成中英双语匹配，英文版 Windows 上不再读不到交流电源设置。
+- **唤醒端口越界时错误看不懂**：`port` 不在 1-65535 时直接给出明确错误，
+  而不是让 `OverflowError` 冒到调用方、计划里只留一条 warning。
+- **设置项类型往返丢失**：字符串恰好是合法 JSON（`"123"` / `"true"` / `"null"`）
+  读回来会变成 int / bool / None，现在统一按字符串存。
+- **接口参数不再能拖垮服务**：`timeout` / `limit` / `port` 夹到合理区间，
+  越界端口报 400 而不是 500，免得一个超长请求占住一条连接。
+
+### 工程与分发
+
+- 分发 zip 里补上 `CHANGELOG.md` 与 `CONTRIBUTING.md`——README 里它们都是相对链接，
+  漏发就是死链；相应地，README 相对链接的校验从「只查 `doc/`」放宽到「所有相对路径」。
+- `install.ps1` 的 zip 兜底地址修正（原来指向 raw 根路径，必然 404）；
+  `install.sh` 补上没装 git 时的分支归档兜底。
+- 镜像 `:latest` 只由正式版更新，预发布 tag 不再顶掉它；
+  Release 前置校验加上与 CI 同款的覆盖率门禁；CI 的 Python 作业加超时上限。
+- `.dockerignore` 补上 `utils/local_sensitive.txt`；扩展清单版本号与 2.0.0 对齐、
+  去掉用不到的 `tabs` 权限；控制台两个「立即检测」入口共用一把锁，连点不会再并发跑两轮。
+
+## [2.0.0] - 2026-10-14
+
+1.x 只解决「校园网断了自己重连」。2.0 把它做成「有电就联网、出门也能管」，
+三件事都齐了：**无人值守**（系统级 service / plist 无需登录即启动、容器部署与
+GHCR 多架构镜像、四平台单文件分发）、**远程开关机**（前置条件逐项体检并一键修、
+唤醒计划按时间表发魔术包、macOS 无人登录也能关）、**多端接入**（PWA 加到主屏离线
+可用、扫码配对免手抄令牌、Tailscale / RustDesk 向导）。
 
 ### 新增
 
@@ -47,6 +98,11 @@
 ### 修复
 
 - `notify`：refresh 改用 `getattr` 容错，最小假 Notifier 不再抛 `AttributeError`。
+- **macOS 无人登录时关不掉机**：`power off` / `power reboot` 原先在 macOS 上一律走
+  `osascript`，而它只在图形登录会话里可用——LaunchDaemon（无人登录）与 SSH 会话
+  都拿不到 Apple Events，命令失败后表现为「点了关机，什么都没发生」，而那正是
+  「无需登录」要解决的场景。现在无图形会话时回退到 `shutdown`；有图形会话时仍走
+  `osascript`，保留「应用能正常退出」的优雅关机语义。
 
 ### 变更
 
@@ -185,7 +241,8 @@
 - 开源发布准备（README / LICENSE / CI / Release）、自测指南、
   端口冲突应对说明，以及「提交目标为 `origin/main`」的入库约定。
 
-[未发布]: https://github.com/enmingxiong821-cloud/campusnet/compare/v1.6.0...HEAD
+[未发布]: https://github.com/enmingxiong821-cloud/campusnet/compare/v2.0.0...HEAD
+[2.0.0]: https://github.com/enmingxiong821-cloud/campusnet/compare/v1.6.0...v2.0.0
 [1.6.0]: https://github.com/enmingxiong821-cloud/campusnet/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/enmingxiong821-cloud/campusnet/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/enmingxiong821-cloud/campusnet/compare/v1.3.0...v1.4.0

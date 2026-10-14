@@ -43,7 +43,9 @@ def shutdown_command(delay: int = 0) -> list[str]:
     if sys.platform == "win32":
         return ["shutdown", "/s", "/t", str(delay)]
     if sys.platform == "darwin":
-        return ["osascript", "-e", 'tell application "System Events" to shut down']
+        if _macos_gui_session():
+            return ["osascript", "-e", 'tell application "System Events" to shut down']
+        return ["shutdown", "-h", "now"]
     if shutil.which("systemctl"):
         return ["systemctl", "poweroff"]
     return ["shutdown", "-h", "now"]
@@ -54,7 +56,9 @@ def reboot_command(delay: int = 0) -> list[str]:
     if sys.platform == "win32":
         return ["shutdown", "/r", "/t", str(delay)]
     if sys.platform == "darwin":
-        return ["osascript", "-e", 'tell application "System Events" to restart']
+        if _macos_gui_session():
+            return ["osascript", "-e", 'tell application "System Events" to restart']
+        return ["shutdown", "-r", "now"]
     if shutil.which("systemctl"):
         return ["systemctl", "reboot"]
     return ["shutdown", "-r", "now"]
@@ -91,6 +95,27 @@ def _run_capture(args: list[str]) -> tuple[bool, str]:
         return False, ""
     text = ((proc.stdout or b"") + (proc.stderr or b"")).decode("utf-8", "replace")
     return proc.returncode == 0, text
+
+
+def _macos_gui_session() -> bool:
+    """当前进程有没有图形登录会话。
+
+    macOS 的 `osascript` 要经 Apple Events 找到 System Events，而它只存在于
+    Aqua 会话里。LaunchDaemon（无人登录）与 SSH 会话都拿不到，这时 osascript
+    会失败，用户看到的是「点了关机，什么都没发生」——而这两种恰恰是
+    「无需登录」的目标场景本身，所以不能只认 osascript。
+
+    `launchctl managername` 是最省事的判据：图形会话是 Aqua，
+    LaunchDaemon 是 System，SSH 是 Background / StandardIO。
+    这里只认「输出里有 Aqua」，不去逐字比对某个固定串——判据的关键是
+    「在不在图形域里」，多几个空白或前缀都不该让它失效。
+    """
+    if os.environ.get("SSH_CONNECTION") or os.environ.get("SSH_TTY"):
+        return False
+    if not shutil.which("launchctl"):
+        return False
+    ok, text = _run_capture(["launchctl", "managername"])
+    return ok and "aqua" in text.strip().lower()
 
 
 def local_macs(platform: str | None = None) -> list[str]:
@@ -162,13 +187,21 @@ def wake_info(port: int = WOL_PORT) -> dict[str, object]:
 
 def wake(mac: str, broadcast: str = "255.255.255.255", port: int = WOL_PORT) -> str:
     """发一个 WOL 魔术包：必须由同一二层里的设备执行才有用。"""
+    try:
+        port_num = int(port)
+    except (TypeError, ValueError) as exc:
+        raise PowerError(f"端口非法：{port!r}") from exc
+    # 越界端口 sendto 抛的是 OverflowError（不是 OSError），不先挡掉的话会一路
+    # 冒到调用方，计划里那条也只能留下一条看不懂的 warning。
+    if not 1 <= port_num <= 65535:
+        raise PowerError(f"端口 {port_num} 超出 1-65535")
     packet = magic_packet(mac)
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-        sock.sendto(packet, (broadcast, int(port)))
+        sock.sendto(packet, (broadcast, port_num))
     except OSError as exc:
         raise PowerError(f"{type(exc).__name__}: {exc}") from exc
     finally:
         sock.close()
-    return f"{broadcast}:{port}"
+    return f"{broadcast}:{port_num}"

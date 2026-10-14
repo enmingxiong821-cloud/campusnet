@@ -153,17 +153,23 @@ def test_key_file_unwritable_falls_back_to_random(
 
 
 def test_expanduser_applied_to_key_path(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """路径里的 ~ 要展开，写到字面量 "~" 目录里会静默失败。"""
+    """路径里的 ~ 要展开，写到字面量 "~" 目录里会静默失败。
+
+    家目录指到 tmp_path：这条用例原本往真实家目录写文件再删掉，
+    撞上用户同名的文件就是数据丢失，断言失败时还会留下垃圾。
+    """
     monkeypatch.delenv("CAMPUSNET_OBF_KEY", raising=False)
     monkeypatch.setenv("CAMPUSNET_KEY_FILE", "~/test-campaignnet-obf.key")
-    expected = os.path.expanduser("~/test-campaignnet-obf.key")
-    try:
-        crypto._local_key()
-        assert os.path.exists(expected), "应写到展开后的用户目录"
-        os.remove(expected)
-    finally:
-        if os.path.exists(expected):
-            os.remove(expected)
+    # expanduser 的家目录来源随平台不同（POSIX 看 HOME，Windows 看 USERPROFILE），
+    # 两个都指过去，免得在另一平台上又落回真家目录。
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setenv("USERPROFILE", str(fake_home))
+
+    crypto._local_key()
+
+    assert (fake_home / "test-campaignnet-obf.key").exists(), "应写到展开后的用户目录"
 
 
 def test_keystream_length_is_exact() -> None:

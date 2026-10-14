@@ -6,6 +6,7 @@ import json
 import mimetypes
 import sys
 import threading
+import time
 import urllib.parse
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -306,12 +307,24 @@ def routes_accounts(store: Store) -> dict[tuple[str, str], Handler]:
     }
 
 
+def _clamped_float(value: Any, default: float, low: float, high: float) -> float:
+    """把查询参数里的数值夹到区间内。
+
+    非法值退回默认值（探活这类接口不值得为它报 400），但不能任由调用方丢一个超大
+    timeout 进来：ThreadingHTTPServer 来者不拒地开线程，一个长请求就占住一条。
+    """
+    try:
+        return max(low, min(high, float(value)))
+    except (TypeError, ValueError):
+        return default
+
+
 def routes_actions(
     store: Store, manager: MonitorManager
 ) -> dict[tuple[str, str], Handler]:
     def probe_now(ctx: dict[str, Any], h: ApiHandler) -> None:
         url = (ctx["query"].get("url") or [probe_mod.DEFAULT_PROBES[0]])[0]
-        timeout = float((ctx["query"].get("timeout") or ["5"])[0])
+        timeout = _clamped_float((ctx["query"].get("timeout") or ["5"])[0], 5.0, 0.5, 30.0)
         result = probe_mod.probe(url, timeout=timeout)
         h._send(HTTPStatus.OK, {"ok": True, "result": result.__dict__})
 
@@ -333,7 +346,7 @@ def routes_actions(
     def discover_portal(ctx: dict[str, Any], h: ApiHandler) -> None:
         query = ctx["query"]
         seed = (query.get("seed") or [""])[0]
-        timeout = float((query.get("timeout") or ["4"])[0])
+        timeout = _clamped_float((query.get("timeout") or ["4"])[0], 4.0, 0.5, 30.0)
         scan = (query.get("scan") or ["1"])[0] not in ("0", "false", "no")
         report = discovery.discover(
             seed=seed, timeout=timeout, include_gateway_scan=scan
@@ -405,7 +418,7 @@ def routes_actions(
         monitor = manager.ensure(store)
         if (query.get("latest") or [""])[0] not in ("", "0", "false"):
             payload = monitor.latest_progress(
-                limit=int((query.get("limit") or ["30"])[0])
+                limit=int(_clamped_float((query.get("limit") or ["30"])[0], 30, 1, 1000))
             )
         else:
             payload = monitor.progress_since(seq, account_id=account_id)
@@ -472,9 +485,14 @@ def routes_monitor(
 def routes_events(store: Store) -> dict[tuple[str, str], Handler]:
     def list_events(ctx: dict[str, Any], h: ApiHandler) -> None:
         query = ctx["query"]
-        limit = int((query.get("limit") or ["200"])[0])
+        limit = int(_clamped_float((query.get("limit") or ["200"])[0], 200, 1, 2000))
         account_raw = (query.get("account_id") or [""])[0]
-        account_id = int(account_raw) if account_raw else None
+        try:
+            account_id = int(account_raw) if account_raw else None
+        except ValueError:
+            raise ApiError(
+                HTTPStatus.BAD_REQUEST, f"account_id 非法: {account_raw}"
+            ) from None
         h._send(
             HTTPStatus.OK,
             {
@@ -701,6 +719,8 @@ def routes_wake(store: Store) -> dict[tuple[str, str], Handler]:
             port = int(payload.get("port", 9))
         except (TypeError, ValueError):
             raise ApiError(HTTPStatus.BAD_REQUEST, "port 必须是整数") from None
+        if not 1 <= port <= 65535:
+            raise ApiError(HTTPStatus.BAD_REQUEST, f"port 超出 1-65535：{port}")
         return WakePlan(
             name=name,
             mac=mac,
@@ -801,6 +821,31 @@ def routes_wake(store: Store) -> dict[tuple[str, str], Handler]:
     }
 
 
+_PAIR_SOURCE_FAILURES: dict[str, list[float]] = {}
+_PAIR_SOURCE_WINDOW = 300.0
+
+
+def _pair_source_failed(address: Any) -> bool:
+    """按来源记一次「码不存在」的尝试，返回是否已达上限。
+
+    不存在的配对码在 pair_codes 里没有行可加计数，只能记在内存里。窗口取配对码的
+    TTL（5 分钟）：猜解本来就只能在这个窗口内完成，重启后清零可以接受。
+    """
+    from . import pair as pair_mod
+
+    source = address[0] if address else "?"
+    now = time.monotonic()
+    for key in [
+        k
+        for k, hits in _PAIR_SOURCE_FAILURES.items()
+        if not any(now - t < _PAIR_SOURCE_WINDOW for t in hits)
+    ]:
+        del _PAIR_SOURCE_FAILURES[key]
+    hits = _PAIR_SOURCE_FAILURES.setdefault(source, [])
+    hits.append(now)
+    return len(hits) >= pair_mod.MAX_FAILURES
+
+
 def routes_pair(
     store: Store, auth: ApiAuth | None
 ) -> dict[tuple[str, str], Handler]:
@@ -838,6 +883,12 @@ def routes_pair(
         record = store.get_pair_code(chash)
         if record is None:
             store.add_event("配对失败：无效配对码", level="warning", stage="pair")
+            # 猜一个不存在的码原本不计数，「失败锁定」就只在过期码上生效，
+            # 而这正是暴力猜解会走的那条路。
+            if _pair_source_failed(h.client_address):
+                raise ApiError(
+                    HTTPStatus.TOO_MANY_REQUESTS, "尝试次数过多，请稍后再试"
+                )
             raise ApiError(HTTPStatus.UNAUTHORIZED, "配对码无效或已过期")
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         if record["expires_at"] < now:
@@ -855,7 +906,10 @@ def routes_pair(
                 HTTPStatus.TOO_MANY_REQUESTS, "尝试次数过多，请重新生成配对码"
             )
         user_agent = h.headers.get("User-Agent", "")
-        store.mark_pair_code_used(chash, user_agent)
+        if not store.mark_pair_code_used(chash, user_agent):
+            # 上面的 used_at 检查到这一步之间，码可能已被另一个并发请求领走。
+            store.add_event("配对失败：配对码已被使用", level="warning", stage="pair")
+            raise ApiError(HTTPStatus.UNAUTHORIZED, "配对码已被使用")
         store.add_event("扫码配对成功", level="info", stage="pair")
         _notify_event(store, "pair", "📱 有设备通过配对码登录了控制台")
         if auth is not None:
