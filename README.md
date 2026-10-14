@@ -300,7 +300,9 @@ python utils/run.py bootstart install --mode task
 ```
 
 它会注册一个「开机触发、无论是否登录都运行」的 Windows 计划任务，执行时向你索取
-一次当前账户密码（只从标准输入交给任务计划程序保存，不进命令行、不进环境变量）。
+一次当前账户密码：你输入的那次不进命令行（命令行字符串会出现在进程列表里），
+而是经子进程环境变量交给 PowerShell，再由任务计划程序存进自己的凭据库。
+同机同用户的其他进程理论上仍能读到那个环境变量。
 `status` 会告诉你当前生效的是哪种载体。
 
 Web 控制台的「设置」页也有对应开关。三种系统的落地载体：
@@ -361,11 +363,11 @@ http://www.msftconnecttest.com/connecttest.txt, http://captive.apple.com/hotspot
 
 ```bash
 # 先看清当前连的是什么网（不建账号、不碰数据库）
-python -m campusnet add --show-ssid
+python utils/run.py add --show-ssid
 # 当前 Wi-Fi：CAMPUS
 
 # 建号时直接带上规则
-python -m campusnet add --name 宿舍 --portal http://10.0.0.1/eportal/portal/login \
+python utils/run.py add --name 宿舍 --portal http://10.0.0.1/eportal/portal/login \
   --username 20240001 --password '******' --wifi-ssid CAMPUS
 ```
 
@@ -637,7 +639,7 @@ project/backend/campusnet/
   bootstart.py      开机自启动（Windows/Linux/macOS 三平台载体）
   logging_setup.py  运行日志（按天落盘 + 保留策略 + print 双写）
   doctor.py         一键自检
-  cli.py            命令行入口
+  cli/              命令行入口（account / net / power / service / system 分主题存放）
 project/frontend/
   index.html        Web 控制台
   extension/        浏览器插件（MV3）
@@ -650,6 +652,7 @@ project/frontend/
 | `CAMPUSNET_API_PORT` | 2268 | 服务端口 |
 | `CAMPUSNET_DB` | `database/campusnet.db` | 数据库路径 |
 | `CAMPUSNET_OBF_KEY` | 自动生成 | 密码混淆密钥 |
+| `CAMPUSNET_TRUST_PROXY` | 关 | 服务前面放了反向代理时才设 `1`（见 [SECURITY.md](SECURITY.md)） |
 | `PYTHONIOENCODING` | — | Linux 下建议设为 `utf-8` |
 
 ### 控制台 API
