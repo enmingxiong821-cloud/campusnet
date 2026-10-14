@@ -1201,7 +1201,9 @@ def test_duplicate_content_length_is_rejected(api: _Api) -> None:
 # ---------- 旧版 _dispatch 分支 ----------
 
 
-def test_base_dispatch_handles_all_methods(store: Store) -> None:
+def test_base_dispatch_handles_all_methods(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """不装 _install_dispatch 时，ApiHandler._dispatch / do_* 仍是活代码路径。"""
     from http.server import ThreadingHTTPServer
 
@@ -1226,8 +1228,11 @@ def test_base_dispatch_handles_all_methods(store: Store) -> None:
         status, data = call(f"{base}/api/accounts", "POST", {})
         assert status == 400
         # 处理器抛非 ApiError -> 兜底 500，且记一条事件
-        status, data = call(f"{base}/api/probe?timeout=abc")
-        assert status == 500 and "ValueError" in data["error"]
+        # 载体是「让 store 抛」：以前这里借的是「timeout 传非法值会 ValueError」，
+        # 而那个参数已经改成夹取，用例会静默变成在测 200，测不到兜底。
+        monkeypatch.setattr(store, "list_accounts", lambda: 1 / 0)
+        status, data = call(f"{base}/api/health")
+        assert status == 500 and "ZeroDivisionError" in data["error"]
     finally:
         httpd.shutdown()
         httpd.server_close()
@@ -1681,3 +1686,46 @@ def test_serve_non_blocking_releases_on_shutdown(
     httpd.server_close()
     assert manager.stopped >= 1
     assert lock.releases == 1
+
+
+# ---------- 参数边界与配对码限速 ----------
+
+
+def test_pair_claim_throttles_missing_codes(api: _Api) -> None:
+    """猜不存在的码原本不计数，等于给在线暴力猜解开了绿灯。"""
+    from campusnet import pair as pair_mod
+
+    server_mod._PAIR_SOURCE_FAILURES.clear()
+    try:
+        statuses = [
+            call(f"{api}/api/pair/claim", "POST", {"code": f"AAAAA{i}"})[0]
+            for i in range(pair_mod.MAX_FAILURES)
+        ]
+    finally:
+        # 这张表是模块级的，不清会串到别的用例上
+        server_mod._PAIR_SOURCE_FAILURES.clear()
+
+    assert statuses[:-1] == [401] * (pair_mod.MAX_FAILURES - 1)
+    assert statuses[-1] == 429
+
+
+def test_events_limit_is_clamped(api: _Api) -> None:
+    """limit 传非法值不报错，夹到区间内照常返回。"""
+    status, data = call(f"{api}/api/events?limit=abc")
+
+    assert status == 200 and data["ok"] is True
+
+
+def test_create_wake_plan_rejects_out_of_range_port(api: _Api) -> None:
+    status, data = call(
+        f"{api}/api/wake-plans",
+        "POST",
+        {
+            "name": "早八",
+            "mac": "AA:BB:CC:DD:EE:FF",
+            "schedule": "07:30",
+            "port": 70000,
+        },
+    )
+
+    assert status == 400 and "65535" in data["error"]

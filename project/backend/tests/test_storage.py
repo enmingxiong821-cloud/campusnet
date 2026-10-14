@@ -322,3 +322,14 @@ def test_device_roundtrip_and_delete(store: Store) -> None:
 
     assert store.delete_device(new_id) is True
     assert store.list_devices() == []
+
+
+def test_setting_string_roundtrip_keeps_type(store: Store) -> None:
+    """字符串恰好是合法 JSON 时也要读回字符串，不能被 json.loads 改成 int/bool/None。"""
+    store.set_setting("note", "123")
+    store.set_setting("flag", "true")
+    store.set_setting("blank", "null")
+
+    assert store.get_setting("note") == "123"
+    assert store.get_setting("flag") == "true"
+    assert store.get_setting("blank") == "null"

@@ -390,9 +390,9 @@ class Store:
 
     # ---------- settings ----------
     def set_setting(self, key: str, value: Any) -> None:
-        blob = (
-            value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
-        )
+        # 一律走 json：裸存字符串时 get_setting 的 json.loads 会把恰好合法的
+        # "123"/"true"/"null" 读成 int/bool/None，类型往返就丢了。
+        blob = json.dumps(value, ensure_ascii=False)
         with _WRITE_LOCK, self._connection() as conn:
             conn.execute(
                 "INSERT INTO settings (key, value) VALUES (?, ?) "
@@ -497,13 +497,19 @@ class Store:
             ).fetchone()
         return dict(row) if row else None
 
-    def mark_pair_code_used(self, code_hash: str, user_agent: str) -> None:
+    def mark_pair_code_used(self, code_hash: str, user_agent: str) -> bool:
+        """领取配对码，返回是否领到。
+
+        `used_at IS NULL` 写在 WHERE 里，并发请求只有一个能改到行——先查后写会在
+        两个请求之间留出窗口，同码被双领，「单次使用」就只是句空话了。
+        """
         with _WRITE_LOCK, self._connection() as conn:
-            conn.execute(
+            cur = conn.execute(
                 "UPDATE pair_codes SET used_at = datetime('now','localtime'), "
-                "user_agent = ? WHERE code_hash = ?",
+                "user_agent = ? WHERE code_hash = ? AND used_at IS NULL",
                 (user_agent, code_hash),
             )
+            return (cur.rowcount or 0) > 0
 
     def record_pair_failure(self, code_hash: str) -> int:
         """记一次失败并返回当前失败次数（用于 3 次锁定）。"""
