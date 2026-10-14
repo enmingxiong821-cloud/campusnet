@@ -21,5 +21,8 @@
 ## 测试
 
 ```
-python -m pytest -q
+python -m pytest project/backend/tests -q
 ```
+
+必须带上路径：本机 `_tmp/` 下放有参考项目源码，裸 `python -m pytest -q` 会把它们的
+测试一并收集进来直接报错（与 `CONTRIBUTING.md` 的说明一致）。

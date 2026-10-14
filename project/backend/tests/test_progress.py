@@ -416,6 +416,12 @@ def test_running_loop_flag_cleared_after_loop_exit(store, account, online_probe)
     store.add_account(account)
     mon = Monitor(store, interval=10)
     mon.start()
-    time.sleep(0.2)
+    # running_loop 是线程自己进循环体时才置 True 的。原来这里死等 0.2 秒：
+    # 线程若还没起来就 stop()，末尾那句 `is False` 本来就成立，等于白测。
+    # 等到真的进了运行态，后面的复位断言才有内容。
+    deadline = time.monotonic() + 5
+    while not mon.running_loop and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert mon.running_loop is True, "循环没能进入运行态，后面的复位断言就没有意义"
     mon.stop()
     assert mon.running_loop is False

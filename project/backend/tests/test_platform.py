@@ -258,8 +258,13 @@ def test_windows_branch_is_the_one_exercised() -> None:
 
 @pytest.mark.skipif(os.name == "nt", reason="仅 POSIX 走 os.kill 分支")
 def test_posix_branch_permission_denied_counts_alive() -> None:
-    """POSIX 下无权限访问别人的进程也算存活。"""
-    lockfile.pid_alive(1)  # pid 1 通常存在且当前用户无权限查询
+    """POSIX 下无权限访问别人的进程也算存活。
+
+    pid 1 一定存在，且当前用户基本无权给它发信号：非 root 走 PermissionError 分支，
+    容器里以 root 跑时 os.kill 直接成功——两条路径都该判「存活」。
+    原先这里只调用不断言，等于什么都没验。
+    """
+    assert lockfile.pid_alive(1) is True
 
 
 # ---------- 锁的边界 ----------

@@ -420,7 +420,9 @@ def test_unknown_page_without_form_reports_error(monkeypatch: pytest.MonkeyPatch
     _install_fake_playwright(monkeypatch, page)
     _patch_probe(monkeypatch, online=True)
 
-    result = browser_login(account)
+    # 页面永远不渲染表单，等的就是那个「等渲染」的上限（默认 min(timeout, 20) 秒）。
+    # 压到 1 秒走的是同一条超时分支，省下 19 秒——六格 CI 上就是两分钟。
+    result = browser_login(account, timeout=1.0)
 
     assert result.state == "error"
     assert "渲染" in result.message or "表单" in result.message
