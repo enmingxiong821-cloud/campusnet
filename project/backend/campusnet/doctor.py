@@ -278,10 +278,17 @@ def run(
 def render(checks: list[Check], *, as_json: bool = False) -> str:
     if as_json:
         return json.dumps([asdict(item) for item in checks], ensure_ascii=False, indent=2)
-    return "\n".join(
+    lines = [
         f"[{_LABEL.get(item.status, item.status)}] {item.name}: {item.detail}"
         for item in checks
-    )
+    ]
+    # 检查顺序是刻意排的（先服务、后网络），不重排；但满屏几十行里 FAIL 容易被
+    # 划过去，所以末尾再点名一次「哪几项要处理」。
+    failed = [item.name for item in checks if item.status == FAIL]
+    if failed:
+        lines.append("")
+        lines.append(f"需要先处理这 {len(failed)} 项：{'、'.join(failed)}")
+    return "\n".join(lines)
 
 
 def exit_code(checks: list[Check]) -> int:

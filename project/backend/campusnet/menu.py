@@ -44,10 +44,14 @@ def _relaunch_elevated(args: list[str]) -> int:
 
 def register_bootstart(ask: Ask, out: Out) -> int:
     """注册开机自启；被系统拒绝时主动提出提权重试。"""
+    from getpass import getpass
+
     from . import bootstart
 
     try:
-        password = ask("输入当前 Windows 账户密码（只交给任务计划程序保存）: ")
+        # 走 getpass 而不是注入的 ask：菜单是双击桌面图标进来的，屏幕后面可能
+        # 还坐着别人。同一个密码在命令行的 bootstart 路径里用的就是 getpass。
+        password = getpass("输入当前 Windows 账户密码（不回显，只交给任务计划程序保存）: ")
     except (EOFError, KeyboardInterrupt):
         return 2
     result = bootstart.install(port=2268, mode="task", password=password)
@@ -77,7 +81,8 @@ def guided_add(ask: Ask, out: Out) -> int:
         return 1
     candidates = report.get("candidates") or []
     if not candidates:
-        out("没发现可用门户。可以先用浏览器打开认证页，再用「portal_probe」投稿一份样本。")
+        out("没发现可用门户。先在浏览器里打开认证页，再执行这条投稿一份脱敏样本：")
+        out("  python utils/run.py portal-report --url <门户地址>")
         return 1
     first = candidates[0]
     candidate = first if isinstance(first, dict) else first.as_dict()
@@ -138,6 +143,31 @@ def install_browser(ask: Ask, out: Out) -> int:
     return 0 if ok else 1
 
 
+def _power_handler(action: str, label: str) -> Callable[[Ask, Out], int]:
+    """关机 / 重启菜单项：选中就直接执行，所以先问一句。
+
+    `power off` 的 --delay 默认是 0，按错一个数字就是当场关机——而「人不在机器
+    旁边」正是这个功能的使用场景，关错了开不回来。同文件里注册自启这种可逆操作
+    都要确认，关机更不该例外。
+    """
+
+    def handler(ask: Ask, out: Out) -> int:
+        from . import cli
+
+        warn = "关机后要靠 WOL / 智能插座才能再开机。" if action == "off" else ""
+        try:
+            answer = ask(f"确认立即{label}？{warn}(y/N) ")
+        except (EOFError, KeyboardInterrupt):
+            out("\n已取消，未执行。")
+            return 0
+        if answer.strip().lower() not in ("y", "yes"):
+            out("已取消，未执行。")
+            return 0
+        return cli.main(["power", action])
+
+    return handler
+
+
 ITEMS: tuple[MenuItem, ...] = (
     MenuItem("打开控制台（浏览器）", "看状态、改设置、点按钮", "启动与检测", ("console",)),
     MenuItem("启动服务", "前台运行，Ctrl+C 停止", "启动与检测", ("serve",)),
@@ -146,8 +176,13 @@ ITEMS: tuple[MenuItem, ...] = (
     MenuItem("查看多端访问", "手机该访问哪个地址、令牌多少", "账号", ("access",)),
     MenuItem("查看自检报告", "含版本更新提示（联网时）", "状态", ("doctor",)),
     MenuItem("查看运行日志", "最近 40 行", "状态", ("logs", "--lines", "40")),
-    MenuItem("远程关机", "关机后要靠 WOL / 插座再开机", "电源与自启", ("power", "off")),
-    MenuItem("远程重启", "", "电源与自启", ("power", "reboot")),
+    # 体检排在关机前面：没确认过前置条件就关机，很可能再也开不回来。
+    MenuItem("电源体检", "关机 / 唤醒的前置条件逐项检查", "电源与自启", ("power", "prep")),
+    MenuItem(
+        "远程关机", "关机后要靠 WOL / 插座再开机", "电源与自启",
+        handler=_power_handler("off", "关机"),
+    ),
+    MenuItem("远程重启", "", "电源与自启", handler=_power_handler("reboot", "重启")),
     MenuItem(
         "注册开机自启", "开机即认证、无需登录（需要管理员）", "电源与自启",
         handler=register_bootstart,

@@ -9,3 +9,15 @@
 # 那个测试会在 Windows 检出上假红。
 packaging/*.service text eol=lf
 packaging/*.plist   text eol=lf
+
+# Windows 批处理反过来必须强制 CRLF。
+#
+# cmd.exe 按字节解析 .bat：多字节字符若在行尾只剩半个，就会把换行吃掉，
+# 后面的 for/if 块随之错乱（install.bat 曾因此整个不执行，只刷一串报错）。
+# 只写 LF 不写 CR 就会触发这个问题，所以发布包里的 .bat 必须是 CRLF。
+#
+# 这里是 eol=crlf 而不是 `-text`：发布流程在 ubuntu 上跑 cp -r + zip，
+# 而 Linux 检出的默认换行是 LF；只有 eol=crlf 才会在检出时就写成 CRLF，
+# 与平台无关。仓库内部仍按 LF 存，diff 不受影响。
+*.bat text eol=crlf
+*.cmd text eol=crlf

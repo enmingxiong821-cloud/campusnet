@@ -1,18 +1,30 @@
 @echo off
-REM æ ¡å›­ç½‘è‡ªè¿ - ä¸€é”®é…ç½®ï¼ˆç¬¬ä¸€æ¬¡ä½¿ç”¨åŒå‡»è¿™ä¸ªï¼‰
-chcp 65001 >nul
+REM CampusNet setup - ±¾ÎÄ¼ş±ØĞë´æ³É GBK(cp936) + CRLF£¬±ğÓÃ LF¡¢Ò²±ğ×ª³É UTF-8£º
+REM   cmd.exe ÊÇ°´×Ö½Ú½âÎöÅú´¦ÀíÎÄ¼şµÄ£¬UTF-8 µÄÖĞÎÄÔÚÕâÀï»á±»µ±³É GBK Ë«×Ö½Ú
+REM   ĞòÁĞ£¬¶à³öÀ´µÄÄÇ¸ö×Ö½Ú»á³ÔµôĞĞÎ²µÄ»»ĞĞ£¬Õû¶Î for/if ¿éËæÖ®´íÂÒ£»
+REM   Ö»Ğ´ LF ²»Ğ´ CR£¬Í¬Ñù»áÈÃ»»ĞĞ±»³Ôµô¡£
 setlocal
 cd /d "%~dp0"
 
-where python >nul 2>nul
-if errorlevel 1 (
-  echo [é”™è¯¯] æ²¡æ‰¾åˆ° python å‘½ä»¤ã€‚
-  echo        è¯·å…ˆå®‰è£… Python 3.10 æˆ–æ›´é«˜ç‰ˆæœ¬ï¼šhttps://www.python.org/downloads/
-  echo        å®‰è£…æ—¶è®°å¾—å‹¾é€‰ "Add python.exe to PATH"ã€‚
+REM Óë install.ps1 ±£³ÖÍ¬Ò»Ì×Ì½²âË³Ğò£ºpy Æô¶¯Æ÷ -> python -> python3£¬¶¼ÒªÇó 3.10+¡£
+REM Ö» where python »áÂ©µô¡¸×°ÁË Python µ«Ã»¹´ Add to PATH¡¹µÄ»úÆ÷£¬ÄÇÖÖ»úÆ÷ÉÏ
+REM py Æô¶¯Æ÷ÍùÍùÊÇÓĞµÄ¡£
+set "PYCMD="
+for %%C in (py python python3) do (
+  if not defined PYCMD (
+    %%~C -c "import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)" >nul 2>nul
+    if not errorlevel 1 set "PYCMD=%%~C"
+  )
+)
+if not defined PYCMD (
+  echo [´íÎó] Ã»ÕÒµ½ Python 3.10 »ò¸ü¸ß°æ±¾¡£
+  echo        °²×°µØÖ·£ºhttps://www.python.org/downloads/
+  echo        °²×°Ê±¼ÇµÃ¹´Ñ¡ "Add python.exe to PATH"£»×°ºÃºóÖØ¿ªÒ»¸ö´°¿ÚÔÙË«»÷±¾ÎÄ¼ş¡£
+  echo        ÒÑÓĞµÄ Python Èô°æ±¾µÍÓÚ 3.10£¬ÇëÉı¼¶ºóÖØÊÔ¡£
   pause
   exit /b 1
 )
 
-python utils\run.py setup %*
+%PYCMD% utils\run.py setup %*
 echo.
 pause

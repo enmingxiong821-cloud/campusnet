@@ -27,6 +27,7 @@ def test_menu_lists_every_capability() -> None:
         "多端访问",
         "自检报告",
         "运行日志",
+        "电源体检",
         "远程关机",
         "远程重启",
         "注册开机自启",
@@ -75,20 +76,29 @@ def test_index_of_returns_zero_when_missing() -> None:
 
 
 def test_register_bootstart_success(monkeypatch) -> None:  # noqa: ANN001
+    import getpass
+
+    seen: list[dict] = []
     monkeypatch.setattr(
         boot_mod,
         "install",
-        lambda **kwargs: boot_mod.BootStatus(True, True, None, "已注册计划任务"),
+        lambda **kwargs: seen.append(kwargs)
+        or boot_mod.BootStatus(True, True, None, "已注册计划任务"),
     )
+    monkeypatch.setattr(getpass, "getpass", lambda prompt="": "pw-secret")
     out: list[str] = []
 
-    code = menu_mod.register_bootstart(_feed(["pw"]), out.append)
+    code = menu_mod.register_bootstart(_feed([]), out.append)
 
     assert code == 0
     assert any("已开启" in line for line in out)
+    # 密码必须走 getpass（不回显）并且原样交给任务计划程序保存。
+    assert seen == [{"port": 2268, "mode": "task", "password": "pw-secret"}]
 
 
 def test_register_bootstart_offers_elevation(monkeypatch) -> None:  # noqa: ANN001
+    import getpass
+
     monkeypatch.setattr(
         boot_mod,
         "install",
@@ -96,13 +106,14 @@ def test_register_bootstart_offers_elevation(monkeypatch) -> None:  # noqa: ANN0
             True, False, None, "需要管理员权限才能注册「开机触发、无需登录」的任务", False
         ),
     )
+    monkeypatch.setattr(getpass, "getpass", lambda prompt="": "pw")
     relaunched: list[list[str]] = []
     monkeypatch.setattr(
         menu_mod, "_relaunch_elevated", lambda args: relaunched.append(list(args)) or 0
     )
     out: list[str] = []
 
-    code = menu_mod.register_bootstart(_feed(["pw", "y"]), out.append)
+    code = menu_mod.register_bootstart(_feed(["y"]), out.append)
 
     assert code == 0
     assert relaunched == [["bootstart", "install", "--mode", "task"]]
@@ -110,17 +121,20 @@ def test_register_bootstart_offers_elevation(monkeypatch) -> None:  # noqa: ANN0
 
 
 def test_register_bootstart_declined_elevation(monkeypatch) -> None:  # noqa: ANN001
+    import getpass
+
     monkeypatch.setattr(
         boot_mod,
         "install",
         lambda **kwargs: boot_mod.BootStatus(True, False, None, "需要管理员权限才能注册", False),
     )
+    monkeypatch.setattr(getpass, "getpass", lambda prompt="": "pw")
     calls: list[list[str]] = []
     monkeypatch.setattr(
         menu_mod, "_relaunch_elevated", lambda args: calls.append(list(args)) or 0
     )
 
-    code = menu_mod.register_bootstart(_feed(["pw", "n"]), lambda *_: None)
+    code = menu_mod.register_bootstart(_feed(["n"]), lambda *_: None)
 
     assert code == 1
     assert calls == []
@@ -257,11 +271,75 @@ def test_relaunch_elevated_swallows_oserror(monkeypatch) -> None:  # noqa: ANN00
 
 def test_register_bootstart_aborts_on_interrupt(monkeypatch) -> None:  # noqa: ANN001
     """Ctrl+C / 输入流结束等同于取消，返回 2 而不是抛出去。"""
+    import getpass
 
-    def ask(_prompt: str) -> str:
+    def abort(_prompt: str = "") -> str:
         raise EOFError
 
-    assert menu_mod.register_bootstart(ask, lambda *_: None) == 2
+    monkeypatch.setattr(getpass, "getpass", abort)
+
+    assert menu_mod.register_bootstart(_feed([]), lambda *_: None) == 2
+
+
+# ---------------------------------------------- 关机 / 重启前的确认
+
+
+def test_power_handler_cancels_on_declined_confirm(monkeypatch) -> None:  # noqa: ANN001
+    """默认答案是否：直接回车不能关机。"""
+    calls: list[list[str]] = []
+    monkeypatch.setattr(cli_mod, "main", lambda argv: calls.append(list(argv)))
+    out: list[str] = []
+
+    code = menu_mod._power_handler("off", "关机")(_feed([""]), out.append)
+
+    assert code == 0
+    assert calls == []
+    assert any("已取消" in line for line in out)
+
+
+def test_power_handler_accepts_yes_variants(monkeypatch) -> None:  # noqa: ANN001
+    calls: list[list[str]] = []
+
+    def fake_main(argv: list[str]) -> int:
+        calls.append(list(argv))
+        return 0
+
+    monkeypatch.setattr(cli_mod, "main", fake_main)
+
+    assert menu_mod._power_handler("off", "关机")(_feed(["y"]), lambda *_: None) == 0
+    assert menu_mod._power_handler("reboot", "重启")(_feed(["YES"]), lambda *_: None) == 0
+
+    assert calls == [["power", "off"], ["power", "reboot"]]
+
+
+def test_power_handler_warns_about_hard_to_reverse_shutdown() -> None:
+    """关机不可逆，提示里必须点明要靠 WOL / 插座才能再开机。"""
+    prompts: list[str] = []
+
+    def ask(prompt: str) -> str:
+        prompts.append(prompt)
+        return "n"
+
+    menu_mod._power_handler("off", "关机")(ask, lambda *_: None)
+    menu_mod._power_handler("reboot", "重启")(ask, lambda *_: None)
+
+    assert "WOL" in prompts[0]
+    # 重启能自己回来，不需要吓唬用户。
+    assert "WOL" not in prompts[1]
+
+
+def test_power_handler_cancels_on_interrupt(monkeypatch) -> None:  # noqa: ANN001
+    calls: list[list[str]] = []
+    monkeypatch.setattr(cli_mod, "main", lambda argv: calls.append(list(argv)))
+
+    def ask(_prompt: str) -> str:
+        raise KeyboardInterrupt
+
+    out: list[str] = []
+
+    assert menu_mod._power_handler("off", "关机")(ask, out.append) == 0
+    assert calls == []
+    assert any("已取消" in line for line in out)
 
 
 def test_guided_add_reports_discovery_failure(monkeypatch) -> None:  # noqa: ANN001

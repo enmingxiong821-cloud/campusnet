@@ -114,6 +114,43 @@ def test_doctor_reports_notify_configuration(store) -> None:  # noqa: ANN001
     assert _by_name(doctor_mod.run(probe=False))["失败通知"].status == doctor_mod.OK
 
 
+def test_render_lists_failed_checks_at_the_end() -> None:
+    """满屏几十行里 FAIL 容易被划过去，末尾必须再点名一次。"""
+    checks = [
+        doctor_mod.Check("运行环境", doctor_mod.OK, "Python 3.12"),
+        doctor_mod.Check("服务端口", doctor_mod.FAIL, "2268 被占用"),
+        doctor_mod.Check("失败通知", doctor_mod.WARN, "未配置"),
+        doctor_mod.Check("数据目录", doctor_mod.FAIL, "不可写"),
+    ]
+
+    text = doctor_mod.render(checks)
+
+    assert text.rstrip().endswith("需要先处理这 2 项：服务端口、数据目录")
+    # 检查顺序是刻意排的，渲染不该重排。
+    assert text.index("运行环境") < text.index("服务端口") < text.index("数据目录")
+
+
+def test_render_stays_quiet_when_nothing_failed() -> None:
+    checks = [
+        doctor_mod.Check("运行环境", doctor_mod.OK, "Python 3.12"),
+        doctor_mod.Check("失败通知", doctor_mod.WARN, "未配置"),
+    ]
+
+    text = doctor_mod.render(checks)
+
+    assert "需要先处理" not in text
+    assert text.count("\n") == len(checks) - 1
+
+
+def test_render_json_has_no_summary_line() -> None:
+    """摘要只属于人看的文本；机器读的 JSON 保持 [{name,status,detail}]。"""
+    checks = [doctor_mod.Check("服务端口", doctor_mod.FAIL, "占用")]
+
+    payload = json.loads(doctor_mod.render(checks, as_json=True))
+
+    assert payload == [{"name": "服务端口", "status": "fail", "detail": "占用"}]
+
+
 def test_compare_versions_handles_prefixes() -> None:
     assert doctor_mod.compare_versions("1.1.0", "v1.1.0") == "same"
     assert doctor_mod.compare_versions("1.1.0", "1.2.0") == "older"
