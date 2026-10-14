@@ -10,6 +10,14 @@
 packaging/*.service text eol=lf
 packaging/*.plist   text eol=lf
 
+# shell 脚本同理必须 LF。
+#
+# 少这一行的后果在 Windows 上才现形：core.autocrlf=true 会把 install.sh 检出成
+# CRLF，而它在 Linux/macOS 上是被 `sh install.sh` 直接执行的——CRLF 下
+# `set -e` 之类的行尾会多一个 CR，shebang 也会变成 `#!/bin/sh\r`，
+# 轻则命令找不到，重则脚本在 clone 出来的一刻就是坏的。
+*.sh text eol=lf
+
 # Windows 批处理反过来必须强制 CRLF。
 #
 # cmd.exe 按字节解析 .bat：多字节字符若在行尾只剩半个，就会把换行吃掉，

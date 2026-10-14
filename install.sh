@@ -19,6 +19,9 @@ if [ -f "$SCRIPT_DIR/utils/run.py" ]; then
 fi
 
 # 只认 --dry-run 这一个开关，其余参数原样透传给 setup（例如 --with-browser）。
+# DRY_RUN 必须先给个默认值：只在 --dry-run 分支里赋值的话，普通安装时它是空的，
+# 下面那些 `[ "$DRY_RUN" -eq 1 ]` 会往 stderr 吐 `[: : integer expected`。
+DRY_RUN=0
 SETUP_ARGS=""
 for arg in "$@"; do
   case "$arg" in
