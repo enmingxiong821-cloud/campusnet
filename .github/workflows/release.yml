@@ -12,6 +12,10 @@ jobs:
   verify:
     name: 发布前校验
     runs-on: ubuntu-latest
+    # 这里跑的是与 ci.yml 同款的全量套件 + 覆盖率门禁，六格矩阵里一格挂住
+    # 就会把整轮拖到 GitHub 的 6 小时上限；全套本地约 5 分钟，30 分钟够宽。
+    # 原来这个工作流一个超时都没写（ci.yml 有四处）。
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
 
@@ -80,6 +84,10 @@ jobs:
           # 里面的明文账号口令与从门户抓下来的第三方 JS 会一起进包
           rm -rf "dist/${NAME}/utils/_tmp"
           rm -rf "dist/${NAME}/utils/tmp"
+          # 本机私有敏感标识清单绝不能进包：cp -r 不受 .gitignore 约束，而这份
+          # 清单本身就是要保密的地址与 SSID；留下来还会被下一步的 --root 扫描
+          # 当成规则读出来，等于自己举报自己。
+          rm -f "dist/${NAME}/utils/local_sensitive.txt"
           rm -rf "dist/${NAME}/.pytest_cache"
           find "dist/${NAME}" -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
           find "dist/${NAME}" -name '.pytest_cache' -type d -exec rm -rf {} + 2>/dev/null || true
@@ -144,6 +152,8 @@ jobs:
             target: macos-arm64
             binary: dist/campusnet
     runs-on: ${{ matrix.os }}
+    # PyInstaller + 冒烟验证，四个平台各一份，正常几分钟；给个上限免得异常时干等 6 小时。
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
 
@@ -204,6 +214,8 @@ jobs:
     # 打 tag 之前先让 CI 编一次，比发出去之后发现编不出来强。
     if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
+    # 多架构构建要跑 qemu 模拟 arm64，比本机慢得多；给足上限但别让它挂到 6 小时。
+    timeout-minutes: 45
     # 工作流级写的是 contents: write。作业级 permissions 是整体替换而不是合并，
     # 所以 contents 必须自己再写一遍，否则 checkout 会因为没有读权限而失败。
     permissions:
@@ -255,6 +267,7 @@ jobs:
     needs: [verify, build-binary, build-image]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
 

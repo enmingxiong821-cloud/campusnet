@@ -60,20 +60,63 @@ CHINESE_CREDENTIAL = re.compile(
 )
 
 
+#: 会进发布包的顶层文件，逐条对应 .github/workflows/release.yml 的收集步骤。
+#: 漏掉一个「确实会发出去」的文件，等于给它开一个绕过敏感串检查的后门——
+#: 原来这里只有 README/LICENSE/database 两条，install.sh、packaging/、
+#: CHANGELOG.md 这些全都不在扫描范围内。
+DISTRIBUTION_TOP = {
+    "README.md",
+    "CHANGELOG.md",
+    "CONTRIBUTING.md",
+    "SECURITY.md",
+    "LICENSE",
+    "install.bat",
+    "install.sh",
+    "install.ps1",
+    "Dockerfile",
+    "docker-compose.yml",
+    "docker-compose.tailscale.yml",
+    ".dockerignore",
+    "database/schema.sql",
+    "database/config.example.yml",
+}
+
+#: 整目录随包发的顶层目录。
+DISTRIBUTION_DIRS = frozenset({"packaging"})
+
+#: doc/ 下只有截图与自测指南会随包发；工作状态存档、实施方案这类内部文档
+#: 留在仓库里，把它们拉进扫描范围只是白扫。
+DISTRIBUTION_DOC = frozenset({"doc/自测指南.md"})
+
+#: 这几份不套本机私有清单（utils/local_sensitive.txt），其余规则照旧生效。
+#: 更新日志按惯例要写「适配了哪个门户」，校名是它绕不开的正文，而且早已随公开
+#: git 历史与历次发布包公开——清单里那条裸校名正则对它永久报警、又永远修不掉。
+#: 一条修不掉的告警最后只会被绕过，比不检查更糟。明文凭据、学号、手机号在这
+#: 份文件上仍然照查。
+LOCAL_PATTERN_EXEMPT = frozenset({"CHANGELOG.md"})
+
+
 def is_distribution_source(relative: Path) -> bool:
     parts = relative.parts
-    if parts[:2] == ("project", "backend") and "tests" in parts:
+    if not parts:
         return False
-    if parts[:1] == ("project",):
+    if parts[0] == "project":
+        return not (parts[:2] == ("project", "backend") and "tests" in parts)
+    if parts[0] == "utils":
+        # _tmp / tmp 是抓包与验证工作区，release.yml 打包前会把它们删掉（那边写着
+        # 原因：里面是从门户抓下来的第三方 JS 与明文账号口令，cp -r 不受 .gitignore
+        # 约束）。它们既然不进包，就不该拿敏感串规则去卡本地抓包产物。
+        if "_tmp" in parts or "tmp" in parts:
+            return False
+        return relative.as_posix() != "utils/mock_portal.py"
+    if parts[0] in DISTRIBUTION_DIRS:
         return True
-    if parts[:1] == ("utils",):
-        return relative != Path("utils/mock_portal.py") and "_tmp" not in parts
-    return relative.as_posix() in {
-        "database/schema.sql",
-        "database/config.example.yml",
-        "README.md",
-        "LICENSE",
-    }
+    posix = relative.as_posix()
+    return (
+        posix in DISTRIBUTION_TOP
+        or posix in DISTRIBUTION_DOC
+        or parts[:2] == ("doc", "images")
+    )
 
 
 def repository_files(root: Path) -> list[Path]:
@@ -127,10 +170,12 @@ def scan_file(
 
 def scan(root: Path, files: list[Path]) -> list[tuple[Path, str]]:
     findings = []
-    local = load_local_patterns(root)
+    patterns = load_local_patterns(root)
     for relative in files:
+        posix = relative.as_posix()
         # mock 门户使用固定夹具口令；豁免这一文件的口令匹配，不豁免真实号码。
-        fixture = relative.as_posix() == "utils/mock_portal.py"
+        fixture = posix == "utils/mock_portal.py"
+        local = None if posix in LOCAL_PATTERN_EXEMPT else patterns
         for rule in scan_file(root, relative, fixture=fixture, local=local):
             findings.append((relative, rule))
     return findings
