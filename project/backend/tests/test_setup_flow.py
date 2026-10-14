@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from campusnet import cli as cli_mod
 from campusnet import doctor as doctor_mod
 from campusnet import setup_flow
@@ -95,3 +97,32 @@ def test_cli_setup_prints_report(monkeypatch, capsys) -> None:  # noqa: ANN001
     assert code == 0
     assert "Python 环境" in out
     assert "下一步" in out
+
+
+@pytest.mark.parametrize(
+    ("platform", "expected"),
+    [
+        ("windows", "同意 UAC 并输入密码"),
+        ("linux", "packaging/campusnet.service"),
+        ("darwin", "com.campusnet.daemon.plist"),
+    ],
+)
+def test_setup_next_step_matches_platform(
+    monkeypatch,  # noqa: ANN001
+    platform: str,
+    expected: str,
+) -> None:
+    """下一步里的第一步，三个平台做的是不同的事。
+
+    Windows 注册计划任务（要 UAC 与账户密码，换来「通电即认证」），另外两个平台
+    只能注册用户级载体。原来两种平台共用一句话，等于给 Linux / macOS 用户承诺了
+    「不需要任何人登录」——那正是这一轮要修的说法。
+    """
+    monkeypatch.setattr(setup_flow.doctor_mod, "run", _fake_doctor)
+    monkeypatch.setenv("CAMPUSNET_FORCE_PLATFORM", platform)
+
+    text = setup_flow.run_setup(make_shortcuts=False).render()
+
+    assert expected in text
+    if platform != "windows":
+        assert "同意 UAC" not in text

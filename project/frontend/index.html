@@ -360,10 +360,12 @@
         <p class="hint" style="margin-top:8px">
           目标链路是：通电 → 程序自动运行 → 自动认证你配置好的网络；机器开不开机由你远程决定
           （关机 / 唤醒 / 体检在「电源」页操作，开机需要 BIOS 上电自启 / 智能插座 / WOL 之一）。
-          默认载体写在当前用户启动文件夹，是「登录后」语义；想要「通电就自动连」，
-          点上方的「开启」注册计划任务——开机触发、无论是否登录都运行，
-          需要管理员权限（会弹一次 UAC 并要你输入当前 Windows 账户密码）。
-          Linux 走 systemd 用户单元（无则退化为 XDG autostart），macOS 走 LaunchAgent。
+          这里的「开启」注册的是<strong>当前用户的启动项</strong>（Windows 启动文件夹 /
+          systemd 用户单元，无则退化为 XDG autostart / macOS LaunchAgent），都是「登录后」
+          语义——机器停在登录界面时不会认证。要做到「通电就自动连」，Windows 用
+          <code>bootstart install --mode task</code> 注册计划任务（需管理员，并会把当前账户
+          密码交给任务计划程序保存一次），Linux / macOS 装 <code>packaging/</code> 下的系统级
+          单元（需 root）。这两条都要求本机授权，所以不放在控制台上做。
         </p>
 
         <hr style="margin:22px 0;border:none;border-top:1px solid var(--line)">

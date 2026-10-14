@@ -42,7 +42,9 @@ def cmd_bootstart(args: argparse.Namespace) -> int:
 
     if args.bootstart_action == "install":
         password = ""
-        if args.mode == "task":
+        # 先确认平台再要密码：`--mode task` 在非 Windows 上本来就装不了，
+        # 在这里先拦一下，别让 Linux 用户对着「Windows 账户密码」输一遍再被告知不支持。
+        if args.mode == "task" and bootstart_mod.platform_name() == "windows":
             from getpass import getpass
 
             password = getpass("输入当前 Windows 账户密码（只交给任务计划程序保存）：")
@@ -52,8 +54,10 @@ def cmd_bootstart(args: argparse.Namespace) -> int:
         print(bootstart_mod.activate(result))
         if not result.installed:
             return 1
-        if bootstart_mod.platform_name() == "linux" and result.path and result.path.suffix == ".service":
-            print("提示：默认随用户会话启动；无需登录运行需另行配置 linger，并确认系统授权策略。")
+        # activate() 只会说「已开启」。载体是「登录后」还是「无需登录」这个差别就在
+        # detail 里，不补打出来，用户在「重启后停在登录界面」的场景里会以为已经生效。
+        if result.detail:
+            print(f"说明: {result.detail}")
         if args.mode == "task":
             print("提示：任务会在开机时运行，不需要任何人登录；密码只由任务计划程序保存。")
         return 0

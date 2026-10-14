@@ -105,6 +105,29 @@ def has_desktop_session() -> bool:
     )
 
 
+def unattended_hint() -> str:
+    """「无需登录」在本机该怎么做到。
+
+    用户级载体一律是「登录后」语义——这是刻意的取舍（不写系统级位置、不动账号级
+    设置），不是没装好。替代路径每个平台都不一样，散在 install / status / CLI / 菜单
+    里各写一遍必然走样，所以收在这一处。
+    """
+    name = platform_name()
+    if name == "windows":
+        return "要「有电就连接、无需登录」，用 bootstart install --mode task 注册计划任务"
+    if name == "linux":
+        return (
+            "要「有电就连接、无需登录」，用 packaging/campusnet.service 装成系统级单元，"
+            "需 root，步骤见 README「开机自启动」一节"
+        )
+    if name == "darwin":
+        return (
+            "要「有电就连接、无需登录」，用 packaging/com.campusnet.daemon.plist 装成 "
+            "LaunchDaemon，需 root，步骤见 README「开机自启动」一节"
+        )
+    return ""
+
+
 def verify_launch() -> tuple[bool, str]:
     """干跑一次「解释器 + 导入 campusnet」，确认自启动真要拉起时不会当场失败。
 
@@ -637,12 +660,20 @@ def install(
         if systemctl:
             if is_wsl():
                 note = "（WSL 的 systemd 需手动开启，且要 linger 才能无人登录启动）"
+            else:
+                # 用户级单元的天花板就是「登录后启动」，不是没装好。不说清楚，
+                # 用户在「重启后停在登录界面」这个场景里会以为已经生效了。
+                note = f"（登录后才会拉起；{unattended_hint()}）"
         else:
             effective = has_desktop_session()
-            if not effective:
+            if effective:
+                note = f"（登录后才会拉起；{unattended_hint()}）"
+            else:
                 note = "（当前没有桌面会话，XDG autostart 不会被读取）"
-    elif name == "windows":
-        note = "（登录后启动；要「有电就连接、无需登录」，用 --mode task 注册计划任务）"
+    elif name in ("windows", "darwin"):
+        # macOS 原来这里什么都不加：LaunchAgent 明明是登录后才跑，却报成光秃秃的
+        # 「已注册开机自启动」，与 verify() 的说法对不上。
+        note = f"（登录后才会拉起；{unattended_hint()}）"
     return BootStatus(
         True, True, path, f"已注册开机自启动{note}", True, effective=effective
     )
@@ -735,7 +766,11 @@ def status() -> BootStatus:
                 )
             ok, message = _run_quiet([systemctl, "--user", "is-enabled", SYSTEMD_UNIT])
             enabled = ok and message.strip() == "enabled"
-            detail = "已启用 systemd 登录自启动" if enabled else f"单元未确认启用：{message}"
+            detail = (
+                f"已启用 systemd 登录自启动；{unattended_hint()}"
+                if enabled
+                else f"单元未确认启用：{message}"
+            )
             return BootStatus(True, enabled, unit, detail, True, effective=enabled)
         hint = "未安装开机自启动"
         if is_wsl() and not shutil.which("systemctl"):
@@ -748,10 +783,11 @@ def status() -> BootStatus:
     if path.exists():
         detail = "已注册开机自启动"
         if name == "windows":
-            detail = (
-                "已注册开机自启动（启动文件夹，登录后才会拉起；"
-                "要「有电就连接、无需登录」，用 bootstart install --mode task）"
-            )
+            detail = f"已注册开机自启动（启动文件夹，登录后才会拉起；{unattended_hint()}）"
+        elif name == "darwin":
+            # 原来这里只说「已注册开机自启动」，而 verify() 明说 LaunchAgent 只在
+            # 图形会话里跑——两处口径不一致，用户会以为重启后无人登录也能连上。
+            detail = f"已注册 LaunchAgent（登录后才会运行；{unattended_hint()}）"
         return BootStatus(True, True, path, detail)
     return BootStatus(True, False, path, "未安装开机自启动", True, effective=False)
 

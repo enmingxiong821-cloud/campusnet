@@ -1193,3 +1193,111 @@ def test_launch_command_line_prefers_frozen_binary(
     source_line = boot_mod.launch_command_line(["serve", "--port", "2268"])
     assert "run.py" in source_line
     assert source_line != frozen_line
+
+
+# ---------- 「登录后」还是「无需登录」：三平台都得说清楚 ----------
+
+
+@pytest.mark.parametrize(
+    ("platform", "expect"),
+    [
+        ("windows", "--mode task"),
+        ("linux", "packaging/campusnet.service"),
+        ("darwin", "packaging/com.campusnet.daemon.plist"),
+    ],
+)
+def test_unattended_hint_points_at_this_platform_way(
+    monkeypatch: pytest.MonkeyPatch, platform: str, expect: str
+) -> None:
+    """用户级载体做不到「无需登录」，每个平台的替代路径不一样，不能张冠李戴。"""
+    _force(monkeypatch, platform)
+
+    hint = boot_mod.unattended_hint()
+
+    assert expect in hint
+    assert "无需登录" in hint
+
+
+def test_unattended_hint_empty_on_unsupported_platform(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(boot_mod, "platform_name", lambda: "freebsd")
+
+    assert boot_mod.unattended_hint() == ""
+
+
+def test_linux_install_says_login_only(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """systemd 用户单元装上只等于「登录后启动」，不能报成光秃秃的「已注册」。"""
+    _force(monkeypatch, "linux")
+    monkeypatch.setattr(boot_mod.shutil, "which", lambda _name: "/usr/bin/systemctl")
+    monkeypatch.setattr(boot_mod, "_run_quiet", lambda args, **kwargs: (True, ""))
+    monkeypatch.setattr(boot_mod, "verify_launch", lambda: (True, ""))
+    monkeypatch.setattr(boot_mod, "is_wsl", lambda: False)
+
+    result = boot_mod.install(port=2268)
+
+    assert result.installed
+    assert "登录后才会拉起" in result.detail
+    assert "packaging/campusnet.service" in result.detail
+
+
+def test_darwin_install_says_login_only(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """LaunchAgent 只在图形会话里跑，install 也必须这么讲（原来它什么都不说）。"""
+    _force(monkeypatch, "darwin")
+    monkeypatch.setattr(boot_mod, "verify_launch", lambda: (True, ""))
+
+    result = boot_mod.install(port=2268)
+
+    assert result.installed
+    assert "登录后才会拉起" in result.detail
+    assert "LaunchDaemon" in result.detail
+
+
+def test_darwin_status_says_login_only(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """status 与 verify 的口径必须一致，否则用户按 status 判断就会以为无人登录也生效。"""
+    _force(monkeypatch, "darwin")
+    plist = boot_mod._macos_plist_path()
+    plist.parent.mkdir(parents=True, exist_ok=True)
+    plist.write_text("<plist/>", encoding="utf-8")
+
+    result = boot_mod.status()
+
+    assert result.installed
+    assert "登录后才会运行" in result.detail
+    assert "LaunchDaemon" in result.detail
+
+
+def test_linux_status_points_at_no_login_alternative(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _force(monkeypatch, "linux")
+    unit = boot_mod._linux_unit_path()
+    unit.parent.mkdir(parents=True, exist_ok=True)
+    unit.write_text("[Unit]\n", encoding="utf-8")
+    monkeypatch.setattr(boot_mod.shutil, "which", lambda _name: "/usr/bin/systemctl")
+    monkeypatch.setattr(boot_mod, "_run_quiet", lambda args, **kwargs: (True, "enabled"))
+
+    result = boot_mod.status()
+
+    assert result.installed
+    assert "packaging/campusnet.service" in result.detail
+
+
+def test_cli_bootstart_install_prints_login_only_detail(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """CLI 上 `activate()` 只会说「已开启」，detail 不补打出来就等于没说。"""
+    _force(monkeypatch, "windows")
+    monkeypatch.setattr(boot_mod, "verify_launch", lambda: (True, ""))
+
+    assert cli_mod.main(["bootstart", "install", "--port", "2268"]) == 0
+
+    out = capsys.readouterr().out
+    assert "说明: " in out
+    assert "--mode task" in out

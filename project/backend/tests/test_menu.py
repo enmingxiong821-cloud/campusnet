@@ -95,6 +95,7 @@ def test_index_of_returns_zero_when_missing() -> None:
 def test_register_bootstart_success(monkeypatch) -> None:  # noqa: ANN001
     import getpass
 
+    monkeypatch.setenv("CAMPUSNET_FORCE_PLATFORM", "windows")
     seen: list[dict] = []
     monkeypatch.setattr(
         boot_mod,
@@ -111,6 +112,85 @@ def test_register_bootstart_success(monkeypatch) -> None:  # noqa: ANN001
     assert any("已开启" in line for line in out)
     # 密码必须走 getpass（不回显）并且原样交给任务计划程序保存。
     assert seen == [{"port": 2268, "mode": "task", "password": "pw-secret"}]
+
+
+def test_register_bootstart_uses_default_carrier_off_windows(
+    monkeypatch,  # noqa: ANN001
+) -> None:
+    """Linux / macOS 上没有「计划任务」这条路。
+
+    原来这里不分平台一律 mode="task" 并且先要一次 Windows 账户密码，两个平台上
+    必然失败在「计划任务模式目前只支持 Windows」——菜单里这一项从来没成功过。
+    """
+    import getpass
+
+    monkeypatch.setenv("CAMPUSNET_FORCE_PLATFORM", "linux")
+    seen: list[dict] = []
+    monkeypatch.setattr(
+        boot_mod,
+        "install",
+        lambda **kwargs: seen.append(kwargs)
+        or boot_mod.BootStatus(True, True, None, "已注册开机自启动"),
+    )
+    asked: list[str] = []
+    monkeypatch.setattr(getpass, "getpass", lambda prompt="": asked.append(prompt) or "x")
+    out: list[str] = []
+
+    assert menu_mod.register_bootstart(_feed([]), out.append) == 0
+
+    assert seen == [{"port": 2268, "mode": "auto", "password": ""}]
+    assert asked == []  # 不该对着 Linux 用户问 Windows 账户密码
+
+
+def test_register_bootstart_explains_login_only_carrier(
+    monkeypatch,  # noqa: ANN001
+) -> None:
+    """装上了不等于「有电就连接」：详情里那句「登录后才会拉起」必须转达给用户。"""
+    import getpass
+
+    monkeypatch.setenv("CAMPUSNET_FORCE_PLATFORM", "windows")
+    monkeypatch.setattr(getpass, "getpass", lambda prompt="": "pw")
+    monkeypatch.setattr(
+        boot_mod,
+        "install",
+        lambda **kwargs: boot_mod.BootStatus(
+            True, True, None, "已注册开机自启动（登录后才会拉起；要「有电就连接」…）"
+        ),
+    )
+    out: list[str] = []
+
+    assert menu_mod.register_bootstart(_feed([]), out.append) == 0
+
+    assert any("登录后才会拉起" in line for line in out)
+
+
+@pytest.mark.parametrize(
+    ("platform", "expected"),
+    [
+        ("windows", "无需登录"),
+        ("linux", "系统级单元"),
+        ("darwin", "系统级单元"),
+    ],
+)
+def test_bootstart_hint_matches_what_it_actually_installs(
+    monkeypatch,  # noqa: ANN001
+    platform: str,
+    expected: str,
+) -> None:
+    """菜单上那句承诺得与实际装的载体一致。
+
+    「无需登录」只有 Windows 的计划任务做得到；另外两个平台装的是用户级载体。
+    副标题照抄 Windows 那句，用户就会拿着一个做不到的说法去注册。
+    """
+    monkeypatch.setenv("CAMPUSNET_FORCE_PLATFORM", platform)
+
+    hint = menu_mod.bootstart_hint()
+
+    assert expected in hint
+    if platform == "windows":
+        assert "系统级单元" not in hint
+    else:
+        assert "需要管理员" not in hint
 
 
 def test_register_bootstart_offers_elevation(monkeypatch) -> None:  # noqa: ANN001

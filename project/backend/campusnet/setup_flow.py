@@ -12,6 +12,7 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 
+from . import bootstart as bootstart_mod
 from . import doctor as doctor_mod
 from . import shortcuts as shortcuts_mod
 
@@ -133,12 +134,19 @@ def run_setup(
         report.lines.append("    - 已跳过")
 
     report.lines.append("")
-    report.lines.append("下一步（都在桌面「校园网自连」这个入口的菜单里；没生成就改跑"
-                        " python utils/run.py menu）：")
     report.lines.append(
-        "  1. 选「注册开机自启」，同意 UAC 并输入密码"
+        "下一步（都在桌面「校园网自连」这个入口的菜单里；没生成就改跑"
+        " python utils/run.py menu）："
     )
-    report.lines.append("     —— 做完这一步，通电就会自动认证，不需要任何人登录")
+    # 这一步在 Windows 与另外两个平台上做的是不同的事：Windows 走计划任务（要 UAC、
+    # 要账户密码，换来「通电即认证」），Linux / macOS 只能注册用户级载体。原来这段
+    # 两种平台共用一句话，等于对 Linux / macOS 用户承诺了一件做不到的事。
+    if bootstart_mod.platform_name() == "windows":
+        report.lines.append("  1. 选「注册开机自启」，同意 UAC 并输入密码")
+        report.lines.append("     —— 做完这一步，通电就会自动认证，不需要任何人登录")
+    else:
+        report.lines.append("  1. 选「注册开机自启」，注册登录后自动连接")
+        report.lines.append(f"     —— {bootstart_mod.unattended_hint()}")
     report.lines.append("  2. 选「添加账号」（门户地址 + 账号密码）")
     report.lines.append("  3. 手机访问：选「查看多端访问」，拿到地址与令牌")
     return report

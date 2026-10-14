@@ -43,21 +43,46 @@ def _relaunch_elevated(args: list[str]) -> int:
     return 0
 
 
+def bootstart_hint() -> str:
+    """菜单里「注册开机自启」那一行的副标题。
+
+    「无需登录」只在 Windows 上成立（计划任务），另外两个平台注册的是用户级载体，
+    就是登录后语义。文案跟着动作走——写在菜单上的承诺与实际装的东西不一致，
+    比不写还糟：用户会照着一个做不到的说法去用。
+    """
+    from . import bootstart
+
+    if bootstart.platform_name() == "windows":
+        return "开机即认证、无需登录（需要管理员）"
+    return "登录后自动连接；无需登录要装系统级单元"
+
+
 def register_bootstart(ask: Ask, out: Out) -> int:
     """注册开机自启；被系统拒绝时主动提出提权重试。"""
     from getpass import getpass
 
     from . import bootstart
 
-    try:
-        # 走 getpass 而不是注入的 ask：菜单是双击桌面图标进来的，屏幕后面可能
-        # 还坐着别人。同一个密码在命令行的 bootstart 路径里用的就是 getpass。
-        password = getpass("输入当前 Windows 账户密码（不回显，只交给任务计划程序保存）: ")
-    except (EOFError, KeyboardInterrupt):
-        return 2
-    result = bootstart.install(port=2268, mode="task", password=password)
+    # 「无需登录」在 Windows 上只能靠计划任务，代价是交一次账户密码；其它平台的
+    # 用户级载体没有对应开关，用默认的就行。原来这里不分平台一律走 Windows 那条路
+    # （先要密码、再 mode="task"），Linux / macOS 上必然失败在「计划任务模式目前
+    # 只支持 Windows」——菜单里这一项在两个平台上从来没能用过。
+    mode = "task" if bootstart.platform_name() == "windows" else "auto"
+    password = ""
+    if mode == "task":
+        try:
+            # 走 getpass 而不是注入的 ask：菜单是双击桌面图标进来的，屏幕后面可能
+            # 还坐着别人。同一个密码在命令行的 bootstart 路径里用的就是 getpass。
+            password = getpass("输入当前 Windows 账户密码（不回显，只交给任务计划程序保存）: ")
+        except (EOFError, KeyboardInterrupt):
+            return 2
+    result = bootstart.install(port=2268, mode=mode, password=password)
     out(bootstart.activate(result))
     if result.installed:
+        # 装上了不等于「有电就连接」：用户级载体是登录后语义，这句得说出来，
+        # 否则用户在重启后停在登录界面时会以为已经连上了。
+        if result.detail:
+            out(f"说明：{result.detail}")
         return 0
     if "管理员权限" in result.detail:
         out("注册这种任务需要管理员权限（系统会拒绝为非管理员账户保存凭据）。")
@@ -193,7 +218,7 @@ ITEMS: tuple[MenuItem, ...] = (
     ),
     MenuItem("远程重启", "", "电源与自启", handler=_power_handler("reboot", "重启")),
     MenuItem(
-        "注册开机自启", "开机即认证、无需登录（需要管理员）", "电源与自启",
+        "注册开机自启", bootstart_hint(), "电源与自启",
         handler=register_bootstart,
     ),
     MenuItem("卸载开机自启", "", "电源与自启", ("bootstart", "uninstall")),
