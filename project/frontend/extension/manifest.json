@@ -1,13 +1,12 @@
 {
   "manifest_version": 3,
   "name": "校园网自连",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "掉线自动重连校园网：后台探活、掉线重连、一键登录、事件日志。",
   "permissions": [
     "storage",
     "alarms",
-    "notifications",
-    "tabs"
+    "notifications"
   ],
   "host_permissions": [
     "http://*/*",

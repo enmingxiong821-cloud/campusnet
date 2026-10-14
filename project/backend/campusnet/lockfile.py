@@ -186,17 +186,25 @@ class SingleInstance:
             return False
 
         try:
-            # PID 写文件头，锁字节在 4KiB 处；先清空再写，避免残留旧 PID 误导诊断。
-            os.lseek(fd, 0, os.SEEK_SET)
-            os.ftruncate(fd, 0)
-            os.write(fd, f"{os.getpid()}\n".encode("utf-8"))
-            # msvcrt.locking 要求被锁字节真实存在，把文件撑到锁字节之后一格。
-            os.ftruncate(fd, _LOCK_BYTE_OFFSET + 1)
+            # msvcrt.locking 要求被锁的那一字节真实存在，先把文件撑到锁字节之后一格。
+            # 这里只拉长度、不碰文件头：写 PID 要等拿到锁之后再做，否则抢锁失败的
+            # 实例会把持有者的 PID 抹掉——诊断会指错人，释放时那句「是不是我」
+            # （holder_pid() == os.getpid()）也会判错，于是锁文件残留在盘上。
+            if os.fstat(fd).st_size < _LOCK_BYTE_OFFSET + 1:
+                os.ftruncate(fd, _LOCK_BYTE_OFFSET + 1)
         except OSError:
             os.close(fd)
             return False
 
         if not _lock_fd(fd):
+            os.close(fd)
+            return False
+        try:
+            # 定宽写，盖住上一次可能更长的 PID，后面不留半截数字。
+            os.lseek(fd, 0, os.SEEK_SET)
+            os.write(fd, f"{os.getpid():<12}\n".encode("utf-8"))
+        except OSError:
+            _unlock_fd(fd)
             os.close(fd)
             return False
         if not self._lock_still_maps_to_path(fd):

@@ -248,3 +248,12 @@ def test_probe_configured_empty_falls_back_to_probe(monkeypatch) -> None:  # noq
 
     assert probe_mod.probe_configured("").online is True
     assert seen == [""]
+
+
+def test_probe_rejects_non_http_scheme() -> None:
+    """file:// 会被 urllib 默认挂着的 FileHandler 读成正文，探活接口不能放它进来。"""
+    result = probe_mod.probe("file:///etc/hosts", timeout=1.0)
+
+    assert result.online is False
+    assert result.status == "unsupported_scheme"
+    assert "file" in result.detail

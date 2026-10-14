@@ -102,3 +102,13 @@ def test_send_wol_delegates_to_power(monkeypatch) -> None:  # noqa: ANN001
 
     assert wakeplan.send_wol("AA:BB:CC:DD:EE:FF", "255.255.255.255", 9) == "255.255.255.255:9"
     assert sent == [("AA:BB:CC:DD:EE:FF", 9)]
+
+
+def test_should_fire_not_again_when_clock_rolled_back() -> None:
+    """今天已经发过，就算时钟被回拨到触发点之前，当天也不该再发一次。"""
+    s = wakeplan.parse_schedule("07:30")
+    now = datetime(2026, 10, 13, 8, 0)
+    last = datetime(2026, 10, 13, 7, 0)
+
+    assert s is not None
+    assert wakeplan.should_fire(s, now, last) is False

@@ -52,8 +52,9 @@ def run_script() -> Path:
     return ROOT / "utils" / "run.py"
 
 
-def desktop_dir() -> Path:
-    if os.name == "nt":
+def desktop_dir(platform: str | None = None) -> Path:
+    """桌面目录；platform 参数供测试注入，避免为了测试去改全局的 os.name。"""
+    if (platform or platform_name()) == "windows":
         profile = os.environ.get("USERPROFILE", "").strip()
         base = Path(profile) if profile else Path.home()
         return base / "Desktop"
@@ -218,7 +219,7 @@ def create(
 ) -> tuple[bool, str]:
     """生成快捷方式；platform 参数供测试注入。"""
     name = platform or platform_name()
-    target = Path(directory).expanduser() if directory else desktop_dir()
+    target = Path(directory).expanduser() if directory else desktop_dir(name)
     removed = _remove_legacy(target)
     if name == "windows":
         ok, message = create_windows(DEFAULT_SHORTCUTS, target)

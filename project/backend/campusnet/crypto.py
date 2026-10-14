@@ -176,8 +176,17 @@ def _local_key() -> bytes:
     key = secrets.token_bytes(32)
     try:
         key_file.parent.mkdir(parents=True, exist_ok=True)
-        key_file.write_text(base64.urlsafe_b64encode(key).decode("ascii"), encoding="utf-8")
-        os.chmod(key_file, 0o600)
+        # 以 0600 建好再写：write_text 是按 umask 落盘的（POSIX 通常 0644），
+        # 「写完再 chmod」中间那段窗口里，同机其他用户就能读到这把钥匙——
+        # 读到它等于解开库里所有账号密码。
+        fd = os.open(key_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, base64.urlsafe_b64encode(key))
+            # 老版本留下的 0644 文件不会被 O_CREAT 的 mode 改过来，补一次；
+            # 就算这里失败，文件已是本次以 0600 新建的，不是安全缺口。
+            os.chmod(key_file, 0o600)
+        finally:
+            os.close(fd)
     except OSError:
         pass
     return key

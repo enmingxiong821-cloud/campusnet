@@ -777,7 +777,11 @@ async function toggleMonitor() {
 }
 
 async function probeNow() {
-  $('btnProbe').disabled = true;
+  // 「立即检测」有两个入口（状态卡和快速开始卡），两个都点得到同一个动作：
+  // 只锁 btnProbe 时，从另一个入口连点会并发跑两轮检测，进度条互相覆盖。
+  if (state.monitor.checking) return;
+  const probeButtons = [$('btnProbe'), $('btnQuickProbe')];
+  probeButtons.forEach(b => { if (b) b.disabled = true; });
   state.monitor.checking = true; renderStatus();
   resetProgress();               // 检测前清空进度，立刻开始拉
   pollProgress();                // 先拉一次，避免第一条进度晚 900ms 才到
@@ -798,7 +802,7 @@ async function probeNow() {
     clearInterval(watcher);
     await pollProgress();
     state.monitor.checking = false;
-    $('btnProbe').disabled = false;
+    probeButtons.forEach(b => { if (b) b.disabled = false; });
     renderStatus();
   }
 }

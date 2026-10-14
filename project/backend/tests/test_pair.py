@@ -47,3 +47,13 @@ def test_pair_code_failure_and_purge(store: Store) -> None:
 
     assert store.purge_pair_codes() >= 1
     assert store.get_pair_code(chash) is None
+
+
+def test_mark_pair_code_used_is_single_use(store: Store) -> None:
+    """同码只能被领走一次：第二次领取必须失败，否则「单次使用」是句空话。"""
+    chash = pair.code_hash("XYZ789")
+    store.add_pair_code(chash, "2099-01-01 00:00:00")
+
+    assert store.mark_pair_code_used(chash, "ua-1") is True
+    assert store.mark_pair_code_used(chash, "ua-2") is False
+    assert store.get_pair_code(chash)["user_agent"] == "ua-1"
