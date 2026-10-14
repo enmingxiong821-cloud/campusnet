@@ -180,7 +180,10 @@
     main{padding:14px} header{padding:12px 14px;gap:10px}
     .brand span.full{display:none}
     .card .val{font-size:20px}
-    th:nth-child(3),td:nth-child(3){display:none}
+    /* 只收窄账号表：它的第三列是「方式」，手机上最不占信息量。
+       原来这条没限定表格，等于把每个表的第三列都藏了——自检表的「说明」
+       和唤醒计划表的「时间表」正巧都在第三列，恰恰是手机上最需要看的。 */
+    #accountTable th:nth-child(3),#accountTable td:nth-child(3){display:none}
     .pg-item .who{display:none}
     /* 手机上表单改成单列，避免 210px 的两列挤成窄条 */
     .form-grid{grid-template-columns:1fr}
@@ -323,8 +326,8 @@
           目标链路是：通电 → 程序自动运行 → 自动认证你配置好的网络；机器开不开机由你远程决定
           （关机 / 唤醒 / 体检在「电源」页操作，开机需要 BIOS 上电自启 / 智能插座 / WOL 之一）。
           默认载体写在当前用户启动文件夹，是「登录后」语义；想要「通电就自动连」，
-          用桌面快捷方式「注册开机自启-无需登录(需管理员)」注册计划任务——开机触发、无论是否登录都运行，
-          需要管理员权限并确认一次 UAC。
+          点上方的「开启」注册计划任务——开机触发、无论是否登录都运行，
+          需要管理员权限（会弹一次 UAC 并要你输入当前 Windows 账户密码）。
           Linux 走 systemd 用户单元（无则退化为 XDG autostart），macOS 走 LaunchAgent。
         </p>
 
@@ -513,7 +516,10 @@ function renderProgress() {
   if (!progress.active) { panel.classList.remove('show'); return; }
   panel.classList.add('show');
 
-  $('pgStage').textContent = STAGE_TEXT[progress.items.at(-1)?.stage] || '进行中';
+  // 不用 items.at(-1)：那是 Chrome 92 / Safari 15.4 才有的方法，而这个控制台
+  // 主要是拿手机开的，老一点的 iOS/安卓 WebView 上会直接抛 TypeError、进度条整块白掉。
+  const last = progress.items[progress.items.length - 1];
+  $('pgStage').textContent = STAGE_TEXT[last?.stage] || '进行中';
   body.innerHTML = progress.items.slice(-40).map(it => `
     <div class="pg-item ${esc(it.stage)}">
       <span class="t">${fmtClock(it.ts)}</span>
@@ -922,8 +928,14 @@ $('btnRefreshEvents').onclick = loadEvents;
 $('evtAccount').onchange = loadEvents;
 $('btnClearEvents').onclick = async () => {
   if (!confirm('清空全部事件日志？')) return;
-  await api('/api/events/clear', { method:'POST', body:{} });
-  loadEvents();
+  // api() 失败是抛异常。不接住的话这个 async 回调只留一条 unhandled rejection：
+  // 界面既不清空也不报错，用户看到的就是「点了没反应」。
+  try {
+    await api('/api/events/clear', { method:'POST', body:{} });
+    loadEvents();
+  } catch (e) {
+    toast('清空失败: ' + e.message, 'err');
+  }
 };
 async function powerAction(action) {
   const label = action === 'off' ? '关机' : '重启';

@@ -136,6 +136,12 @@ const DEFAULTS = {
     'http://connectivitycheck.gstatic.com/generate_204',
   ],
   enabled: false,
+  // 这两个键只有 background.js 在用，但 DEFAULTS 在这里是另一份副本，而
+  // 「恢复默认设置」走的是 chrome.storage.local.remove(Object.keys(DEFAULTS))——
+  // 少列一个键，重置就会漏掉它（maxEvents / useLocalService 原本就是这么漏的）。
+  // 两处 DEFAULTS 必须保持一致，test-background.js 里有对照检查。
+  maxEvents: 200,
+  useLocalService: true,
   apiToken: '',
 };
 

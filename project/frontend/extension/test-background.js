@@ -790,6 +790,26 @@ function probeWith(fetchImpl) {
       });
     }
 
+    // —— DEFAULTS 有两份副本：background.js 与 options.html（设置页内联脚本）。
+    // 两边各自被 chrome.storage 读写，少列一个键，「恢复默认设置」
+    // （remove(Object.keys(DEFAULTS))）就会漏掉它，load() 那侧还会读到 undefined。
+    // 典型的「改一处忘另一处」，用文本对照锁住，不靠人记得。
+    describe('默认配置 DEFAULTS（两份副本）');
+    check('options.html 的 DEFAULTS 键与 background.js 完全一致', () => {
+      const keysOf = (file) => {
+        const src = fs.readFileSync(path.join(__dirname, file), 'utf8');
+        const m = /const DEFAULTS = \{[\s\S]*?\n\};/.exec(src);
+        if (!m) throw new Error(`${file} 里没找到 DEFAULTS`);
+        const literal = m[0].replace(/^const DEFAULTS = /, '').replace(/;$/, '');
+        return Object.keys(vm.runInNewContext('(' + literal + ')')).sort();
+      };
+      eq(
+        JSON.stringify(keysOf('options.html')),
+        JSON.stringify(keysOf('background.js')),
+        '两处 DEFAULTS 的键集合必须相同'
+      );
+    });
+
     console.log(`\n=== 结果：${passed} 通过，${failures.length} 失败 ===\n`);
     for (const [name, s] of groupStats) {
       const mark = s.failed === 0 ? 'OK  ' : 'FAIL';
