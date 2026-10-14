@@ -351,19 +351,45 @@ def test_discover_never_raises_on_garbage_seed() -> None:
     assert report["hints"]
 
 
-def test_discover_candidates_sorted_by_credibility(portal_server) -> None:  # noqa: ANN001
-    base, handler = portal_server
-    handler.pages["/noform"] = PLAIN_HTML
-    handler.pages["/eportal/portal/login"] = DRCOM_HTML
+def test_discover_candidates_sorted_by_credibility(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """可信度排序：有表单 > 有标题 > 路径含 login；顺带验证按 URL 去重。
+
+    扫描结果换成固定值——真去扫网关的话，结果随跑它的机器所处的网络而变，
+    断言得靠 if 兜着，等于没测。
+    """
+    plain = discovery.PortalCandidate(url="http://10.0.0.1/plain", status=200)
+    login_only = discovery.PortalCandidate(url="http://10.0.0.1/login", status=200)
+    with_form = discovery.PortalCandidate(
+        url="http://10.0.0.1/x",
+        status=200,
+        title="认证",
+        username_field="u",
+        password_field="p",
+    )
+    duplicate = discovery.PortalCandidate(url="http://10.0.0.1/login", status=200)
+
+    monkeypatch.setattr(
+        discovery.probe_mod,
+        "detect_portal_url",
+        lambda url, timeout=4.0: "http://10.0.0.1/portal",
+    )
+    monkeypatch.setattr(
+        discovery,
+        "scan_urls",
+        lambda urls, timeout=4.0: [plain, login_only, with_form, duplicate],
+    )
 
     report = discovery.discover(
-        seed=f"{base}/noform", timeout=3.0, include_gateway_scan=False
+        seed="http://127.0.0.1:9/x", timeout=1.0, include_gateway_scan=False
     )
-    # 没表单的页面可能因为探活已放行而不进入候选，直接验证排序逻辑本身
-    urls = [c["url"] for c in report["candidates"]]
-    assert len(urls) == len(set(urls))  # 去重生效
-    if report["candidates"]:
-        assert report["candidates"][0]["username_field"] != ""
+
+    assert [c["url"] for c in report["candidates"]] == [
+        with_form.url,
+        login_only.url,
+        plain.url,
+    ]
 
 
 def test_dump_is_json() -> None:
@@ -389,3 +415,24 @@ def test_portal_paths_are_absolute() -> None:
 def test_probe_candidates_include_plain_http() -> None:
     assert all(u.startswith("http://") for u in discovery.PROBE_CANDIDATES)
     assert len(set(discovery.PROBE_CANDIDATES)) == len(discovery.PROBE_CANDIDATES)
+
+
+def test_detect_dns_hijack_ignores_loopback() -> None:
+    """回环是自己，不是被劫持的门户。
+
+    以前这里把 127.0.0.1 判成劫持，discover() 就凭空造出 http://127.0.0.1/ 去扫，
+    用例的红绿于是取决于跑它的机器上那个端口有没有人应答。
+    """
+    assert discovery.detect_dns_hijack("127.0.0.1") is None
+    assert discovery.detect_dns_hijack("localhost") is None
+
+
+def test_discover_ignores_non_http_seed() -> None:
+    """种子来自 API 参数，file:// 这类不能拿去发请求。"""
+    report = discovery.discover(
+        seed="file:///etc/hosts", timeout=1.0, include_gateway_scan=False
+    )
+
+    assert any("忽略非 http/https" in hint for hint in report["hints"])
+    # 种子被换成了默认探活地址：真拿 file:// 去探的话状态会是 unsupported_scheme
+    assert report["probe_status"] != "unsupported_scheme"
