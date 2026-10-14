@@ -220,12 +220,18 @@ class Notifier:
                 self._failures[account_id] = count
                 if count < self.after_failures or account_id in self._notified:
                     return ""
-                self._notified.add(account_id)
                 if not self.event_enabled("failing"):
                     return ""
                 kind = "failing"
                 text = f"⚠️ {account_name} 连续 {count} 次未连上（{message or state}）"
-        self.send(kind, text, account=account_name, state=state)
+        if not self.send(kind, text, account=account_name, state=state):
+            # 没发出去就当没发过：返回空串，让调用方别把它记成「已发送」，
+            # 也不要在 `_notified` 上落账——落了账下一轮就在这里短路，
+            # webhook 恢复后这条「掉线」永远补不上（原来就是先记账再发送）。
+            return ""
+        if kind == "failing":
+            with self._lock:
+                self._notified.add(account_id)
         return kind
 
     def send(

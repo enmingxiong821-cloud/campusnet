@@ -69,8 +69,35 @@ def test_send_failure_is_swallowed(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(notify, "_post", lambda url, payload: False)
     notifier = notify.Notifier("http://hook.test/x", after_failures=1)
 
-    assert notifier.observe(1, "宿舍", False, "offline") == "failing"
-    assert notifier.observe(1, "宿舍", True, "online") == "recovered"
+    # 返回值必须是「什么都没发出去」：monitor 拿它决定要不要写
+    # 「已发送…通知」那条日志，返回 kind 就等于让日志报一件没发生的事。
+    assert notifier.observe(1, "宿舍", False, "offline") == ""
+    assert notifier.observe(1, "宿舍", True, "online") == ""
+
+
+def test_failed_failure_notice_retries_until_sent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """webhook 恰好不可达那一轮，不能把这次掉线记成「已通知」。
+
+    原来先 `_notified.add()` 再发送，且丢掉发送结果：那一轮之后每轮都在
+    `_notified` 上短路，掉线通知永远补不上。要等真发出去了才落这笔账。
+    """
+    outcomes = [False, False, True]
+    bodies: list[dict] = []
+
+    def flaky(url: str, payload: dict) -> bool:
+        bodies.append(payload)
+        return outcomes.pop(0)
+
+    monkeypatch.setattr(notify, "_post", flaky)
+    notifier = notify.Notifier("http://hook.test/x", after_failures=1)
+
+    assert notifier.observe(1, "宿舍", False, "offline") == ""  # 头一轮发失败
+    assert notifier.observe(1, "宿舍", False, "offline") == ""  # 接着重试
+    assert notifier.observe(1, "宿舍", False, "offline") == "failing"  # 这次通了
+    # 补上之后「只提醒一次」才生效，不能继续每轮轰炸
+    assert notifier.observe(1, "宿舍", False, "offline") == ""
+
+    assert len(bodies) == 3
 
 
 def test_post_swallows_unreachable_host() -> None:
