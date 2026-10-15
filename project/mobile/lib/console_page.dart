@@ -5,20 +5,31 @@
 /// 所以先探活，再决定显示哪个。
 library;
 
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 
 import 'api.dart';
+import 'store.dart';
+import 'wake_view.dart';
+import 'wol.dart';
+
+/// 往网页里注入的 JS 用它把结果送回来。名字随便取，只要两边一致。
+const String _bridgeChannel = 'CampusNetBridge';
 
 class ConsolePage extends StatefulWidget {
   const ConsolePage({
     super.key,
     required this.baseUrl,
+    required this.store,
     this.pairCode = '',
     required this.onEditSettings,
   });
 
   final String baseUrl;
+
+  final AppStore store;
 
   /// 首次配对时从配置页带过来的 6 位码，控制台会自己认 `#pair=` 段。
   final String pairCode;
@@ -56,8 +67,12 @@ class _ConsolePageState extends State<ConsolePage> {
     if (reachable && _controller == null) {
       _controller = WebViewController()
         ..setJavaScriptMode(JavaScriptMode.unrestricted)
+        ..addJavaScriptChannel(_bridgeChannel, onMessageReceived: _onWakeInfo)
         ..setNavigationDelegate(
           NavigationDelegate(
+            // 每次页面加载完都试一次同步网卡 MAC。控制台也是在这时候才把
+            // 配对码换成会话的，所以注入的脚本自己会重试几次。
+            onPageFinished: (_) => _syncWakeInfo(),
             // 页面自己加载失败（服务中途停了、手机切了网）时退回离线态，
             // 而不是把错误页留在屏幕上。
             onWebResourceError: (error) {
@@ -68,6 +83,64 @@ class _ConsolePageState extends State<ConsolePage> {
           ),
         )
         ..loadRequest(Uri.parse(_initialUrl));
+    }
+  }
+
+  /// 在页面自己的上下文里读网卡 MAC，存到本地供关机后唤醒用。
+  ///
+  /// 走这条路而不是 APP 直接请求，是因为 `/api/power/info` 要鉴权，而
+  /// WebView 里带着控制台自己的会话 Cookie——同源 fetch 自动就带上了，
+  /// APP 不必去碰令牌那一套。没登录时它返回非 2xx，脚本什么都不做。
+  void _syncWakeInfo() {
+    if (widget.store.targets.isNotEmpty) return;
+    _controller?.runJavaScript('''
+      (function () {
+        var ask = function () {
+          fetch('/api/power/info', { credentials: 'same-origin' })
+            .then(function (r) { return r.ok ? r.json() : null; })
+            .then(function (d) {
+              if (d && d.macs && d.macs.length) {
+                $_bridgeChannel.postMessage(JSON.stringify({
+                  macs: d.macs,
+                  broadcast: d.broadcast || ''
+                }));
+              }
+            })
+            .catch(function () {});
+        };
+        ask();
+        // 配对码是页面加载之后才去兑换的，那时会话还没建好，第一次多半 401。
+        setTimeout(ask, 4000);
+        setTimeout(ask, 12000);
+      })();
+    ''');
+  }
+
+  Future<void> _onWakeInfo(JavaScriptMessage message) async {
+    if (widget.store.targets.isNotEmpty) return;
+    final Object? decoded;
+    try {
+      decoded = jsonDecode(message.message);
+    } on FormatException {
+      return;
+    }
+    if (decoded is! Map) return;
+    final macs = decoded['macs'];
+    if (macs is! List || macs.isEmpty) return;
+
+    final host = Uri.parse(widget.baseUrl).host;
+    final broadcast = '${decoded['broadcast'] ?? ''}'.trim();
+    // 只记第一个。后端取的是 getmac 的输出、把「已连接」的排在前面，但虚拟网卡
+    // （Hyper-V / VMware）也自称已连接，所以这里可能记错——离线页上把 MAC 原样
+    // 显示出来，就是为了让用户能一眼看出不对并改掉。
+    final first = '${macs.first}'.trim();
+    if (first.isEmpty) return;
+    try {
+      await widget.store.saveTargets([
+        WakeTarget(name: host, mac: normalizeMac(first), broadcast: broadcast),
+      ]);
+    } on WolError {
+      return;
     }
   }
 
@@ -146,56 +219,12 @@ class _ConsolePageState extends State<ConsolePage> {
     if (_reachable && _controller != null) {
       return WebViewWidget(controller: _controller!);
     }
-    return _OfflineView(baseUrl: widget.baseUrl, onRetry: _probe);
-  }
-}
-
-class _OfflineView extends StatelessWidget {
-  const _OfflineView({required this.baseUrl, required this.onRetry});
-
-  final String baseUrl;
-  final Future<void> Function() onRetry;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Center(
-      child: SingleChildScrollView(
-        padding: const EdgeInsets.all(24),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(
-              Icons.power_off,
-              size: 56,
-              color: theme.colorScheme.onSurfaceVariant,
-            ),
-            const SizedBox(height: 16),
-            Text('连不上那台电脑', style: theme.textTheme.titleLarge),
-            const SizedBox(height: 8),
-            Text(
-              baseUrl,
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: theme.colorScheme.onSurfaceVariant,
-              ),
-            ),
-            const SizedBox(height: 20),
-            Text(
-              '电脑关机时这是正常的——远程唤醒由下一步的「开机」功能负责。\n'
-              '如果电脑开着，检查它是否以 --host 0.0.0.0 启动，'
-              '以及防火墙是否放行了该端口。',
-              textAlign: TextAlign.center,
-              style: theme.textTheme.bodyMedium?.copyWith(height: 1.5),
-            ),
-            const SizedBox(height: 24),
-            FilledButton.icon(
-              onPressed: onRetry,
-              icon: const Icon(Icons.refresh),
-              label: const Text('重试'),
-            ),
-          ],
-        ),
-      ),
+    return WakeView(
+      baseUrl: widget.baseUrl,
+      store: widget.store,
+      onRetry: _probe,
+      // 叫醒之后先探活再建 WebView：控制器可能还没建过（APP 一开就是离线态）。
+      onAwoke: _probe,
     );
   }
 }

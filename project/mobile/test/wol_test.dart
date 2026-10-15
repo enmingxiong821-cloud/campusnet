@@ -90,6 +90,39 @@ void main() {
     });
   });
 
+  group('定向广播的挑选', () {
+    test('后端只回全局广播时，用按控制台地址猜的那个', () {
+      // 后端现在写死回 255.255.255.255，那个值没有增量信息——等于没给。
+      expect(directedBroadcastFor('192.168.1.5', '255.255.255.255'), '192.168.1.255');
+      expect(directedBroadcastFor('192.168.1.5', ''), '192.168.1.255');
+      expect(directedBroadcastFor('192.168.1.5', '   '), '192.168.1.255');
+    });
+
+    test('后端给了别的广播地址就听后端的', () {
+      // 将来后端补上真正的子网定向广播（/23、/16 之类），这里必须跟着走，
+      // 不能再退回按 /24 猜的那个。
+      expect(directedBroadcastFor('192.168.1.5', '192.168.0.255'), '192.168.0.255');
+      expect(directedBroadcastFor('pc.tailnet.ts.net', '100.64.0.255'), '100.64.0.255');
+    });
+
+    test('两边都给不出就返回空串，调用方只发全局广播', () {
+      expect(directedBroadcastFor('pc.tailnet.ts.net', ''), '');
+      expect(directedBroadcastFor('pc.tailnet.ts.net', '255.255.255.255'), '');
+    });
+  });
+
+  group('MAC 显示格式', () {
+    test('还原成冒号分隔，且认各种输入写法', () {
+      expect(formatMac('AABBCCDDEEFF'), 'AA:BB:CC:DD:EE:FF');
+      expect(formatMac('aa:bb:cc:dd:ee:ff'), 'AA:BB:CC:DD:EE:FF');
+      expect(formatMac('AA-BB-CC-DD-EE-FF'), 'AA:BB:CC:DD:EE:FF');
+    });
+
+    test('长度不对照旧报错——显示这一步不替调用方兜底', () {
+      expect(() => formatMac('AA:BB:CC'), throwsA(isA<WolError>()));
+    });
+  });
+
   group('控制台地址归一化', () {
     test('缺 scheme 补 http，缺端口补 2268', () {
       expect(normalizeBaseUrl('192.168.1.5:2268'), 'http://192.168.1.5:2268');

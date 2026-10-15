@@ -52,6 +52,7 @@ class _CampusNetAppState extends State<CampusNetApp> {
           : ConsolePage(
               key: ValueKey(_consoleGeneration),
               baseUrl: _baseUrl,
+              store: widget.store,
               pairCode: _pairCode,
               onEditSettings: () => setState(() => _baseUrl = ''),
             ),

@@ -70,6 +70,29 @@ String? guessBroadcast(String host) {
   return '${parts[0]}.${parts[1]}.${parts[2]}.255';
 }
 
+/// 挑出该往哪个定向广播地址发包。
+///
+/// 优先用后端给的值——将来后端补上真正的子网定向广播（现在 `wake_info()`
+/// 写死全局广播）时，这里自动受益。后端只回全局广播时那个值没有增量信息，
+/// 改用按控制台地址猜的那个：控制台地址就是那台电脑，跟它同网段。
+/// 两边都给不出就返回空串，调用方只发全局广播。
+String directedBroadcastFor(String host, String fromBackend) {
+  final value = fromBackend.trim();
+  if (value.isNotEmpty && value != globalBroadcast) return value;
+  return guessBroadcast(host) ?? '';
+}
+
+/// 把归一化后的 MAC 还原成 `AA:BB:CC:DD:EE:FF`。纯粹为了给人看——
+/// 12 位连排的十六进制没人能一眼对上贴在机箱上的那串。
+String formatMac(String mac) {
+  final hex = normalizeMac(mac);
+  final parts = <String>[];
+  for (var index = 0; index < hex.length; index += 2) {
+    parts.add(hex.substring(index, index + 2));
+  }
+  return parts.join(':');
+}
+
 /// 往一个广播地址发一次魔术包，返回实际发出的字节数。
 ///
 /// 每次都用新 socket：绑定时会占用一个随机端口，随用随关最省心，也避免
