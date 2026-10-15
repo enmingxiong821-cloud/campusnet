@@ -56,6 +56,10 @@ class Account:
             "portal_url": self.portal_url,
             "probe_url": self.probe_url,
             "username": self.username,
+            # 只回「有没有密码」，绝不回密码本身。编辑框永远拿不到明文，
+            # 于是「留空 = 不修改」这条规则用户无从确认——他只看到一个空框，
+            # 分不清密码还在、还是被清空了。给个布尔就够了，不泄露任何内容。
+            "has_password": bool(self.password),
             "username_field": self.username_field,
             "password_field": self.password_field,
             "password_mode": self.password_mode,

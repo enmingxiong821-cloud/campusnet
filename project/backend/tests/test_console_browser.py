@@ -242,3 +242,103 @@ def test_console_settings_save_persists_interval_headless_autostart(store):
         httpd.shutdown()
         httpd.server_close()
         thread.join(timeout=5)
+
+
+def test_console_edit_account_says_whether_password_is_kept(store):
+    """编辑账号时必须让用户看清密码还在不在——编辑框本来就不回显。
+
+    后端刻意不把密码回给界面（`Account.public()` 里没有 password），所以编辑框永远是
+    个空框：「原密码还在」和「密码被清空了」在屏幕上长得一模一样。用户按提示留空保存、
+    再打开一看还是空的，很自然会认定「密码没保存」。这里锁住四件事：编辑态标签不带
+    必填星号、占位提示说明密码已保存、保存结果明说密码动没动、没密码的账号另有一套提示。
+    """
+    channel = os.environ.get("CAMPUSNET_BROWSER_CHANNEL")
+    if not channel:
+        pytest.skip("Set CAMPUSNET_BROWSER_CHANNEL to enable real browser checks")
+    from playwright.sync_api import expect, sync_playwright
+
+    with_pw = store.add_account(
+        Account(
+            name="有密码",
+            username="u1",
+            password="OLD_PW",
+            portal_url="http://10.0.0.1/eportal/portal/login",
+        )
+    )
+    store.add_account(
+        Account(
+            name="没密码",
+            username="u2",
+            password="",
+            portal_url="http://10.0.0.2/eportal/portal/login",
+        )
+    )
+    handler = server.build_handler(store, MonitorManager())
+    server._install_dispatch(handler)
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    httpd.daemon_threads = True
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(channel=channel, headless=True)
+            try:
+                page = browser.new_page(viewport={"width": 1280, "height": 900})
+                errors = []
+                page.on("pageerror", lambda error: errors.append(str(error)))
+                page.goto(f"http://127.0.0.1:{httpd.server_port}/")
+                expect(page.locator("#accountTable tbody tr")).to_have_count(2)
+
+                def open_edit(name):
+                    page.locator("tr", has_text=name).locator(
+                        'button[data-act="edit"]'
+                    ).click()
+
+                def closed():
+                    page.wait_for_function(
+                        "() => !document.querySelector('#modalBg').classList.contains('open')"
+                    )
+
+                # 有密码的账号：编辑态不该再标必填，占位提示说明密码还在
+                open_edit("有密码")
+                expect(page.locator("#lblPassword")).to_have_text("认证密码")
+                expect(page.locator("#fPassword")).to_have_attribute(
+                    "placeholder", "已保存，留空则不修改"
+                )
+                expect(page.locator("#fPassword")).to_have_value("")
+
+                # 留空保存：原密码必须留住，提示要说明「未变动」
+                page.locator("#btnSave").click()
+                closed()
+                expect(page.locator("#toast")).to_contain_text("已保存，密码未变动")
+                kept = store.get_account(with_pw)
+                assert kept is not None and kept.password == "OLD_PW"
+
+                # 填了新密码：覆盖，提示要说明「已更新」
+                open_edit("有密码")
+                page.locator("#fPassword").fill("NEW_PW_123")
+                page.locator("#btnSave").click()
+                closed()
+                expect(page.locator("#toast")).to_contain_text("已保存，密码已更新")
+                changed = store.get_account(with_pw)
+                assert changed is not None and changed.password == "NEW_PW_123"
+
+                # 没密码的账号：不能沿用「留空则不修改」，那会让用户以为曾设过密码
+                open_edit("没密码")
+                expect(page.locator("#fPassword")).to_have_attribute(
+                    "placeholder", "这个账号还没有密码"
+                )
+
+                # 添加态仍然是必填
+                page.locator("#btnCancel").click()
+                page.locator("#btnAdd").click()
+                expect(page.locator("#lblPassword")).to_have_text("认证密码 *")
+                expect(page.locator("#fPassword")).to_have_attribute("placeholder", "")
+
+                assert errors == []
+            finally:
+                browser.close()
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join(timeout=5)

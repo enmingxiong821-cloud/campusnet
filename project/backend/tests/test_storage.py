@@ -35,22 +35,35 @@ def test_add_and_get_account(store: Store, account: Account) -> None:
 
 def test_password_not_exposed_in_public(account: Account) -> None:
     account.password = "topsecret"
-    assert "topsecret" not in str(account.public())
+    public = account.public()
+    assert "topsecret" not in str(public)
+    # 只放行「有没有密码」这一个布尔。控制台编辑框永远拿不到明文，
+    # 界面只能靠它把「留空 = 不修改」这句提示坐实。
+    assert public["has_password"] is True
+
+    account.password = ""
+    assert account.public()["has_password"] is False
 
 
-def test_update_account_keeps_password_when_blank(
-    store: Store, account: Account
-) -> None:
+def test_update_account_writes_password_verbatim(store: Store, account: Account) -> None:
+    """存储层忠实写入传入的 Account——「留空 = 保留原密码」不是它的职责。
+
+    那条语义在服务端（`server._account_from_payload`），由
+    `test_server.test_update_keeps_password_when_blank_and_replaces_when_given` 锁住。
+    本用例原来叫 `..._keeps_password_when_blank`，但函数体把空串赋下去又立刻用旧值
+    覆盖回去，实际只断言了改名字，「留空」那一支谁也没验过。
+    """
     new_id = store.add_account(account)
     changed = store.get_account(new_id)
     assert changed is not None
     changed.name = "改过的名字"
-    changed.password = ""
-    changed.password = "p@ssw0rd"  # 服务端在 payload 为空时保留旧密码
+    changed.password = "换过的密码"
     assert store.update_account(new_id, changed)
 
     again = store.get_account(new_id)
-    assert again is not None and again.name == "改过的名字"
+    assert again is not None
+    assert again.name == "改过的名字"
+    assert again.password == "换过的密码"
 
 
 def test_extra_fields_roundtrip(store: Store) -> None:

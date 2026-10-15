@@ -835,6 +835,62 @@ def test_update_missing_account_404(api: _Api) -> None:
     assert "不存在" in data["error"]
 
 
+def test_update_keeps_password_when_blank_and_replaces_when_given(
+    api: _Api, store: Store
+) -> None:
+    """编辑账号时密码框留空必须保留原密码，填了才覆盖。
+
+    控制台编辑框永远不回显密码（`Account.public()` 不含 password），用户看到的就是
+    一个空框，保存时前端把这个空串原样送进 PUT。这里锁住「空串 = 不改、非空 = 覆盖」，
+    顺便锁住 `has_password` —— 界面就靠它把「已保存，留空则不修改」讲明白。
+    """
+    _, created = call(
+        f"{api}/api/accounts",
+        "POST",
+        {
+            "name": "宿舍",
+            "portal_url": "http://10.0.0.1/eportal/portal/login",
+            "username": "u1",
+            "password": "OLD",
+        },
+    )
+    acc_id = created["id"]
+    assert created["account"]["has_password"] is True
+    assert "password" not in created["account"]
+
+    # 只改名字，密码传空串（与控制台的行为一致）——原密码必须留住
+    status, updated = call(
+        f"{api}/api/accounts/{acc_id}",
+        "PUT",
+        {"name": "宿舍2", "portal_url": "http://10.0.0.1/x", "password": ""},
+    )
+    assert status == 200, updated
+    assert updated["account"]["has_password"] is True
+    kept = store.get_account(acc_id)
+    assert kept is not None and kept.password == "OLD"
+
+    # 填了新密码就覆盖
+    status, updated = call(
+        f"{api}/api/accounts/{acc_id}",
+        "PUT",
+        {"name": "宿舍2", "portal_url": "http://10.0.0.1/x", "password": "NEW"},
+    )
+    assert status == 200, updated
+    changed = store.get_account(acc_id)
+    assert changed is not None and changed.password == "NEW"
+    assert changed.public()["has_password"] is True
+
+
+def test_account_without_password_reports_has_password_false(api: _Api) -> None:
+    _, created = call(
+        f"{api}/api/accounts",
+        "POST",
+        {"name": "没密码", "portal_url": "http://10.0.0.1/x", "username": "u1"},
+    )
+    assert created["account"]["has_password"] is False
+    assert "password" not in created["account"]
+
+
 def test_create_validation_errors(api: _Api) -> None:
     status, data = call(f"{api}/api/accounts", "POST", {"portal_url": "http://a"})
     assert status == 400 and "名称" in data["error"]

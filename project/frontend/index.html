@@ -453,7 +453,7 @@
       <div class="form-grid">
         <label><span class="lbl">备注名 *</span><input id="fName" placeholder="宿舍 / 实验室"></label>
         <label><span class="lbl">认证账号 *</span><input id="fUsername"></label>
-        <label><span class="lbl">认证密码 *</span><input type="password" id="fPassword"></label>
+        <label><span class="lbl" id="lblPassword">认证密码 *</span><input type="password" id="fPassword"></label>
         <label><span class="lbl">门户地址 *</span><input id="fPortal" placeholder="http://10.0.0.1/eportal/portal/login"></label>
         <label><span class="lbl">探测地址</span><input id="fProbe" value="http://www.msftconnecttest.com/connecttest.txt"></label>
         <label><span class="lbl">登录方式</span>
@@ -1091,8 +1091,18 @@ async function refresh() {
 function openModal(acc) {
   state.editingId = acc ? acc.id : null;
   $('modalTitle').textContent = acc ? '编辑账号' : '添加账号';
+  // 后端只给「有没有密码」（has_password），明文从不回显，所以编辑框一定是空的。
+  // 空框本身没说清任何事：密码还在、还是被清空了，看上去一模一样。用 label、
+  // 占位提示和下面 saveAccount 的保存结果把这件事讲明白。
+  const hasPw = !!(acc && acc.has_password);
+  $('lblPassword').textContent = acc ? '认证密码' : '认证密码 *';
+  $('fPassword').placeholder = acc
+    ? (hasPw ? '已保存，留空则不修改' : '这个账号还没有密码')
+    : '';
   $('modalHint').textContent = acc
-    ? '密码留空表示不修改原密码'
+    ? (hasPw
+      ? '密码已保存，出于安全不回显。留空表示不修改，填写则覆盖。'
+      : '这个账号还没保存密码，请填写后保存。')
     : '门户地址与表单字段名不确定也没关系：字段名留空会自动识别，必要时改用浏览器登录。';
   const set = (id, v) => { $(id).value = v ?? ''; };
   set('fName', acc?.name); set('fUsername', acc?.username); set('fPassword', '');
@@ -1113,10 +1123,12 @@ async function saveAccount() {
     try { extra = JSON.parse(rawExtra); }
     catch { toast('附加字段 JSON 格式不对', 'err'); return; }
   }
+  const newPassword = $('fPassword').value;
+  const editing = state.editingId;
   const body = {
     name: $('fName').value.trim(),
     username: $('fUsername').value.trim(),
-    password: $('fPassword').value,
+    password: newPassword,
     portal_url: $('fPortal').value.trim(),
     probe_url: $('fProbe').value.trim(),
     login_mode: $('fLoginMode').value,
@@ -1129,10 +1141,13 @@ async function saveAccount() {
   };
   await once($('btnSave'), async () => {
     try {
-      if (state.editingId) await api(`/api/accounts/${state.editingId}`, { method:'PUT', body });
+      if (editing) await api(`/api/accounts/${editing}`, { method:'PUT', body });
       else await api('/api/accounts', { method:'POST', body });
       $('modalBg').classList.remove('open');
-      toast(state.editingId ? '已保存' : '已添加', 'ok');
+      // 保存结果明说是「密码动了」还是「没动」：编辑框本来就是空的，只回一句
+      // 「已保存」的话，用户没法判断刚填进去的新密码到底生效没有。
+      toast(!editing ? '已添加'
+        : newPassword ? '已保存，密码已更新' : '已保存，密码未变动', 'ok');
       refresh();
     } catch (e) { toast('保存失败: ' + e.message, 'err'); }
   });
