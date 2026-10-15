@@ -73,6 +73,20 @@ def test_distribution_scan_rejects_sensitive_filename(tmp_path):
     ]
 
 
+def test_dependency_lockfiles_escape_only_the_name_rule(tmp_path):
+    """pubspec.lock 这类依赖锁文件必须入库，不该被 `.lock` 后缀误伤。
+
+    豁免的只是名字规则——内容规则照旧，否则往锁文件里塞个手机号就能绕过去。
+    """
+    relative = Path("project/mobile/pubspec.lock")
+    (tmp_path / relative.parent).mkdir(parents=True)
+    (tmp_path / relative).write_text("packages: {}\n", encoding="utf-8")
+    assert scanner.scan_file(tmp_path, relative) == []
+
+    (tmp_path / relative).write_text("phone: 13800000000\n", encoding="utf-8")
+    assert scanner.scan_file(tmp_path, relative) == ["疑似手机号"]
+
+
 def test_fixture_exemption_does_not_exempt_phone_number(tmp_path):
     relative = Path("utils/mock_portal.py")
     (tmp_path / relative.parent).mkdir()

@@ -22,6 +22,18 @@ SENSITIVE_SUFFIXES = (
     ".log",
     ".lock",
 )
+#: 依赖锁文件必须入库（.gitignore 那边也是这个口径，所以只忽略 database/*.lock
+#: 而不是 *.lock），可它们的名字又都落在 `.lock` 后缀上。内容是包管理器从公开
+#: 仓库生成的包名、版本与哈希，写不进本机的凭据，所以按名字豁免。
+DEPENDENCY_LOCKFILES = {
+    "pubspec.lock",
+    "uv.lock",
+    "poetry.lock",
+    "pipfile.lock",
+    "cargo.lock",
+    "gemfile.lock",
+    "composer.lock",
+}
 ACCOUNT_NUMBER = re.compile(r"(?<!\d)20\d{8}(?!\d)")
 PHONE_NUMBER = re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)")
 
@@ -141,7 +153,9 @@ def scan_file(
     local: list[re.Pattern[str]] | None = None,
 ) -> list[str]:
     name = relative.name.lower()
-    if name in SENSITIVE_NAMES or name.endswith(SENSITIVE_SUFFIXES):
+    if name in SENSITIVE_NAMES:
+        return ["敏感文件名"]
+    if name.endswith(SENSITIVE_SUFFIXES) and name not in DEPENDENCY_LOCKFILES:
         return ["敏感文件名"]
     path = root / relative
     if not path.is_file():
