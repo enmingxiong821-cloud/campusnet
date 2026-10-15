@@ -52,6 +52,22 @@ tmp/
 # 打包产物（PyInstaller）
 build/
 dist/
+
+# Flutter 移动端（project/mobile）。flutter create 在工程内生成的那两份
+# .gitignore 已经管住了它自己的 build/ 与 android/ 下的签名材料，这里补的
+# 是它们够不着的：被拷到仓库别处（比如桌面根目录）的 APK 与密钥库。
+# 注意：下面都故意不带斜杠——带斜杠会锚定到仓库根，而根下并没有 android/
+# 目录，「android/key.properties」这种写法会变成永远匹配不上的死规则。
+.dart_tool/
+.flutter-plugins
+*.iml
+*.apk
+*.aab
+# key.properties 是密钥库口令，.jks/.keystore 是密钥库本身。落点不一定在
+# android/ 下，所以不按目录锚定。泄了等于别人能签发冒充你的更新包。
+*.jks
+*.keystore
+
 # 抓包/验证工作区。`tmp/` 管不到它——目录名差一个下划线。
 # 这里曾躺着明文真实学号与口令，以及从门户抓下来的第三方厂商 JS。
 _tmp/

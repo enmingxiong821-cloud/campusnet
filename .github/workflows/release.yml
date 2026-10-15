@@ -109,6 +109,14 @@ jobs:
           find "dist/${NAME}" -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
           find "dist/${NAME}" -name '.pytest_cache' -type d -exec rm -rf {} + 2>/dev/null || true
           find "dist/${NAME}" \( -name '*.log' -o -name '*.db' -o -name '*.db-wal' -o -name '*.key' \) -delete
+          # Flutter 移动端（project/mobile）的构建产物不进包。源码照发——用户可以
+          # 自己构建——但一次本地 APK 构建会在 build/ 与 android/.gradle/ 下留几百 MB
+          # 中间物，能把分发包撑大一个量级（cp -r 不受 .gitignore 约束）。
+          # local.properties 记的是本机 Android SDK 绝对路径，换台机器即失效，不该发。
+          rm -rf "dist/${NAME}/project/mobile/build"
+          rm -rf "dist/${NAME}/project/mobile/.dart_tool"
+          rm -rf "dist/${NAME}/project/mobile/android/.gradle"
+          rm -f "dist/${NAME}/project/mobile/android/local.properties"
 
       - name: 校验包内无凭据
         run: |
@@ -117,6 +125,15 @@ jobs:
           for pattern in '*.db' '*.db-wal' '*.key' 'config.json' '*.log'; do
             if find "dist/${NAME}" -name "$pattern" | grep -q .; then
               echo "::error::分发包含敏感文件: $pattern"
+              fail=1
+            fi
+          done
+          # APK 签名材料与产物都不该进包：.jks/.keystore 是密钥库本身，
+          # key.properties 里是它的口令，泄了等于别人能签发冒充你的更新包；
+          # *.apk/*.aab 是构建产物，本就该由 release.yml 自己产出，不该从仓库发。
+          for pattern in '*.jks' '*.keystore' 'key.properties' '*.apk' '*.aab'; do
+            if find "dist/${NAME}" -name "$pattern" | grep -q .; then
+              echo "::error::分发包含签名材料或移动端产物: $pattern"
               fail=1
             fi
           done

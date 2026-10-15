@@ -1,0 +1,23 @@
+name: campusnet_mobile
+description: "校园网自连的 Android 外壳：WebView 嵌控制台，原生补上远程唤醒。"
+publish_to: 'none'
+# 版本号只在这里占位。真正打包时由 --build-name / --build-number 覆盖成发版号，
+# 免得同一个版本号在 pubspec 和 tag 里各存一份、迟早对不上。
+version: 0.0.0+1
+
+environment:
+  sdk: ^3.13.5
+
+dependencies:
+  flutter:
+    sdk: flutter
+  shared_preferences: ^2.5.6
+  webview_flutter: ^4.14.1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
