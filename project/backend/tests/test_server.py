@@ -584,9 +584,10 @@ def test_power_action_requires_confirm(api, monkeypatch) -> None:  # noqa: ANN00
 
 
 def test_power_info_exposes_wake_instructions(api, monkeypatch) -> None:  # noqa: ANN001
+    seen: list[dict] = []
     monkeypatch.setattr(
         "campusnet.power.wake_info",
-        lambda: {
+        lambda **kwargs: seen.append(kwargs) or {
             "macs": ["AC:45:EF:49:B7:F4"],
             "command": "python utils/run.py power wake --mac AC:45:EF:49:B7:F4",
             "notes": ["BIOS 里设断电恢复为 Power On"],
@@ -599,6 +600,8 @@ def test_power_info_exposes_wake_instructions(api, monkeypatch) -> None:  # noqa
     assert data["ok"] is True
     assert data["macs"] == ["AC:45:EF:49:B7:F4"]
     assert "power wake" in data["command"]
+    # 定向广播要按「手机实际访问的那个地址」算，所以 Host 头必须原样传进去。
+    assert seen == [{"host": "127.0.0.1"}]
 
 
 def test_power_action_executes_with_confirm(api, monkeypatch) -> None:  # noqa: ANN001

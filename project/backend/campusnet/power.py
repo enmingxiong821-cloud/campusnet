@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import os
 import re
 import shutil
@@ -163,8 +164,122 @@ def local_macs(platform: str | None = None) -> list[str]:
     return macs
 
 
-def wake_info(port: int = WOL_PORT) -> dict[str, object]:
-    """远程开机需要的信息：网卡 MAC、唤醒命令，以及三条硬件路线的说明。"""
+_IPV4_RE = re.compile(r"\d+\.\d+\.\d+\.\d+")
+
+# POSIX 两种 ifconfig 写法：BSD 是 `netmask 0xffffff00`，net-tools 是
+# `Mask:255.255.255.0` / `netmask 255.255.255.0`。
+_INET_MASK_RE = re.compile(
+    r"\binet (?:addr:)?(\d+\.\d+\.\d+\.\d+).*?"
+    r"(?:netmask|Mask:?)\s*(0x[0-9a-fA-F]{8}|\d+\.\d+\.\d+\.\d+)"
+)
+
+
+def _prefix_from_mask(mask: str) -> int | None:
+    """点分十进制掩码转前缀长度；不是连续掩码（如组播的 240.0.0.0）返回 None。"""
+    try:
+        return ipaddress.IPv4Network(f"0.0.0.0/{mask}").prefixlen
+    except ValueError:
+        return None
+
+
+def _as_dotted(value: str) -> str:
+    """ifconfig 的掩码是十六进制，换算成点分十进制再交给 ipaddress。"""
+    if not value.startswith("0x"):
+        return value
+    return str(ipaddress.IPv4Address(int(value, 16)))
+
+
+def local_ipv4_networks(platform: str | None = None) -> list[tuple[str, int]]:
+    """本机所在的 IPv4 子网，返回 (网络地址, 前缀长度)；取不到就返回空列表。
+
+    定向广播要靠前缀长度才算得出来，而 `socket` 没有暴露掩码的接口，只能问系统。
+    三条命令各管一个平台：
+
+    - Windows 走 `route print -4`。表头是本地化的（「网络目标」「在链路上」），
+      但**数据行全是数字**，所以按「第 1、2、4 个字段都是点分十进制」来认，
+      不碰任何标签文字——这也顺带排掉了「永久路由」那种只有四段的写法。
+    - Linux 的 `ip -o -4 addr show` 自带 `inet 10.0.0.5/16`，最省事。
+    - macOS/BSD 只有 `ifconfig -a`，掩码是十六进制的。
+
+    platform 参数供测试注入，与 local_macs() 同一约定。
+    """
+    name = platform or ("nt" if os.name == "nt" else "posix")
+    found: list[tuple[str, int]] = []
+    if name == "nt":
+        ok, text = _run_capture(["route", "print", "-4"])
+        if not ok:
+            return []
+        for line in text.splitlines():
+            fields = line.split()
+            if len(fields) < 4:
+                continue
+            dest, mask, iface = fields[0], fields[1], fields[3]
+            if not (
+                _IPV4_RE.fullmatch(dest)
+                and _IPV4_RE.fullmatch(mask)
+                and _IPV4_RE.fullmatch(iface)
+            ):
+                continue
+            prefix = _prefix_from_mask(mask)
+            # 0.0.0.0/0 是默认路由；/31、/32 是每条网卡地址自己的主机路由，
+            # 它们也走这张表，但都不是「一个子网」。
+            if prefix is None or not 1 <= prefix <= 30:
+                continue
+            if dest.startswith(("127.", "224.")):
+                continue
+            found.append(_network_entry(dest, prefix))
+        return list(dict.fromkeys(found))
+    ok, text = _run_capture(["ip", "-o", "-4", "addr", "show"])
+    if ok:
+        for match in re.finditer(r"\binet (\d+\.\d+\.\d+\.\d+)/(\d+)", text or ""):
+            prefix = int(match.group(2))
+            if 1 <= prefix <= 30 and not match.group(1).startswith("127."):
+                found.append(_network_entry(match.group(1), prefix))
+    if not found:
+        ok, text = _run_capture(["ifconfig", "-a"])
+        if not ok:
+            return []
+        for match in _INET_MASK_RE.finditer(text or ""):
+            address, mask = match.group(1), _as_dotted(match.group(2))
+            prefix = _prefix_from_mask(mask)
+            if prefix is None or not 1 <= prefix <= 30:
+                continue
+            if address.startswith("127."):
+                continue
+            found.append(_network_entry(address, prefix))
+    return list(dict.fromkeys(found))
+
+
+def _network_entry(address: str, prefix: int) -> tuple[str, int]:
+    net = ipaddress.IPv4Network(f"{address}/{prefix}", strict=False)
+    return str(net.network_address), prefix
+
+
+def directed_broadcast(host: str, platform: str | None = None) -> str:
+    """[host] 所在子网的定向广播地址；判断不出就返回空串。
+
+    定向广播比全局广播 255.255.255.255 稳——部分 Android 版本会拦下后者。
+    host 传控制台的 Host 头，也就是手机实际访问的那个地址：由它来定「哪个子网」
+    不用猜。反过来若拿默认路由出口的地址去认，本机挂着的 VPN、Hyper-V、WSL
+    随便哪条都可能把它带偏。
+    """
+    try:
+        target = ipaddress.IPv4Address(host.strip())
+    except ValueError:
+        return ""
+    for network, prefix in local_ipv4_networks(platform):
+        net = ipaddress.IPv4Network(f"{network}/{prefix}")
+        if target in net:
+            return str(net.broadcast_address)
+    return ""
+
+
+def wake_info(port: int = WOL_PORT, host: str = "") -> dict[str, object]:
+    """远程开机需要的信息：网卡 MAC、唤醒命令，以及三条硬件路线的说明。
+
+    host 是控制台的 Host 头，用来定定向广播地址；判断不出就退回全局广播——
+    调用方（手机 APP）会把「等于全局广播」当成「没给」，自己去猜 /24。
+    """
     macs = local_macs()
     command = (
         f"python utils/run.py power wake --mac {macs[0]}"
@@ -173,7 +288,7 @@ def wake_info(port: int = WOL_PORT) -> dict[str, object]:
     )
     return {
         "macs": macs,
-        "broadcast": "255.255.255.255",
+        "broadcast": directed_broadcast(host) or "255.255.255.255",
         "port": port,
         "command": command,
         "notes": [

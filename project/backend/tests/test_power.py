@@ -145,6 +145,7 @@ def test_wake_info_carries_mac_command_and_notes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(power, "local_macs", lambda: ["AC:45:EF:49:B7:F4"])
+    monkeypatch.setattr(power, "directed_broadcast", lambda _host="": "")
 
     info = power.wake_info()
 
@@ -157,6 +158,180 @@ def test_wake_info_without_mac_gives_placeholder(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(power, "local_macs", lambda: [])
 
     assert "<网卡MAC>" in str(power.wake_info()["command"])
+
+
+def test_wake_info_falls_back_to_global_broadcast(monkeypatch: pytest.MonkeyPatch) -> None:
+    """判定不出子网时必须是那个「等于没给」的全局广播，APP 靠它来决定自己猜。"""
+    monkeypatch.setattr(power, "local_macs", lambda: ["AC:45:EF:49:B7:F4"])
+    monkeypatch.setattr(power, "directed_broadcast", lambda _host="": "")
+
+    assert power.wake_info()["broadcast"] == "255.255.255.255"
+
+
+def test_wake_info_keeps_directed_broadcast(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(power, "local_macs", lambda: ["AC:45:EF:49:B7:F4"])
+    monkeypatch.setattr(
+        power, "directed_broadcast", lambda host="": "10.110.255.255" if host else ""
+    )
+
+    assert power.wake_info(host="10.110.211.5")["broadcast"] == "10.110.255.255"
+
+
+# --------------------------------------------------- 子网与定向广播（P2）
+
+
+# 真机（中文 Windows 11）`route print -4` 的原样输出，只删掉了与本用例无关的
+# 几条路由。留着中文表头是关键：认的必须是数字，不是「在链路上」这类标签。
+_ROUTE_PRINT = """\
+===========================================================================
+接口列表
+ 49...........................Meta Tunnel
+ 11...8c 32 23 61 a3 ed ......Realtek Gaming 2.5GbE Family Controller
+===========================================================================
+IPv4 路由表
+===========================================================================
+活动路由:
+网络目标        网络掩码          网关       接口   跃点数
+          0.0.0.0          0.0.0.0       10.110.0.1     10.110.211.5     45
+       10.110.0.0      255.255.0.0            在链路上      10.110.211.5    301
+     10.110.211.5  255.255.255.255            在链路上      10.110.211.5    301
+   10.110.255.255  255.255.255.255            在链路上      10.110.211.5    301
+        127.0.0.0        255.0.0.0            在链路上         127.0.0.1    331
+  127.255.255.255  255.255.255.255            在链路上         127.0.0.1    331
+       198.18.0.0  255.255.255.252            在链路上        198.18.0.1    256
+        224.0.0.0        240.0.0.0            在链路上         127.0.0.1    331
+  255.255.255.255  255.255.255.255            在链路上      10.110.211.5    301
+===========================================================================
+永久路由:
+  10.20.0.0        255.0.0.0     10.110.0.1       1
+  无
+"""
+
+
+def _capture(outputs: dict[tuple[str, ...], str]):  # noqa: ANN202
+    """按命令给假输出；没列到的命令当作不存在。"""
+
+    def fake(args: list[str]) -> tuple[bool, str]:
+        return (True, outputs[tuple(args)]) if tuple(args) in outputs else (False, "")
+
+    return fake
+
+
+def test_windows_route_table_yields_subnets(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        power, "_run_capture", _capture({("route", "print", "-4"): _ROUTE_PRINT})
+    )
+
+    assert power.local_ipv4_networks("nt") == [("10.110.0.0", 16), ("198.18.0.0", 30)]
+
+
+def test_windows_route_table_skips_non_subnets(monkeypatch: pytest.MonkeyPatch) -> None:
+    """默认路由、每块网卡自己的 /32、组播段、回环、以及四段的永久路由都不算子网。"""
+    monkeypatch.setattr(
+        power, "_run_capture", _capture({("route", "print", "-4"): _ROUTE_PRINT})
+    )
+
+    subnets = power.local_ipv4_networks("nt")
+
+    assert ("0.0.0.0", 0) not in subnets
+    assert ("10.110.211.5", 32) not in subnets
+    assert ("10.110.255.255", 32) not in subnets
+    assert ("127.0.0.0", 8) not in subnets
+    assert ("10.20.0.0", 8) not in subnets
+    assert all(prefix <= 30 for _, prefix in subnets)
+
+
+def test_windows_route_table_absent_gives_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(power, "_run_capture", _capture({}))
+
+    assert power.local_ipv4_networks("nt") == []
+
+
+_IP_ADDR = """\
+2: eth0    inet 10.110.211.5/16 brd 10.110.255.255 scope global eth0\\
+    valid_lft forever preferred_lft forever
+3: lo      inet 127.0.0.1/8 scope host lo
+"""
+
+_IFCONFIG = """\
+en0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500
+\tinet 192.168.1.5 netmask 0xffffff00 broadcast 192.168.1.255
+\tinet6 fe80::1%en0 prefixlen 64 scopeid 0x4
+lo0: flags=8049<UP,LOOPBACK,RUNNING,MULTICAST> mtu 16384
+\tinet 127.0.0.1 netmask 0xff000000
+"""
+
+
+def test_linux_ip_addr_yields_subnets(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        power,
+        "_run_capture",
+        _capture({("ip", "-o", "-4", "addr", "show"): _IP_ADDR}),
+    )
+
+    assert power.local_ipv4_networks("posix") == [("10.110.0.0", 16)]
+
+
+def test_ifconfig_is_the_fallback_when_ip_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """macOS 没有 `ip`；十六进制掩码要换算，回环要排掉，inet6 不能误认成 inet。"""
+    monkeypatch.setattr(power, "_run_capture", _capture({("ifconfig", "-a"): _IFCONFIG}))
+
+    assert power.local_ipv4_networks("posix") == [("192.168.1.0", 24)]
+
+
+def test_ifconfig_net_tools_writes_mask_in_dotted_form(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        power,
+        "_run_capture",
+        _capture(
+            {
+                ("ifconfig", "-a"): (
+                    "eth0: flags=4163<UP,BROADCAST,RUNNING,MULTICAST>  mtu 1500\n"
+                    "        inet 172.31.32.9  netmask 255.255.240.0  broadcast 172.31.47.255\n"
+                )
+            }
+        ),
+    )
+
+    assert power.local_ipv4_networks("posix") == [("172.31.32.0", 20)]
+
+
+def test_directed_broadcast_uses_the_matching_subnet(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """关键一条：/16 的校园网里按 /24 猜会得出 10.110.211.255，那是错的。"""
+    monkeypatch.setattr(
+        power, "local_ipv4_networks", lambda _platform=None: [("10.110.0.0", 16)]
+    )
+
+    assert power.directed_broadcast("10.110.211.5") == "10.110.255.255"
+
+
+def test_directed_broadcast_ignores_other_subnets(monkeypatch: pytest.MonkeyPatch) -> None:
+    """本机挂着 VPN / Hyper-V 时子网不止一个，认的必须是含目标地址那一个。"""
+    monkeypatch.setattr(
+        power,
+        "local_ipv4_networks",
+        lambda _platform=None: [("198.18.0.0", 30), ("10.110.0.0", 16)],
+    )
+
+    assert power.directed_broadcast("10.110.211.5") == "10.110.255.255"
+    assert power.directed_broadcast("198.18.0.1") == "198.18.0.3"
+
+
+def test_directed_broadcast_gives_nothing_when_it_cannot_tell(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        power, "local_ipv4_networks", lambda _platform=None: [("10.110.0.0", 16)]
+    )
+
+    for host in ["8.8.8.8", "pc.tailnet.ts.net", "127.0.0.1", "", "  ", "10.110.211.5:2268"]:
+        assert power.directed_broadcast(host) == "", host
 
 
 # ------------------------------------------------------- 平台与异常分支补测（F2）

@@ -689,7 +689,10 @@ def routes_system(store: Store) -> dict[tuple[str, str], Handler]:
         """远程开机需要的信息：网卡 MAC、唤醒命令与硬件路线说明（只读）。"""
         from . import power as power_mod
 
-        h._send(HTTPStatus.OK, {"ok": True, **power_mod.wake_info()})
+        # 用 Host 头定定向广播：它就是手机实际访问的那个地址，所以「属于哪个
+        # 子网」不用猜。绑回环时 Host 是 127.0.0.1，算不出子网，退回全局广播。
+        host = _host_without_port(h.headers.get("Host", ""))
+        h._send(HTTPStatus.OK, {"ok": True, **power_mod.wake_info(host=host)})
 
     def power_action(ctx: dict[str, Any], h: ApiHandler) -> None:
         """远程关机 / 重启：手机控制台上的一键操作，必须显式确认。"""
@@ -1128,12 +1131,17 @@ EXTENSION_SCHEME = "chrome-extension://"
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 
 
+def _host_without_port(host_header: str) -> str:
+    """Host 头里去掉端口的部分；IPv6 的方括号也一并去掉。"""
+    host = (host_header or "").strip()
+    if host.startswith("["):  # [::1]:2268
+        return host[1:].split("]", 1)[0]
+    return host.rsplit(":", 1)[0]
+
+
 def _host_is_loopback(host_header: str) -> bool:
     """Host 头（可能带端口）是否指向本机回环。"""
-    host = (host_header or "").strip().lower()
-    if host.startswith("["):  # [::1]:2268
-        return host[1:].split("]", 1)[0] in LOOPBACK_HOSTS
-    return host.rsplit(":", 1)[0] in LOOPBACK_HOSTS
+    return _host_without_port(host_header).lower() in LOOPBACK_HOSTS
 
 
 def _is_extension_origin(origin: str) -> bool:
