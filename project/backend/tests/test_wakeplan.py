@@ -95,13 +95,20 @@ def test_parse_last_run_roundtrip() -> None:
 def test_send_wol_delegates_to_power(monkeypatch) -> None:  # noqa: ANN001
     from campusnet import power
 
-    sent: list[tuple] = []
-    monkeypatch.setattr(
-        power, "wake", lambda mac, broadcast="255.255.255.255", port=9: sent.append((mac, port)) or "255.255.255.255:9"
-    )
+    calls: list[tuple] = []
+    sentinel = object()
 
-    assert wakeplan.send_wol("AA:BB:CC:DD:EE:FF", "255.255.255.255", 9) == "255.255.255.255:9"
-    assert sent == [("AA:BB:CC:DD:EE:FF", 9)]
+    def _wake(mac, broadcast, port):  # noqa: ANN001, ANN202
+        calls.append((mac, broadcast, port))
+        return sentinel
+
+    monkeypatch.setattr(power, "wake", _wake)
+
+    # 返回值用哨兵而不是那个常量：原来 mock 无脑返回 "255.255.255.255:9"，
+    # 再断言它等于同一个字面量，等于拿自己刚设的值验自己，恒真。
+    assert wakeplan.send_wol("AA:BB:CC:DD:EE:FF", "10.0.0.255", 7) is sentinel
+    # 三个参数都要记：原来只记 mac 与 port，broadcast 传丢或串位也照样绿。
+    assert calls == [("AA:BB:CC:DD:EE:FF", "10.0.0.255", 7)]
 
 
 def test_should_fire_not_again_when_clock_rolled_back() -> None:

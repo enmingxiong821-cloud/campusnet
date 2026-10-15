@@ -166,6 +166,10 @@ class Monitor:
         # 冷却字典要自己的锁：self._lock 是 check_all 的可重入保护，
         # 在 check_account 期间一直被持有，复用它会死锁。
         self._cooldown_lock = threading.Lock()
+        # 生命周期锁：HTTP 服务是多线程的，start() / stop() 可能并发进来，
+        # 「判 is_alive()」与「重新赋值 _thread」两步之间必须原子，
+        # 否则两个调用会各起一个循环线程（与 MonitorManager._lock 同一类竞态）。
+        self._lifecycle_lock = threading.Lock()
 
     # ---------- 实时进度 ----------
     def emit_progress(self, account: Account, stage: str, message: str) -> None:
@@ -219,24 +223,47 @@ class Monitor:
 
     # ---------- 生命周期 ----------
     def start(self) -> bool:
-        if self._thread and self._thread.is_alive():
-            return False
-        self._stop.clear()
-        self._thread = threading.Thread(
-            target=self._loop, name="campusnet-monitor", daemon=True
-        )
-        self._thread.start()
-        return True
+        with self._lifecycle_lock:
+            if self._thread and self._thread.is_alive():
+                return False
+            self._stop.clear()
+            self._thread = threading.Thread(
+                target=self._loop, name="campusnet-monitor", daemon=True
+            )
+            self._thread.start()
+            return True
 
     def stop(self, timeout: float = 5.0) -> bool:
-        self._stop.set()
-        if self._thread:
-            self._thread.join(timeout=timeout)
-            alive = self._thread.is_alive()
-            if not alive:
-                self._thread = None
-            return not alive
-        return True
+        with self._lifecycle_lock:
+            self._stop.set()
+            if self._thread:
+                self._thread.join(timeout=timeout)
+                alive = self._thread.is_alive()
+                if not alive:
+                    self._thread = None
+                return not alive
+            return True
+
+    def clear_credential_cooldown(self, account_id: int) -> bool:
+        """清掉某账号的凭据失败冷却，返回此前是否处于冷却中。
+
+        用户在界面上改对密码后应当立刻重试，而不是干等冷却走完——那条提示
+        本来就写着「改对密码请更新账号」，不清冷却就等于提示说了不算。
+        """
+        with self._cooldown_lock:
+            return self._credential_cooldown.pop(account_id, None) is not None
+
+    def _safe_add_event(self, message: str, **kwargs: Any) -> None:
+        """写事件失败不能反过来杀掉监控线程。
+
+        _loop 的异常分支本身要靠写事件留痕，而异常高发期（磁盘满、数据库被锁）
+        恰恰就是写事件也会失败的时候——直接调用会让「处理异常」这一步抛出
+        第二个异常，穿出线程体把整个监控循环带走。
+        """
+        try:
+            self.store.add_event(message, **kwargs)
+        except Exception:  # noqa: BLE001 - 留痕失败只能放弃，不能再抛
+            pass
 
     def is_alive(self) -> bool:
         return bool(self._thread and self._thread.is_alive())
@@ -282,17 +309,28 @@ class Monitor:
                         else False
                     )
                 except Exception as exc:  # noqa: BLE001 - 循环线程不能因单次异常退出
-                    self.store.add_event(
+                    self._safe_add_event(
                         f"监控循环异常: {exc}", level="error", stage="monitor"
                     )
                     ok = False
                 try:
                     self._dispatch_wake_plans()
                 except Exception as exc:  # noqa: BLE001 - 唤醒调度异常不污染重连节奏
-                    self.store.add_event(
+                    self._safe_add_event(
                         f"唤醒计划调度异常: {exc}", level="error", stage="wake"
                     )
-                self._stop.wait(self._next_delay(started_at, ok))
+                try:
+                    delay = self._next_delay(started_at, ok)
+                except Exception as exc:  # noqa: BLE001 - 读设置失败不能让循环停摆
+                    self._safe_add_event(
+                        f"计算下一轮间隔异常: {exc}", level="error", stage="monitor"
+                    )
+                    delay = float(MIN_INTERVAL)
+                self._stop.wait(delay)
+        except Exception as exc:  # noqa: BLE001 - 兜底：异常绝不允许穿出线程体
+            self._safe_add_event(
+                f"监控循环意外终止: {exc}", level="error", stage="monitor"
+            )
         finally:
             self.running_loop = False
 
@@ -852,6 +890,17 @@ class MonitorManager:
         if self.monitor:
             return self.monitor.stop()
         return True
+
+    def clear_credential_cooldown(self, account_id: int) -> bool:
+        """账号凭据被改动后清掉登录冷却，让改对密码能立刻重试。
+
+        这里**不调 ensure()**：监控没在跑就没有冷却状态可言，而 ensure()
+        会把监控线程拉起来——改个账号不该有「顺手启动监控」这种副作用。
+        """
+        monitor = self.monitor
+        if monitor is None:
+            return False
+        return monitor.clear_credential_cooldown(account_id)
 
     def restart(self, store: Store, interval: int | None = None) -> Monitor:
         if not self.stop():

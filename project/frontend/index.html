@@ -577,21 +577,51 @@ const STAGE_TEXT = {
   wifi:'网络身份'
 };
 
+/**
+ * api() 的默认请求超时（毫秒）。
+ *
+ * 没有超时的时候，服务卡住（半开连接、某个 handler 挂死）会让 fetch 永不 settle：
+ * 而按钮解锁写在 once() 的 finally 里，于是界面表现成「点了没反应、按钮一直灰着」，
+ * 只能刷新页面才能恢复。轮询里的 refresh() 同理，会一直悬着。
+ *
+ * 取 120 秒是给本地服务留余量：要跑外部进程的调用（webhook 测试、schtasks 安装）
+ * 都在几秒到几十秒之间。真正会跑很久的接口按需传 timeout:0 关掉兜底——
+ * /api/check 与单账号登录在浏览器模式下每个账号上限 30 秒、还要顺序跑完所有账号，
+ * /api/detect-portal 的探测链本身就能走到几十秒；这些调用的进度另有 /api/progress
+ * 轮询在显示，掐断它们反而会把正常功能弄坏。
+ */
+const API_TIMEOUT_MS = 120000;
+
 async function api(path, opts = {}) {
+  const { timeout = API_TIMEOUT_MS, ...init } = opts;
+  const controller = timeout > 0 ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), timeout) : 0;
   let res;
   try {
     res = await fetch(path, {
       headers: { 'Content-Type': 'application/json' },
       credentials: 'same-origin',
-      ...opts,
-      body: opts.body ? JSON.stringify(opts.body) : undefined,
+      ...init,
+      signal: controller ? controller.signal : init.signal,
+      body: init.body ? JSON.stringify(init.body) : undefined,
     });
   } catch (e) {
+    if (controller && e && e.name === 'AbortError') {
+      // 超时也归到「没到达服务」这一类：对方在，但一直不回，对用户来说同样是
+      // 连不上。不新建 Error 而是原样抛是不行的——AbortError 是 DOMException，
+      // message 只有 getter，赋值会静默失败（严格模式下直接抛 TypeError）。
+      const err = new Error(`请求超时（${Math.round(timeout / 1000)} 秒无响应）`);
+      err.isNetwork = true;
+      err.timeout = true;
+      throw err;
+    }
     // fetch 自己抛错 = 请求根本没到达服务（电脑关着、程序没起、网络断了）。
     // 打上标记：调用方要靠它区分「连不上服务」和「服务回了错误」——后者说明
     // 服务是活的，顶栏不该报不可达。
     e.isNetwork = true;
     throw e;
+  } finally {
+    clearTimeout(timer);
   }
   const data = await res.json().catch(() => ({ ok:false, error:'响应不是 JSON' }));
   if (res.status === 401 && authRequired && !path.startsWith('/api/auth/') && !path.startsWith('/api/pair/')) {
@@ -739,8 +769,21 @@ function toast(msg, kind = '', key = msg) {
   }, 3800);
   _toastSeen.set(key, record);
 
-  // 最多同时显示 5 条，超出立刻清掉最旧的
-  while (box.children.length > 5) box.removeChild(box.firstChild);
+  // 最多同时显示 5 条，超出立刻清掉最旧的。
+  // 只 removeChild 不够：那条 toast 的记录还留在 _toastSeen 里、两个定时器也还挂着。
+  // 于是同一个 key 在随后的 3.8 秒内再报一次，会命中上面的「已存在」分支，去更新
+  // 一个已经不在文档里的节点——消息被静默吞掉，屏幕上什么都不出现。
+  while (box.children.length > 5) {
+    const oldest = box.firstChild;
+    for (const [k, rec] of _toastSeen) {
+      if (rec.el !== oldest) continue;
+      clearTimeout(rec.fade);
+      clearTimeout(rec.drop);
+      _toastSeen.delete(k);
+      break;
+    }
+    box.removeChild(oldest);
+  }
 }
 
 /**
@@ -907,7 +950,8 @@ async function rowAction(act, id, btn) {
     const watcher = setInterval(pollProgress, 900);
     try {
       await once(btn, async () => {
-        const r = await api(`/api/accounts/${id}/login`, { method:'POST', body:{} });
+        // 关掉默认超时：浏览器模式下单个账号就能等十几秒（见 API_TIMEOUT_MS）
+        const r = await api(`/api/accounts/${id}/login`, { method:'POST', body:{}, timeout:0 });
         await pollProgress();
         toast(`${acc.name}: ${r.message}`, r.state === 'failed' ? 'err' : 'ok');
         refresh();
@@ -1083,7 +1127,8 @@ async function probeNow() {
   pollProgress();                // 先拉一次，避免第一条进度晚 900ms 才到
   const watcher = setInterval(pollProgress, 900);
   try {
-    const r = await api('/api/check', { method:'POST', body:{} });
+    // 关掉默认超时：这里顺序跑完所有账号，浏览器模式下按账号数可能耗上几分钟
+    const r = await api('/api/check', { method:'POST', body:{}, timeout:0 });
     const bad = r.results.filter(x => ['offline', 'failed'].includes(x.state));
     const unconfirmed = r.results.filter(x => !x.online && !['offline', 'failed'].includes(x.state));
     const summary = [`${r.results.length} 个账号`];
@@ -1103,7 +1148,31 @@ async function probeNow() {
   }
 }
 
+/**
+ * 设置页的「有未保存修改」标记。
+ *
+ * 每次切到设置页都会跑一次 loadSettings()，把服务端值回填进表单。用户改完通知
+ * 地址、切去账号页看一眼再切回来，改动就被无声地覆盖回旧值——没有报错也没有
+ * 提示，人只会以为自己刚才没改上。有未保存修改时就不自动回填了。
+ */
+let settingsDirty = false;
+
+const SETTINGS_FIELDS = ['setInterval', 'setHeadless', 'setAutostart',
+  'setNotifyChannel', 'setNotifyUrl', 'setNotifyKey', 'setNotifyAfter'];
+
+for (const id of SETTINGS_FIELDS) {
+  const el = $(id);
+  if (!el) continue;
+  // 下面回填时是程序化赋值，不会触发 input/change，所以标脏不会自己踩自己
+  el.addEventListener('input', () => { settingsDirty = true; });
+  el.addEventListener('change', () => { settingsDirty = true; });
+}
+
 async function loadSettings() {
+  if (settingsDirty) {
+    toast('设置页还有未保存的修改，未从服务重新读取', '', 'settings-dirty');
+    return;
+  }
   try {
     const { settings } = await api('/api/settings');
     $('setInterval').value = settings.interval ?? 60;
@@ -1143,6 +1212,9 @@ async function saveSettings() {
         notify_key: $('setNotifyKey').value.trim(),
         notify_after_failures: +$('setNotifyAfter').value || 3,
       }});
+      // PUT 落库成功，表单里的值就是服务端值了，脏标记随之清掉，
+      // 之后再切回设置页可以正常重新读取。
+      settingsDirty = false;
       // 原来这里无条件调 monitor/start：只想改个通知渠道的人会连带把监控开起来，
       // 而「浏览器登录」在无头关着的时候会当场弹出一个窗口。监控本来就在跑，
       // 才重启它来套用新间隔（PUT 只落库，热更新要靠这一步）；没在跑就只存下来，
@@ -1504,7 +1576,8 @@ $('btnDetectPortal').onclick = async () => {
   const url = $('setDetectUrl').value.trim();
   $('detectResult').textContent = '检测中…';
   try {
-    const r = await api('/api/detect-portal?url=' + encodeURIComponent(url));
+    // 关掉默认超时：探测链要对用户填的地址做多次网络尝试，本身就能走到几十秒
+    const r = await api('/api/detect-portal?url=' + encodeURIComponent(url), { timeout:0 });
     $('detectResult').textContent = r.portal_url ? '识别到：' + r.portal_url : r.hint;
     if (r.portal_url) $('fPortal').value = r.portal_url;
   } catch (e) { $('detectResult').textContent = '失败: ' + e.message; }

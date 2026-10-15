@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -166,8 +167,17 @@ def test_detect_dns_hijack_handles_resolve_failure(
 
 
 def test_local_ipv4_returns_valid_shape() -> None:
+    """本机有出口 IPv4 时应拿到一个合法地址。
+
+    原来写成 `assert ip is None or ip.count(".") == 3`：取不到 IP 时整条测试体
+    是空的，报告里照样 passed；而 `count(".")` 太松，"..."、999.999.999.999 都能
+    过。取不到就显式 skip，让「这条其实没验证」在报告里看得见。
+    """
     ip = discovery.local_ipv4()
-    assert ip is None or ip.count(".") == 3
+    if not ip:
+        pytest.skip("当前环境取不到本机 IPv4（没有可用默认路由）")
+
+    assert ipaddress.ip_address(ip).version == 4
 
 
 def test_is_url() -> None:

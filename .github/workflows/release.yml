@@ -5,8 +5,13 @@ on:
     tags: ["v*"]
   workflow_dispatch:
 
+# 顶层只给读：工作流级写权限会原样铺给每个作业，verify 里跑的是全量测试套件
+# 与第三方 action，一旦某个 action 被投毒，拿到的就是能推 tag、发 Release 的
+# 令牌。写权限下沉到真正要写的作业（build-image 推 GHCR、release 建 Release）。
+# 注意作业级 permissions 是整体替换而非合并：写了 job 级就要把 contents 自己
+# 再列一遍，否则 checkout 会因没有读权限而失败。
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   verify:
@@ -216,8 +221,8 @@ jobs:
     runs-on: ubuntu-latest
     # 多架构构建要跑 qemu 模拟 arm64，比本机慢得多；给足上限但别让它挂到 6 小时。
     timeout-minutes: 45
-    # 工作流级写的是 contents: write。作业级 permissions 是整体替换而不是合并，
-    # 所以 contents 必须自己再写一遍，否则 checkout 会因为没有读权限而失败。
+    # 顶层是 contents: read，这里只需再加一个 packages: write 去推 GHCR。
+    # contents 仍要自己列一遍：作业级 permissions 是整体替换而不是合并。
     permissions:
       contents: read
       packages: write
@@ -268,6 +273,10 @@ jobs:
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     timeout-minutes: 15
+    # 唯一需要写权限的作业：gh release create 要往仓库里建 Release。
+    # 顶层只给 read，这里显式提权，范围就压在这一步上。
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v7
 

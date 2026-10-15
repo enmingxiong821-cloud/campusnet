@@ -195,6 +195,68 @@ def test_terminal_failure_sets_cooldown_and_skips_next_login(store, account, off
     assert "冷却" in second.message
 
 
+def test_clear_credential_cooldown_allows_immediate_retry(store, account, offline_probe, monkeypatch) -> None:  # noqa: ANN001
+    """改对密码后清掉冷却，账号应当立刻重新尝试登录。
+
+    冷却本来只能等时间自然走完，而界面提示写的是「改对密码请更新账号」——
+    清冷却这一步就是让那句话兑现的地方。
+    """
+    acc_id = store.add_account(account)
+    offline_probe["online"] = False
+    calls = {"count": 0}
+
+    def fake_login(*a, **k):
+        calls["count"] += 1
+        return LoginResult("failed", "密码错误", terminal=True)
+
+    monkeypatch.setattr(monitor_mod.portal, "login", fake_login)
+    monkeypatch.setattr(time, "sleep", lambda *_a: None)
+
+    mon = Monitor(store, interval=10)
+    acc = store.get_account(acc_id)
+    mon.check_account(acc)
+    mon.check_account(acc)
+    assert calls["count"] == 1, "第二次应当被冷却拦下"
+
+    assert mon.clear_credential_cooldown(acc_id) is True
+    mon.check_account(acc)
+    assert calls["count"] == 2, "冷却被清掉后应当立刻重试登录"
+    # 密码还是错的，这一轮重试又会被门户拒一次，冷却随之重新写入。
+    assert mon.clear_credential_cooldown(acc_id) is True, "失败后冷却被重新写入"
+    assert mon.clear_credential_cooldown(acc_id) is False, "清过一次后不再有冷却"
+
+
+def test_manager_clear_cooldown_does_not_start_monitor(store) -> None:  # noqa: ANN001
+    """管理器清冷却不该顺手把监控线程拉起来——改个账号不该有这种副作用。"""
+    mgr = MonitorManager()
+    assert mgr.clear_credential_cooldown(1) is False
+    assert mgr.monitor is None
+
+
+def test_loop_keeps_exception_from_escaping_when_logging_fails(store, monkeypatch) -> None:  # noqa: ANN001
+    """check 抛异常、且写事件也失败时，_loop 必须自己收住。
+
+    _loop 是线程体：异常穿出去就是线程静默死亡，此后不再检测，而界面上只会
+    显示「一直离线」，看不出线程已经没了。而写事件失败（磁盘满 / 数据库被锁）
+    偏偏就是异常最容易发生的时候——两层失败叠在一起才是真正致命的组合。
+    """
+    mon = Monitor(store, interval=1)
+
+    def boom(*_a, **_k):
+        mon._stop.set()  # 置位后 _stop.wait 立刻返回，跑完一轮即退出
+        raise RuntimeError("check 失败")
+
+    def dead_event(*_a, **_k):
+        raise OSError("database is locked")
+
+    monkeypatch.setattr(mon, "check_all", boom)
+    monkeypatch.setattr(mon.store, "add_event", dead_event)
+
+    mon._loop()  # 不该抛出
+
+    assert mon.running_loop is False
+
+
 def test_success_confirmed_by_probe(store, account, offline_probe, monkeypatch) -> None:  # noqa: ANN001
     """登录返回成功但探活仍不通时，不应误报在线。"""
     acc_id = store.add_account(account)

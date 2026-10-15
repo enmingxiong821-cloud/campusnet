@@ -231,6 +231,21 @@ function probeWith(fetchImpl) {
       truthy(redirected.detail.includes('portal/login'), 'detail 含门户地址');
     });
 
+    // 跨域 + redirect:'manual' 拿到的是 opaqueredirect：status 恒为 0、headers 全空。
+    // 扩展的探测一律跨域（页面来源是 chrome-extension://），这条才是真实路径——
+    // 只认 status 的话会落进 http_error，detail 只剩 "HTTP 0"，
+    // 排查时看不出「其实是被重定向到门户了」。
+    const opaque = await probeWith(async () => ({
+      type: 'opaqueredirect',
+      status: 0,
+      ok: false,
+      headers: { get: () => null },
+    }));
+    check('opaqueredirect 判未放行并标为 redirected', () => {
+      truthy(!opaque.online);
+      eq(opaque.status, 'redirected');
+    });
+
     const errResp = await probeWith(async () => ({ ok: false, status: 500 }));
     check('HTTP 500 判未放行', () => {
       truthy(!errResp.online);
@@ -574,6 +589,30 @@ function probeWith(fetchImpl) {
       eq(tiny.periodInMinutes, 1, '默认 1 分钟');
     }
 
+    {
+      const storage = { data: { enabled: true, intervalMinutes: 1 } };
+      const { api, chrome } = loadBackground(storage, async () => ({ ok: true, status: 200 }));
+      await api.setEnabled(true);
+      // 用户在设置页把间隔改成 5 分钟并保存——设置页保存后会发 applySchedule。
+      storage.data.intervalMinutes = 5;
+      const stillEnabled = await api.applySchedule();
+      check('改间隔后重建闹钟，新周期生效', () => {
+        eq(stillEnabled, true);
+        const alarm = chrome.__alarms.find(a => a.name === 'campusnet-check');
+        eq(alarm.periodInMinutes, 5, 'periodInMinutes');
+      });
+      check('重建不会堆叠出第二个闹钟', () => {
+        eq(chrome.__alarms.filter(a => a.name === 'campusnet-check').length, 1);
+      });
+
+      await chrome.storage.local.set({ enabled: false });
+      const offEnabled = await api.applySchedule();
+      check('关闭状态下重建不建闹钟', () => eq(offEnabled, false));
+      check('关闭后重建会把闹钟清掉', () => {
+        eq(chrome.__alarms.filter(a => a.name === 'campusnet-check').length, 0);
+      });
+    }
+
     console.log('\n[通知去重：只在掉线瞬间响一次]');
     {
       const storage = { data: { enabled: true, portalUrl: 'http://p/login' } };
@@ -841,7 +880,8 @@ function probeWith(fetchImpl) {
     console.log('\n[classify 判定顺序重写]');
     // 顺序本身是这次改动的核心，逐条锁住：
     //  - 成功标记必须带边界：裸子串 `"result":1` 会命中 `"result":10` / `"result":12`，
-    //    旧代码把它们判成成功，用户以为连上了、其实没有；
+    //    旧代码把它们判成成功，用户以为连上了、其实没有；等号写法 `result=1` 同理，
+    //    两侧都从同一条正则派生，只卡一侧会让 `result=10` 掉进 2xx 兜底；
     //  - `result` 字段存在但不是 1（含 Dr.COM 的 -1）一律失败，
     //    否则会掉进最后的 2xx 兜底被判成功；
     //  - 凭据被拒必须排在「已在线」之前：同一条响应里既写了密码错误又写了「已在线」时，
@@ -853,6 +893,10 @@ function probeWith(fetchImpl) {
       ['result:10 判失败（"result":1 的后缀是 0）', '{"result":10}', 200, '/', 'failed'],
       ['result:12 判失败（"result":1 的后缀是 2）', '{"result":12}', 200, '/', 'failed'],
       ['Dr.COM result:-1 判失败', '{"result":-1}', 200, '/', 'failed'],
+      ['result=10 判失败（等号写法同样要卡边界）', 'result=10', 200, '/', 'failed'],
+      ['result=12 判失败（等号写法）', 'result=12', 200, '/', 'failed'],
+      ['result = 10 判失败（等号两侧带空格）', 'result = 10', 200, '/', 'failed'],
+      ['result=1 判成功（等号写法）', 'result=1&msg=ok', 200, '/', 'success'],
       ['密码错误 + 已在线 同现 → 判失败（凭据优先）', '您的密码错误，且该账号已在线', 200, '/', 'failed'],
       ['「已经在线」判已在线', '您的账号已经在线', 200, '/', 'already_online'],
       ['「重复登录」判已在线', '请勿重复登录', 200, '/', 'already_online'],

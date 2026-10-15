@@ -99,7 +99,18 @@ async function probeOnce(url, timeoutMs = 5000) {
       cache: 'no-store',
       signal: controller.signal,
     });
-    // 302 到门户 = 未放行
+    // redirect: 'manual' 下，**跨域**重定向拿到的是 opaqueredirect：status 恒为 0、
+    // headers 全空，既读不到 302 也读不到 Location。扩展发起的探测一律跨域
+    // （页面来源是 chrome-extension://），所以判定只能认 resp.type，认 status
+    // 的话这条分支永远不成立，落进末尾的 http_error，detail 只剩一句 "HTTP 0"。
+    if (resp.type === 'opaqueredirect') {
+      return {
+        online: false,
+        status: 'redirected',
+        detail: `${url} 被重定向（未放行）`,
+      };
+    }
+    // 同源探测（理论上存在）才看得到真实状态码，这时保留 Location 便于排查。
     if ([301, 302, 303, 307, 308].includes(resp.status)) {
       const loc = resp.headers.get('location') || '';
       return { online: false, status: 'redirected', detail: `${resp.status} -> ${loc}` };
@@ -170,9 +181,13 @@ async function loginByFetch(portal, username, password, fields, mode, timeoutMs 
   // fetch 会一直悬着，service worker 也跟着什么都不做——用户看到的是
   // 「点了没反应」，而且这一轮之后再也不会重试。
   // 15 秒比探活的 5 秒宽：这里是一个真的 POST，慢门户登录要几秒很正常。
+  // 读取响应体也要留在 try 里：半开连接下「响应头到了、body 卡住」是常见的，
+  // 那时 fetch 本身早已 resolve，把 resp.text() 放在 finally 之后（clearTimeout
+  // 已经跑完）就等于这一段没有任何超时保护，谁也不会中止它。
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   let resp;
+  let text;
   try {
     resp = await fetch(portal, {
       method: 'POST',
@@ -182,6 +197,7 @@ async function loginByFetch(portal, username, password, fields, mode, timeoutMs 
       cache: 'no-store',
       signal: controller.signal,
     });
+    text = await resp.text();
   } catch (err) {
     if (err && err.name === 'AbortError') {
       // 调用方只把 message 写进事件日志，所以要给人话，不能是默认的
@@ -192,7 +208,6 @@ async function loginByFetch(portal, username, password, fields, mode, timeoutMs 
   } finally {
     clearTimeout(timer);
   }
-  const text = await resp.text();
   return classify(text, resp.status, resp.url);
 }
 
@@ -240,8 +255,9 @@ function encodePassword(password, mode) {
  * - **「已在线」只认完整措辞**：裸的「在线」子串会把「在线客服」「当前在线人数」
  *   「在线时长」这类页面判成已在线；
  * - **`result` 必须带边界**：裸子串 `"result":1` 会命中 `"result":10` / `"result":12`，
- *   那两个是失败；`result` 字段存在但不是 1（含 Dr.COM 的 -1）也一律算失败，
- *   否则会掉进最后的兜底分支被判成功；
+ *   那两个是失败；等号写法 `result=1` 同理——不卡边界会把 `result=10` 判成功，
+ *   前面不卡边界又会命中 `myresult=1`；`result` 字段存在但不是 1（含 Dr.COM 的 -1）
+ *   也一律算失败，否则会掉进最后的兜底分支被判成功；
  * - 兜底那条是**故意宽松**的：2xx/3xx 且没有任何失败标记时记成功。门户文案
  *   改版（比如换了句「认证通过」）时，宁可让它按成功走、由随后的探活复核，
  *   也不要误报失败——探活失败自然会再登录一次，而误报失败会让用户白点。
@@ -255,8 +271,13 @@ function encodePassword(password, mode) {
 function classify(text, status, url) {
   const low = (text || '').toLowerCase();
   const tight = low.replace(/\s+/g, '');
+  // 等号写法的 result（有的门户回 `result=1` 而不是 JSON）。成功与失败两侧
+  // 都从这一条派生，避免两侧各写一份判定又走岔——只卡成功侧的话，
+  // `result=10` 会绕过失败判定掉进末尾的 2xx 兜底，照样判成功。
+  const eqResult = /(?<![\w])result\s*=\s*(-?\d+)/.exec(tight);
 
-  if (/"result":\s*1(?![\d])/.test(low) || tight.includes('result=1')
+  if (/"result":\s*1(?![\d])/.test(low)
+      || (eqResult && eqResult[1] === '1')
       || tight.includes('"success":true')) {
     return { state: 'success', message: '门户返回成功' };
   }
@@ -279,6 +300,9 @@ function classify(text, status, url) {
     return { state: 'failed', message: '门户返回登录失败' };
   }
   if (/"result":\s*(?!1\b)[\d-]+/.test(low)) {
+    return { state: 'failed', message: '门户返回登录失败' };
+  }
+  if (eqResult && eqResult[1] !== '1') {
     return { state: 'failed', message: '门户返回登录失败' };
   }
 
@@ -474,14 +498,27 @@ async function checkOnce() {
   }
 }
 
+/**
+ * 按当前设置重建检测闹钟，返回「监控是否处于启用状态」。
+ *
+ * 先 clear 再 create 是必须的：periodInMinutes 在创建那一刻就定死了，之后改设置
+ * 不会自动生效。原来只在 setEnabled 里建闹钟，于是用户在设置页改完间隔、保存成功、
+ * 界面也显示新值，实际仍按旧周期跑——保存动作看起来一切正常，却没有落到调度上。
+ */
+async function applySchedule() {
+  const settings = await load();
+  await chrome.alarms.clear('campusnet-check');
+  if (!settings.enabled) return false;
+  chrome.alarms.create('campusnet-check', {
+    periodInMinutes: Math.max(ALARM_MIN_MINUTES, settings.intervalMinutes),
+  });
+  return true;
+}
+
 async function setEnabled(on) {
   await chrome.storage.local.set({ enabled: !!on });
-  await chrome.alarms.clear('campusnet-check');
+  await applySchedule();
   if (on) {
-    const { intervalMinutes = 1 } = await load();
-    chrome.alarms.create('campusnet-check', {
-      periodInMinutes: Math.max(ALARM_MIN_MINUTES, intervalMinutes),
-    });
     await checkOnce();
   } else {
     setBadge('idle');
@@ -510,6 +547,11 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       case 'setEnabled': {
         const result = await setEnabled(msg.enabled);
         sendResponse({ ok: true, ...result, state });
+        return;
+      }
+      case 'applySchedule': {
+        // 设置页改完间隔后调用：改了设置就得重建闹钟，否则新值不生效。
+        sendResponse({ ok: true, enabled: await applySchedule() });
         return;
       }
       case 'openPortal': {
@@ -541,11 +583,7 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   if (!details || details.reason === 'install') {
     await chrome.storage.local.set({ events: [] });
   }
-  const settings = await load();
-  if (settings.enabled) {
-    chrome.alarms.create('campusnet-check', {
-      periodInMinutes: Math.max(ALARM_MIN_MINUTES, settings.intervalMinutes),
-    });
+  if (await applySchedule()) {
     await checkOnce();
   } else {
     setBadge('idle');
@@ -553,12 +591,7 @@ chrome.runtime.onInstalled.addListener(async (details) => {
 });
 
 chrome.runtime.onStartup.addListener(async () => {
-  const settings = await load();
-  if (settings.enabled) {
-    chrome.alarms.create('campusnet-check', {
-      periodInMinutes: Math.max(ALARM_MIN_MINUTES, settings.intervalMinutes),
-    });
-  }
+  await applySchedule();
 });
 
 async function notifyOffline(message) {

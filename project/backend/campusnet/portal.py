@@ -116,7 +116,11 @@ _INPUT_RE = re.compile(
 
 # result 字段必须带边界匹配：result:10 / result:12 不是成功。
 # 参考 guet-drcom 的处理（要求 1 后面不是数字），Dr.COM 的 result 还会是 -1。
+# 等号形式（有的门户回 `result=1` 而不是 `"result":1`）单列一条并捕获数值，
+# 成功与失败两侧都从这一条派生——两侧各写一份判定正是本 bug 的来源：
+# 只卡成功侧的话，`result=10` 会绕过失败判定掉进末尾兜底分支，照样判成功。
 _RESULT_ONE_RE = re.compile(r'"result"\s*:\s*1(?![\d])')
+_RESULT_EQ_RE = re.compile(r"(?<![\w])result\s*=\s*(-?\d+)")
 _RESULT_FAIL_RE = re.compile(r'"result"\s*:\s*(?!1\b)[\d-]+')
 
 
@@ -327,9 +331,11 @@ def classify_response(body: str, status: int, final_url: str) -> LoginResult:
     # result 必须带边界匹配。
     # 简单 `"result":1` in body 会把 result:10 / result:12 当成功——
     # guet-drcom 的注释明确提到这点，它的做法是要求 1 后面不是数字。
+    # 冒号与等号两种写法各一条正则，都不能退回裸子串判定。
     if _RESULT_ONE_RE.search(low):
         return LoginResult("success", "门户返回成功", "result=1")
-    if "result=1" in low.replace(" ", ""):
+    eq_hit = _RESULT_EQ_RE.search(low)
+    if eq_hit and eq_hit.group(1) == "1":
         return LoginResult("success", "门户返回成功", "result=1")
     for token in ('"success":true', 'success":true'):
         if token in low.replace(" ", ""):
@@ -359,9 +365,13 @@ def classify_response(body: str, status: int, final_url: str) -> LoginResult:
     # body 里带了 result 字段但不是 1，就是失败。
     # 不加这条会掉进下面的兜底分支被判成功——那才是真正的坑：
     # 我先只改正则，result:10 照样判成功，原因是兜底。
+    # 等号形式同理：`result=10` 既不命中上面的成功正则，也没有失败标记，
+    # 只能靠这一条拦下来，否则同样掉进兜底（走到这里 eq_hit 必不为 "1"）。
     fail_hit = _RESULT_FAIL_RE.search(low)
     if fail_hit:
         return LoginResult("failed", "门户返回登录失败", fail_hit.group(0))
+    if eq_hit:
+        return LoginResult("failed", "门户返回登录失败", eq_hit.group(0))
 
     if probe_mod.is_portal_url(final_url) and status in (200, 302, 401, 403):
         return LoginResult("failed", "提交后仍停留在登录页", f"status={status} url={final_url}")

@@ -103,6 +103,74 @@ def test_bootstart_interaction(store, monkeypatch, width):
         thread.join(timeout=5)
 
 
+def test_console_keeps_unsaved_settings_and_clears_trimmed_toast_records(store):
+    """两条纯前端的守卫，都不需要后端出错就能复现。
+
+    1. 切走再切回设置页会重新拉一次 `/api/settings` 回填表单，用户刚改的值被无声
+       覆盖，既没有报错也没有提示——于是这里断言值还在，并且给了那句提示。
+    2. 同屏超过 5 条 toast 时会强制移除最旧的一条，只 `removeChild` 而不清记录与
+       定时器，于是同一个 key 在随后 3.8 秒内再报一次会命中「已存在」分支，去更新
+       一个已经脱离文档的节点——消息被静默吞掉，屏幕上什么都不出现。
+    """
+    channel = os.environ.get("CAMPUSNET_BROWSER_CHANNEL")
+    if not channel:
+        pytest.skip("Set CAMPUSNET_BROWSER_CHANNEL to enable real browser checks")
+    from playwright.sync_api import expect, sync_playwright
+
+    handler = server.build_handler(store, MonitorManager())
+    server._install_dispatch(handler)
+    # 拿一个与将要填的值不同的老值当锚点：等回填落地再改，免得那一手把 33 冲掉。
+    store.set_setting("interval", 45)
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    httpd.daemon_threads = True
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(channel=channel, headless=True)
+            try:
+                page = browser.new_page(viewport={"width": 1280, "height": 844})
+                errors = []
+                page.on("pageerror", lambda error: errors.append(str(error)))
+                page.goto(f"http://127.0.0.1:{httpd.server_port}/")
+                page.locator('[data-tab="settings"]').click()
+                page.wait_for_function(
+                    "() => document.querySelector('#setInterval').value === '45'"
+                )
+
+                page.fill("#setInterval", "33")
+                page.locator('[data-tab="accounts"]').click()
+                page.locator('[data-tab="settings"]').click()
+                # 提示出现即说明 loadSettings 走到了守卫分支（它在回填之前 return）
+                expect(page.locator("#toast")).to_contain_text("未保存")
+                assert page.input_value("#setInterval") == "33"
+                assert store.all_settings()["interval"] == 45
+
+                enough = page.evaluate(
+                    """() => {
+                        const box = document.querySelector('#toast');
+                        box.innerHTML = '';   // 与前面的提示脱钩，下面只用全新的 key
+                        for (let i = 0; i < 6; i++) toast('m' + i, '', 'trim' + i);
+                        return box.children.length;
+                    }"""
+                )
+                assert enough == 5, enough   # 超出 5 条立刻清掉最旧的，'trim0' 被移除
+                page.evaluate("() => toast('again', '', 'trim0')")
+                # 记录没清干净的话，这一句会去更新那个已脱离文档的节点，
+                # lastElementChild 就还是 'm5'。
+                last = page.evaluate(
+                    "() => document.querySelector('#toast').lastElementChild.textContent"
+                )
+                assert last == "again", last
+                assert errors == []
+            finally:
+                browser.close()
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join(timeout=5)
+
+
 def test_console_settings_save_persists_interval_headless_autostart(store):
     """保存设置时，间隔 / 无头 / 开机自启必须真的落库。
 

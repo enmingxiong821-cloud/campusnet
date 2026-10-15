@@ -25,12 +25,15 @@ import mock_portal  # noqa: E402
 
 @pytest.fixture()
 def mock_net():
-    """起一套本地假校园网，跑完自动关掉。"""
-    portal_port, probe_port = 2380, 2381
+    """起一套本地假校园网，跑完自动关掉。
+
+    端口交给内核分配（bind 到 0），不写死 2380/2381：本机只要有人占着那两个端口，
+    整个 e2e 文件会一起红，而报错长成「连接被拒」，完全看不出是端口冲突。
+    mock_portal 的 handler 是在收到请求时才读 PORTAL_PORT / PROBE_PORT 这两个全局，
+    所以 bind 之后再赋值来得及——两个 server 都还没 serve_forever。
+    """
     import threading
 
-    mock_portal.PORTAL_PORT = portal_port
-    mock_portal.PROBE_PORT = probe_port
     mock_portal.PAGES["login"] = mock_portal.LOGIN_PAGE
     mock_portal.PAGES["admin"] = mock_portal.ADMIN_PAGE.replace("__USER__", mock_portal.USERNAME).replace(
         "__PASS__", mock_portal.PASSWORD
@@ -39,8 +42,12 @@ def mock_net():
 
     from http.server import ThreadingHTTPServer
 
-    portal = ThreadingHTTPServer(("127.0.0.1", portal_port), mock_portal.PortalHandler)
-    probe = ThreadingHTTPServer(("127.0.0.1", probe_port), mock_portal.ProbeHandler)
+    portal = ThreadingHTTPServer(("127.0.0.1", 0), mock_portal.PortalHandler)
+    probe = ThreadingHTTPServer(("127.0.0.1", 0), mock_portal.ProbeHandler)
+    portal_port = portal.server_address[1]
+    probe_port = probe.server_address[1]
+    mock_portal.PORTAL_PORT = portal_port
+    mock_portal.PROBE_PORT = probe_port
     for server in (portal, probe):
         server.daemon_threads = True
     threads = []
@@ -363,4 +370,6 @@ def test_mock_console_reports_state(mock_net) -> None:  # noqa: ANN001
     with urllib.request.urlopen(admin_state, timeout=5) as resp:
         data = json.loads(resp.read().decode("utf-8"))
     assert "online" in data
-    assert data["probe_port"] == 2381
+    # 跟 fixture 实际用的端口比，不写死 2381：那是「常量对常量」的断言，
+    # 端口一改成动态分配就会红，而且报错完全看不出该改哪里。
+    assert data["probe_port"] == urlsplit(mock_net[1]).port

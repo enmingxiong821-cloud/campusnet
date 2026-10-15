@@ -23,6 +23,13 @@ from .storage import Account, Device, Store, WakePlan
 Handler = Callable[[dict[str, Any], "ApiHandler"], Any]
 MAX_REQUEST_BODY = 1024 * 1024
 BODY_READ_TIMEOUT = 5.0
+# 请求行与请求头的读取上限。BaseHTTPRequestHandler 只对「请求体」按 Content-Length
+# 做有界读取（见 _read_raw_body），请求行与请求头走的是 rfile.readline()，本身没有
+# 任何时限：一个连上就不发数据的客户端能永久占住一条线程，而 ThreadingHTTPServer
+# 来者不拒地开线程，几十个空连接就能把服务饿死。设了之后超时会由
+# handle_one_request 捕获 TimeoutError 并关闭连接，线程随即释放。
+# 10 秒比请求体的 5 秒宽：这里等的是正常的慢客户端，不是已经开始的传输。
+HEADER_READ_TIMEOUT = 10.0
 
 
 class ApiError(Exception):
@@ -98,6 +105,9 @@ def _account_from_payload(
 class ApiHandler(BaseHTTPRequestHandler):
     server_version = f"campusnet/{__version__}"
     protocol_version = "HTTP/1.1"
+    # 连接级读超时，由 StreamRequestHandler.setup() 落到 socket 上，
+    # 覆盖请求行与请求头的读取（请求体另有 BODY_READ_TIMEOUT 单独收口）。
+    timeout = HEADER_READ_TIMEOUT
 
     store: Store
     manager: MonitorManager
@@ -250,7 +260,9 @@ class ApiHandler(BaseHTTPRequestHandler):
 # ---------------------------------------------------------------- 路由实现
 
 
-def routes_accounts(store: Store) -> dict[tuple[str, str], Handler]:
+def routes_accounts(
+    store: Store, manager: MonitorManager
+) -> dict[tuple[str, str], Handler]:
     def list_accounts(_: dict[str, Any], h: ApiHandler) -> None:
         h._send(
             HTTPStatus.OK,
@@ -292,12 +304,24 @@ def routes_accounts(store: Store) -> dict[tuple[str, str], Handler]:
             stage="account",
             account_id=account_id,
         )
+        # 改完顺手清冷却。界面上的提示写着「改对密码请更新账号」，
+        # 不清的话用户照做了也还得干等冷却走完，那句话就成了空头支票。
+        if manager.clear_credential_cooldown(account_id):
+            store.add_event(
+                f"账号 {account.name} 凭据已更新，解除登录冷却",
+                level="info",
+                stage="account",
+                account_id=account_id,
+            )
         h._send(HTTPStatus.OK, {"ok": True, "account": account.public()})
 
     def delete_account(ctx: dict[str, Any], h: ApiHandler) -> None:
         account_id = _account_id(ctx)
         if not store.delete_account(account_id):
             raise ApiError(HTTPStatus.NOT_FOUND, f"账号 {account_id} 不存在")
+        # 冷却字典按 account_id 存，删号必须一并清掉：rowid 会被复用，
+        # 之后新建的账号可能拿到同一个 id，白白继承上一个账号的冷却。
+        manager.clear_credential_cooldown(account_id)
         store.add_event(f"删除账号 #{account_id}", level="warning", stage="account")
         h._send(HTTPStatus.OK, {"ok": True})
 
@@ -1047,7 +1071,7 @@ def build_handler(
 ) -> type[ApiHandler]:
     routes: dict[tuple[str, str], Handler] = {}
     for group in (
-        routes_accounts(store),
+        routes_accounts(store, manager),
         routes_actions(store, manager),
         routes_monitor(store, manager),
         routes_events(store),

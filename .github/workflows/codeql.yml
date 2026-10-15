@@ -16,6 +16,10 @@ jobs:
   analyze:
     name: Analyze
     runs-on: ubuntu-latest
+    # 这个工作流原来一个超时都没写。CodeQL 的 init + autobuild + analyze 正常
+    # 几分钟就完了，但没有上限时一旦卡在分析阶段，就要干等到 GitHub 的
+    # 6 小时默认值——而这条只在 push/PR 时触发，卡住的表现是 PR 检查永远转圈。
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:

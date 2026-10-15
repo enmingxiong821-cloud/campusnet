@@ -105,7 +105,14 @@ def test_decode_binary_never_raises() -> None:
 
 
 def test_decode_unknown_declared_falls_back() -> None:
-    assert isinstance(charset.decode(UTF8_PAGE, content_type="text/html; charset=bogus-9"), str)
+    """声明了一个不存在的编码时，要回退到嗅探结果，而不是把页面吐成乱码。
+
+    原来只断言返回值是 str —— 那是「没抛异常」的同义词，哪怕实现把整页解成
+    一串替换字符也照样绿。
+    """
+    text = charset.decode(UTF8_PAGE, content_type="text/html; charset=bogus-9")
+
+    assert "您已在线" in text
 
 
 def test_needs_charset_fix_detects_garbage() -> None:

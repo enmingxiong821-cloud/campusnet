@@ -208,17 +208,39 @@ async function saveSettings() {
     },
     passwordMode: $('passwordMode').value,
     extraFieldsRaw: $('extraFields').value.trim(),
-    intervalMinutes: Math.max(0.25, parseFloat($('intervalMinutes').value) || 1),
+    // 下限必须与 background 的 ALARM_MIN_MINUTES 一致：chrome.alarms 不接受
+    // 更小的周期，存一个 0.25 只会在界面上显示成 0.25、实际按 0.5 跑。
+    intervalMinutes: Math.max(0.5, parseFloat($('intervalMinutes').value) || 1),
     probeUrls,
     apiToken: $('apiToken').value.trim(),
   });
   toast('设置已保存');
+  await applyScheduleRefresh();
+}
+
+/**
+ * 保存设置后重建后台的检测闹钟，再刷新状态显示。
+ *
+ * 只发 getState 是不够的：间隔这类调度参数在创建 alarm 那一刻就定死了，
+ * 不重建的话用户改完间隔、看到「设置已保存」，实际仍按旧周期跑。
+ */
+async function applyScheduleRefresh() {
+  try {
+    await chrome.runtime.sendMessage({ type: 'applySchedule' });
+  } catch {
+    // 后台没醒过来也不该让保存流程报错：设置已经落库，
+    // 下次浏览器启动时 onStartup 会按新值重建闹钟。
+  }
   await sendEnabledRefresh();
 }
 
 async function sendEnabledRefresh() {
-  const resp = await chrome.runtime.sendMessage({ type: 'getState' });
-  if (resp && resp.ok) showState(resp);
+  try {
+    const resp = await chrome.runtime.sendMessage({ type: 'getState' });
+    if (resp && resp.ok) showState(resp);
+  } catch {
+    // 后台不可用时只是显示不出状态，保存本身已经成功。
+  }
 }
 
 function showState(resp) {
@@ -243,7 +265,7 @@ $('btnReset').onclick = async () => {
   await chrome.storage.local.remove(Object.keys(DEFAULTS));
   await loadSettings();
   toast('已恢复默认');
-  refreshState();
+  applyScheduleRefresh();
 };
 
 $('btnExport').onclick = async () => {

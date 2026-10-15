@@ -9,6 +9,7 @@ xxtea 加密这块在实现时错过两次：
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import threading
 import urllib.parse
@@ -744,11 +745,19 @@ def test_srun_login_resolves_ip_once(monkeypatch) -> None:
 
 
 def test_local_ip_helper_uses_route() -> None:
+    """本机有到门户网段的默认路由时，应取到一个合法的本机出口 IPv4。
+
+    原来写成 `if ip: assert ip.count(".") == 3`。取不到 IP 时整个测试体是空的，
+    报告里照样是 passed——真正该拦住的退化（函数抛异常、或返回 "..." 这类垃圾）
+    一个都拦不住；而 `count(".")` 本身就太松，`999.999.999.999` 也能过。
+    改成取不到就显式 skip（让「这条其实没验证」在报告里看得见），断言交给 ipaddress。
+    """
     from campusnet import portal
 
     ip = portal._local_ip_for_portal("http://10.10.10.10/x")
-    if ip:
-        assert ip.count(".") == 3
+    if not ip:
+        pytest.skip("当前环境没有到 10.10.10.10 的路由，取不到出口 IP")
+    assert ipaddress.ip_address(ip).version == 4
 
 
 def test_local_ip_helper_rejects_bad_scheme() -> None:

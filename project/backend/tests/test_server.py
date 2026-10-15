@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import socket
 import threading
+import time
 import urllib.error
 import urllib.request
 
@@ -2065,3 +2067,91 @@ def test_create_wake_plan_rejects_out_of_range_port(api: _Api) -> None:
     )
 
     assert status == 400 and "65535" in data["error"]
+
+
+def _create_account(api: _Api, name: str) -> int:
+    status, created = call(
+        f"{api}/api/accounts",
+        "POST",
+        {
+            "name": name,
+            "portal_url": "http://10.0.0.1/",
+            "username": "u",
+            "password": "p",
+            "enabled": True,
+        },
+    )
+    assert status == 201
+    return created["id"]
+
+
+def test_update_account_clears_credential_cooldown(api: _Api, store: Store) -> None:
+    """PUT /api/accounts/{id} 要顺手清掉该账号的登录冷却。
+
+    冷却只能等时间自然走完，而界面上的提示写的是「改对密码请更新账号」——
+    不清冷却，用户照做了也还得干等，那句话就成了空头支票。
+    """
+    acc_id = _create_account(api, "张三")
+    monitor = api.manager.ensure(store)
+    monitor._credential_cooldown[acc_id] = time.monotonic() + 600
+
+    status, _ = call(
+        f"{api}/api/accounts/{acc_id}",
+        "PUT",
+        {
+            "name": "张三",
+            "portal_url": "http://10.0.0.1/",
+            "username": "u",
+            "password": "corrected",
+            "enabled": True,
+        },
+    )
+
+    assert status == 200
+    assert acc_id not in monitor._credential_cooldown
+
+
+def test_delete_account_clears_credential_cooldown(api: _Api, store: Store) -> None:
+    """删号要一并清掉冷却：rowid 会被复用，新账号可能白继承上一个账号的冷却。"""
+    acc_id = _create_account(api, "李四")
+    monitor = api.manager.ensure(store)
+    monitor._credential_cooldown[acc_id] = time.monotonic() + 600
+
+    status, _ = call(f"{api}/api/accounts/{acc_id}", "DELETE")
+
+    assert status == 200
+    assert acc_id not in monitor._credential_cooldown
+
+
+def test_idle_connection_is_closed_by_header_read_timeout(store: Store) -> None:
+    """连上却不发数据的连接要被读超时踢掉。
+
+    请求行与请求头走的是 rfile.readline()，本身没有任何时限——不设超时的话，
+    ThreadingHTTPServer 会为每个空连接留一条线程，几十个就能把服务饿死。
+    这里把超时压到 0.3 秒，免得用例真等满 10 秒。
+    """
+    manager = MonitorManager()
+    handler = server_mod.build_handler(store, manager)
+    server_mod._install_dispatch(handler)
+    handler.timeout = 0.3
+
+    from http.server import ThreadingHTTPServer
+
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    httpd.daemon_threads = True
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{httpd.server_address[1]}"
+    sock = socket.create_connection(httpd.server_address, timeout=5)
+    try:
+        sock.settimeout(5)
+        # 一个字节都不发，等服务端自己超时收摊
+        assert sock.recv(100) == b"", "空连接应被读超时关闭"
+        # 服务不该被这条连接拖住：新请求照常响应
+        status, _ = call(f"{base}/api/health")
+        assert status == 200
+    finally:
+        sock.close()
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join(timeout=5)

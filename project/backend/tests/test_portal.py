@@ -113,6 +113,44 @@ def test_classify_result_1_is_success() -> None:
     assert r.state == "success" and r.ok
 
 
+def test_classify_result_eq_1_is_success() -> None:
+    """等号写法（有的门户回 result=1 而不是 JSON）也要认。"""
+    r = classify_response("result=1&msg=ok", 200, "http://10.0.0.1/ok")
+    assert r.state == "success" and r.ok
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        '{"result":10}',
+        '{"result":12}',
+        "result=10",
+        "result=12",
+        "result=-1",
+        "result=0",
+        "result = 10",
+    ],
+)
+def test_classify_result_not_one_is_failed(body: str) -> None:
+    """result 不是 1 一律算失败。
+
+    两种写法都要卡边界。不卡的时候 `result=10` 既命中不了成功判定，也不带任何
+    失败标记，会掉进末尾那条宽松兜底分支被判成功——那次误判会让「根本没连上」
+    显示成「已连接」。
+    """
+    r = classify_response(body, 200, "http://10.0.0.1/ok")
+    assert r.state == "failed" and not r.ok
+
+
+def test_classify_result_boundary_rejects_prefixed_field() -> None:
+    """`myresult=1` 不是 result 字段，不能靠裸子串命中。
+
+    用门户地址，让末尾的宽松兜底不介入，从而看出它确实没被当成 result=1。
+    """
+    r = classify_response("myresult=1", 200, "http://10.0.0.1/eportal/portal/login")
+    assert r.state == "failed"
+
+
 def test_classify_success_true_flag() -> None:
     r = classify_response('{"success": true}', 200, "http://x/")
     assert r.state == "success"
