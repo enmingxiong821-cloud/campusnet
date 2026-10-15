@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import socket
 import subprocess
@@ -174,5 +175,12 @@ def guide(host: str = API_HOST, port: int = API_PORT) -> list[str]:
         lines.append("   先装好 ① 的 Tailscale，这里才会有手机能用的地址")
     if host in ("127.0.0.1", "localhost", "::1"):
         lines.append("   提示：服务当前只监听本机，手机访问需以 --host 0.0.0.0 启动")
+    if os.name == "nt":
+        # 按上面那步改了还连不上，卡点基本都在这里：Windows 防火墙的入站规则。
+        # 那个允许框只在首次监听非回环地址时弹一次，点过「取消」就不再弹，
+        # 表面症状是「手机一直转圈」。
+        lines.append("   提示：Windows 首次以 --host 0.0.0.0 启动会弹防火墙允许框，")
+        lines.append("         勾上「专用网络」再点允许；误点过取消就不会再弹，")
+        lines.append("         到「Windows 安全中心 → 防火墙和网络保护 → 允许应用通过防火墙」补上")
     lines.append("   打开后点「添加到主屏幕」，之后能一键看状态 / 关机 / 唤醒")
     return lines
