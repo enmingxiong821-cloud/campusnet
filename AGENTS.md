@@ -15,7 +15,7 @@
 
 - `config.json`、`*.api-token`、`*.key`、`.campusnet_obf.key`
 - `database/*.db`、`database/backup/`
-- `_tmp/`、`交付文件/`
+- `_tmp/`、`交付文件/`、`协作记忆/`
 - `.coverage`、`*.log`、`nul`
 
 ## 测试
