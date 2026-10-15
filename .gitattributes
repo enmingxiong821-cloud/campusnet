@@ -18,6 +18,18 @@ packaging/*.plist   text eol=lf
 # 轻则命令找不到，重则脚本在 clone 出来的一刻就是坏的。
 *.sh text eol=lf
 
+# 没有扩展名、但同样必须 LF 的两个文件。
+#
+# utils/pre-commit 的用法是 `cp utils/pre-commit .git/hooks/pre-commit`
+# （见 CONTRIBUTING.md），shebang 一带上 CR 就成了 `#!/bin/sh\r`，在
+# Linux/macOS 与 WSL 里这个钩子根本不会执行——而它唯一的职责正是拦住
+# 敏感串，坏了不会有人发现。
+#
+# Dockerfile 靠行尾的 `\` 续行，`\` 后面多出来的 CR 会被当成命令的一部分，
+# 在 Windows 上检出后构建会在第一条 RUN 就失败。
+utils/pre-commit text eol=lf
+Dockerfile text eol=lf
+
 # Windows 批处理反过来必须强制 CRLF。
 #
 # cmd.exe 按字节解析 .bat：多字节字符若在行尾只剩半个，就会把换行吃掉，

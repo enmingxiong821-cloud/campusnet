@@ -24,7 +24,12 @@ DEFAULT_PROBES = (
 
 # 正文明文，放行时应命中其中之一。
 # RFC 8952 建议用「canary」请求：响应与预期不一致即判定被劫持。
-ONLINE_MARKERS = ("microsoft connect test", "microsoft ncsi", "ok", "204")
+#
+# 只列这两个默认探针的真实正文（connecttest.txt 回 "Microsoft Connect Test"，
+# ncsi.txt 回 "Microsoft NCSI"）。不要往里加裸的 "ok" / "204"：这两个子串在
+# 任意门户页里都可能出现（"book"、"ok?"），加进来等于把这张表废掉；
+# 204 类探针的正文本来就是空的，由 _canary_matches 单独放行。
+ONLINE_MARKERS = ("microsoft connect test", "microsoft ncsi")
 
 # 门户页常见特征。命中则 302/200 都判为未认证。
 PORTAL_BODY_MARKERS = (
@@ -120,6 +125,15 @@ def looks_like_portal_body(text: str) -> bool:
     return any(marker in low for marker in PORTAL_BODY_MARKERS)
 
 
+def _canary_matches(body: str) -> bool:
+    """默认探针的正文是不是预期内容（RFC 8952 的 canary 语义）。
+
+    空正文放行：generate_204 这类探针本来就只回状态码，没有正文可核。
+    """
+    lowered = body.strip().lower()
+    return not lowered or any(marker in lowered for marker in ONLINE_MARKERS)
+
+
 def probe(
     url: str,
     timeout: float = 5.0,
@@ -160,6 +174,21 @@ def probe(
             if is_portal_url(final) or looks_like_portal_body(body):
                 return ProbeResult(
                     False, "portal_page", f"HTTP {resp.status} 但返回了门户页", final
+                )
+            # 正文对不上同样是劫持。少了这一条，门户只要原样回一个 200 登录页
+            # ——文案又恰好不在 PORTAL_BODY_MARKERS 里（英文页、新厂商页）——
+            # 就被判成「已在线」：用户以为连上了，实际没认证，监控也不会再重连。
+            # 「掉线报在线」是这个项目最不能出的错，所以这里按 RFC 8952 收口。
+            # 只对默认探针生效：用户自定义的 probe_url 期望正文是什么我们并不知道，
+            # 拿这张表去卡它只会把正常网络判成掉线。
+            if (
+                url in DEFAULT_PROBES or final in DEFAULT_PROBES
+            ) and not _canary_matches(body):
+                return ProbeResult(
+                    False,
+                    "captive_unknown",
+                    f"HTTP {resp.status} 但正文不是探针预期内容",
+                    final,
                 )
             return ProbeResult(True, "online", body.strip()[:120], final)
     except urllib.error.HTTPError as exc:

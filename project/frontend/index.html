@@ -597,6 +597,7 @@ async function api(path, opts = {}) {
   const controller = timeout > 0 ? new AbortController() : null;
   const timer = controller ? setTimeout(() => controller.abort(), timeout) : 0;
   let res;
+  let data;
   try {
     res = await fetch(path, {
       headers: { 'Content-Type': 'application/json' },
@@ -605,6 +606,10 @@ async function api(path, opts = {}) {
       signal: controller ? controller.signal : init.signal,
       body: init.body ? JSON.stringify(init.body) : undefined,
     });
+    // 读响应体也要留在超时窗口之内。半开连接下「响应头到了、正文卡住」是常见的，
+    // 而 finally 里的 clearTimeout 早就跑完了——那之后这个 await 没有任何保护，
+    // refresh() 永远不 settle，10 秒一次的轮询还在一轮轮往上叠。
+    data = await res.json().catch(() => ({ ok: false, error: '响应不是 JSON' }));
   } catch (e) {
     if (controller && e && e.name === 'AbortError') {
       // 超时也归到「没到达服务」这一类：对方在，但一直不回，对用户来说同样是
@@ -623,7 +628,6 @@ async function api(path, opts = {}) {
   } finally {
     clearTimeout(timer);
   }
-  const data = await res.json().catch(() => ({ ok:false, error:'响应不是 JSON' }));
   if (res.status === 401 && authRequired && !path.startsWith('/api/auth/') && !path.startsWith('/api/pair/')) {
     showAuth('会话已失效，请重新输入控制台令牌');
   }
@@ -908,12 +912,46 @@ function acctTime(a) {
   return a.last_checked_at ? '检测于 ' + relTime(a.last_checked_at) : '';
 }
 
+let _acctSig = '';
+
+/**
+ * 决定表格「长相」的字段集合。刻意不含相对时间：那串文字每 10 秒都在变，
+ * 放进签名等于永远命中不了，下面那层原地更新就是白写。
+ */
+function accountSig() {
+  return state.accounts.map(a => [
+    a.id, a.name, a.username, a.last_state,
+    a.last_checked_at, a.last_ok_at,
+    a.login_mode, a.password_mode, a.portal_url,
+  ].join('\u0001')).join('\u0002');
+}
+
 function renderAccounts() {
   const box = $('accountTable');
   if (!state.accounts.length) {
+    _acctSig = '';
     box.innerHTML = '<div class="empty">还没有账号，点「添加账号」开始配置。</div>';
     return;
   }
+  const sig = accountSig();
+  // 10 秒一次的常态轮询也会走到这里。结构没变就只刷相对时间，不重建 DOM：
+  // 整块 innerHTML 会把全部节点换成新的，用户正悬停、或已按下鼠标的那颗按钮
+  // 会在 mousedown 与 mouseup 之间被替换掉，那一次点击就凭空消失了。
+  //
+  // 行数与账号数对不上，说明这个 DOM 不是本函数建的（refresh() 的失败分支会清空
+  // 容器），直接走整块重建。冻结路径里 `.sub-time` 的有无是稳定的——它只看
+  // acctTime 的三个入参，而这三个都在签名里。
+  if (sig === _acctSig) {
+    const trs = box.querySelectorAll('tbody tr');
+    if (trs.length === state.accounts.length) {
+      state.accounts.forEach((a, i) => {
+        const cell = trs[i].querySelector('.sub-time');
+        if (cell) cell.textContent = acctTime(a);
+      });
+      return;
+    }
+  }
+  _acctSig = sig;
   const rows = state.accounts.map(a => `
     <tr>
       <td><strong>${esc(a.name)}</strong><div class="hint mono">${esc(a.username)}</div></td>

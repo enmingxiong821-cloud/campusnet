@@ -83,6 +83,11 @@ elif [ "$IN_PLACE" -eq 0 ]; then
   if [ "$DRY_RUN" -eq 1 ]; then
     say "[预演] 会执行：git clone --depth 1 --branch $BRANCH $REPO $INSTALL_DIR"
   else
+    # clone 会建出目标目录本身，但不会建它的父目录：默认安装目录在
+    # ~/.local/share/campusnet，而 ~/.local/share 在最小化系统上并不存在，
+    # 那时 git clone 直接报 "could not create leading directories"。
+    # 归档分支下面本来就有 mkdir -p，这里是补上另一条路。
+    mkdir -p "$(dirname "$INSTALL_DIR")"
     if command -v git >/dev/null 2>&1; then
       say "[信息] 正在 git clone --depth 1（约几 MB）……"
       git clone --depth 1 --branch "$BRANCH" "$REPO" "$INSTALL_DIR"

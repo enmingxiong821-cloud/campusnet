@@ -84,8 +84,8 @@
   <div class="card">
     <h2>探活与频率</h2>
     <label><span>检测间隔（分钟）</span>
-      <input id="intervalMinutes" type="number" min="0.25" step="0.25" value="1">
-      <div class="hint">浏览器插件最小 0.25 分钟（15 秒）；MV3 后台休眠时实际唤醒会有延迟</div>
+      <input id="intervalMinutes" type="number" min="0.5" step="0.25" value="1">
+      <div class="hint">浏览器插件最小 0.5 分钟（30 秒，chrome.alarms 不接受更短的周期）；MV3 后台休眠时实际唤醒会有延迟</div>
     </label>
     <label><span>探测地址（每行一个，任一放行即视为在线）</span>
       <textarea id="probeUrls" placeholder="http://www.msftconnecttest.com/connecttest.txt"></textarea>
@@ -197,6 +197,13 @@ async function saveSettings() {
     toast('门户地址要以 http:// 或 https:// 开头', 'err');
     return;
   }
+  // 下限必须与 background 的 ALARM_MIN_MINUTES 一致：chrome.alarms 不接受
+  // 更小的周期，存一个 0.25 只会在界面上显示成 0.25、实际按 0.5 跑。
+  // 夹完写回输入框，别让界面继续显示一个不会被采用的数字（type=number 的
+  // min 只参与表单校验，这里走的是手动 onclick 保存，拦不住手输的 0.3）。
+  const interval = Math.max(0.5, parseFloat($('intervalMinutes').value) || 1);
+  $('intervalMinutes').value = interval;
+
   await chrome.storage.local.set({
     portalUrl,
     username: $('username').value.trim(),
@@ -208,9 +215,7 @@ async function saveSettings() {
     },
     passwordMode: $('passwordMode').value,
     extraFieldsRaw: $('extraFields').value.trim(),
-    // 下限必须与 background 的 ALARM_MIN_MINUTES 一致：chrome.alarms 不接受
-    // 更小的周期，存一个 0.25 只会在界面上显示成 0.25、实际按 0.5 跑。
-    intervalMinutes: Math.max(0.5, parseFloat($('intervalMinutes').value) || 1),
+    intervalMinutes: interval,
     probeUrls,
     apiToken: $('apiToken').value.trim(),
   });
@@ -290,6 +295,13 @@ $('btnProbe').onclick = async () => {
     try {
       const resp = await fetch(url, { redirect: 'manual', cache: 'no-store', signal: controller.signal });
       clearTimeout(timer);
+      // 扩展页 origin 下跨域 + redirect:'manual' 拿到的是 opaqueredirect：
+      // status 恒为 0、headers 为空，下面两条分支一条都不命中，界面只会显示
+      // 「HTTP 0」，让人以为是探测本身出错——其实「被重定向」正是未放行的表现。
+      if (resp.type === 'opaqueredirect' || resp.status === 0) {
+        $('probeResult').textContent = `${url} → 未放行（被重定向到门户，读不到跳转目标）`;
+        return;
+      }
       if ([301, 302, 303, 307, 308].includes(resp.status)) {
         const loc = resp.headers.get('location') || '';
         $('probeResult').textContent = `${url} → 未放行（跳转 ${resp.status}）${loc ? ' 到 ' + loc : ''}`;

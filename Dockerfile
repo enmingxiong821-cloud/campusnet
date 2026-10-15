@@ -11,10 +11,15 @@ FROM python:3.12-slim
 
 # 不写 __pycache__（容器是一次性的，留在层里只占地方）；
 # 不缓冲输出（否则 docker logs 要等缓冲满才看得见）。
+#
+# CAMPUSNET_KEY_FILE 必须指进卷里：crypto 默认把密钥读到 ~/.campusnet_obf.key，
+# 而容器里的 HOME 不在挂载点上，容器一重建密钥就没了——账号密码全变成解不开的
+# 密文（数据库还在，却没东西能解），而 README 承诺的是「挂一个卷就带得走」。
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PYTHONIOENCODING=utf-8 \
-    PYTHONUTF8=1
+    PYTHONUTF8=1 \
+    CAMPUSNET_KEY_FILE=/app/database/.campusnet_obf.key
 
 WORKDIR /app
 

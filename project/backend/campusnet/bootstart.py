@@ -486,18 +486,27 @@ def xdg_desktop_text(host: str = API_HOST, port: int = API_PORT) -> str:
         "Type=Application\n"
         "Name=campusnet\n"
         "Comment=校园网自动重连\n"
-        f"Exec={' '.join(_desktop_arg(arg) for arg in launch_command(host, port))}\n"
+        f"Exec={' '.join(desktop_arg(arg) for arg in launch_command(host, port))}\n"
         f"Path={ROOT}\n"
         "Terminal=false\n"
         "X-GNOME-Autostart-enabled=true\n"
     )
 
 
-def _desktop_arg(value: str) -> str:
+def desktop_arg(value: str) -> str:
+    """把一个命令行参数按 Desktop Entry 启动项的规则包成 Exec 里的双引号形式。
+
+    与 shlex.quote 不能互换：Desktop Entry 只认双引号（单引号会被当成参数内容的
+    一部分），而 shlex.quote 优先给单引号；反过来这里的 `%%` 在 sh 里又是原样。
+    shortcuts.py 生成 .desktop 时用的也是这个函数，两边必须是同一份实现。
+
+    转义只做一层。Exec 是 string 类型的值，读的一方按通用规则解一次转义，
+    所以参数里字面的一个反斜杠在文件里写成两个；再套一层就变成四个，解出来
+    是两个，路径里平白多出一个反斜杠。
+    """
     escaped = value.replace('\\', '\\\\').replace('"', '\\"')
     escaped = escaped.replace('`', '\\`').replace('$', '\\$').replace('%', '%%')
-    # Desktop entries unescape string values before parsing the Exec command.
-    return '"' + escaped.replace('\\', '\\\\') + '"'
+    return '"' + escaped + '"'
 
 
 def macos_plist_text(host: str = API_HOST, port: int = API_PORT) -> str:

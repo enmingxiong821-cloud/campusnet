@@ -15,7 +15,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from .bootstart import launch_command_line, platform_name, python_executable
+from .bootstart import desktop_arg, launch_command_line, platform_name, python_executable
 from .paths import ROOT, frozen_prefix
 
 
@@ -205,7 +205,10 @@ def create_posix(
                 "Type=Application\n"
                 f"Name={item.name}\n"
                 f"Comment={item.hint or item.name}\n"
-                f"Exec={command}\n"
+                # Exec 不能用上面那份 shlex 引号：Desktop Entry 只认双引号，
+                # 单引号会被当成参数内容的一部分，于是安装路径一带空格，
+                # 桌面环境就会拿着一个带单引号的路径去启动，双击毫无反应。
+                f"Exec={' '.join(desktop_arg(part) for part in [*prefix, *item.args])}\n"
                 f"Path={ROOT}\n"
                 "Terminal=true\n",
                 encoding="utf-8",

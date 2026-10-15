@@ -200,6 +200,10 @@ class Store:
         except BaseException:
             conn.close()
             raise
+        # -wal / -shm 会在最后一个连接干净关闭时被 SQLite 删掉，下一次打开又以
+        # umask（通常 0644）重建——只在 __init__ 收一次权限不够，重建出来的旁挂
+        # 文件里落着事件正文与 settings，同机其他用户读得到。每次建连接补一次。
+        self._restrict_permissions()
         return conn
 
     @contextmanager

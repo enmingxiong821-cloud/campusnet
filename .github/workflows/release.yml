@@ -50,6 +50,18 @@ jobs:
         run: |
           set -e
           VERSION="${GITHUB_REF_NAME#v}"
+          # tag 与代码里的版本号必须一致。发版流程是先改 __version__、再推同名
+          # tag，两处手工同步，漏改哪一处都不会有任何报错：包名、二进制名、Release
+          # 标题全跟着 tag 走，而 `--version` 打出的是代码里那个——用户装完发现
+          # 「2.2.0 的包里报 2.1.0」，或者 Release 标题写着旧版本号。
+          # workflow_dispatch 干跑时 GITHUB_REF_NAME 是分支名，跳过。
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            PKG_VERSION="$(python -c 'import sys; sys.path.insert(0, "project/backend"); import campusnet; print(campusnet.__version__)')"
+            if [ "$VERSION" != "$PKG_VERSION" ]; then
+              echo "::error::tag v${VERSION} 与 campusnet.__version__=${PKG_VERSION} 不一致，先改齐版本号再发版"
+              exit 1
+            fi
+          fi
           NAME="campusnet-${VERSION}"
           echo "NAME=${NAME}" >> "$GITHUB_ENV"
           mkdir -p "dist/${NAME}"

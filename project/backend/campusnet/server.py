@@ -1330,6 +1330,18 @@ def _install_dispatch(handler: type[ApiHandler]) -> None:
 
     def _options(self: ApiHandler) -> None:
         """处理浏览器或代理发出的预检，避免 BaseHTTPRequestHandler 返回 501。"""
+        # do_OPTIONS 是直接挂在 handler 上的，不经过 _dispatch，于是也漏掉了那里
+        # 统一读正文的那一步。HTTP/1.1 默认 keep-alive，正文不读走就留在 socket
+        # 缓冲区里，下一次循环会把它当成「下一个请求」的头——前置代理复用这条
+        # 上游连接时，攻击者用一个带正文的 OPTIONS 就能塞进一条自己发不出的请求
+        # （CL.0 请求走私）。读完即可，预检本身照常返回 204。
+        # 长度非法／超限时 _read_raw_body 已经把 close_connection 置上了，
+        # 这里只需照常回一个错误体，让客户端知道是它自己的请求有问题。
+        try:
+            self._read_raw_body()
+        except ApiError as exc:
+            self._send(exc.status, {"ok": False, "error": exc.message})
+            return
         self.send_response(HTTPStatus.NO_CONTENT)
         self.send_header("Content-Length", "0")
         self.send_header("Cache-Control", "no-store")

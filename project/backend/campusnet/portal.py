@@ -119,8 +119,12 @@ _INPUT_RE = re.compile(
 # 等号形式（有的门户回 `result=1` 而不是 `"result":1`）单列一条并捕获数值，
 # 成功与失败两侧都从这一条派生——两侧各写一份判定正是本 bug 的来源：
 # 只卡成功侧的话，`result=10` 会绕过失败判定掉进末尾兜底分支，照样判成功。
+#
+# 前导必须落在 `^` / `?` / `&` / `{` 上：无边界的话，门户成功页里随便一段
+# 内联 JS（`var result=0;`）都会被当成失败标记，把一次成功登录判成失败。
+# 只当 `result=` 出现在查询串或 JSON 形态里时才算「门户在报结果」。
 _RESULT_ONE_RE = re.compile(r'"result"\s*:\s*1(?![\d])')
-_RESULT_EQ_RE = re.compile(r"(?<![\w])result\s*=\s*(-?\d+)")
+_RESULT_EQ_RE = re.compile(r"(?:^|[?&{])result\s*=\s*(-?\d+)")
 _RESULT_FAIL_RE = re.compile(r'"result"\s*:\s*(?!1\b)[\d-]+')
 
 
@@ -301,7 +305,15 @@ def _fetch(
             raw = exc.read(200_000)
         except Exception:  # noqa: BLE001
             raw = b""
-        return exc.code, charset_mod.decode(raw, content_type=hdrs.get("content-type")), url, hdrs
+        # 3xx 不会被跟随（opener 挂了 _NoRedirect），Location 才是「门户把我们送去
+        # 哪儿」。返回入参 url（提交地址）会让 classify_response 拿错 URL 去判
+        # 「是否仍停留在登录页」——而表单 action 多半含 login/portal，于是一次
+        # 正常的成功跳转被判成失败，白跑一轮重连。
+        final = url
+        location = hdrs.get("location", "")
+        if exc.code in (301, 302, 303, 307, 308) and location:
+            final = urllib.parse.urljoin(url, location)
+        return exc.code, charset_mod.decode(raw, content_type=hdrs.get("content-type")), final, hdrs
     except urllib.error.URLError as exc:
         # 门户不可达（超时/拒绝连接/DNS 失败）必须转成状态，不能往上抛，
         # 否则一轮 check_all 抛异常会打断整个监控线程。

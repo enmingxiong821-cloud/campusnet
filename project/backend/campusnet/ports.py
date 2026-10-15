@@ -80,14 +80,20 @@ def _who_holds(port: int, host: str) -> str:
         out = subprocess.run(
             ["netstat", "-ano", "-p", "TCP"],
             capture_output=True,
-            text=True,
             timeout=5,
             check=False,
         ).stdout
     except Exception:  # noqa: BLE001 - 诊断失败不能影响主流程
         return ""
 
-    for line in out.splitlines():
+    # 刻意不写成 text=True：那用的是本地编码，而 netstat 写的是控制台代码页
+    # （中文 Windows 上是 GBK）。Python 处于 UTF-8 模式（PYTHONUTF8=1，本项目的
+    # Dockerfile 就设了）时两者对不上，解码在 subprocess 的读线程里失败，stdout
+    # 直接变成 None——于是本意是「告诉用户端口被谁占了」的诊断自己抛 AttributeError。
+    # 这一行里真正用到的只有 ASCII 部分（TCP / 地址 / LISTENING / PID），
+    # 所以宽松解码即可，解不出来的字节替换掉不影响判定。
+    text = (out or b"").decode("utf-8", errors="replace")
+    for line in text.splitlines():
         if f":{port}" not in line:
             continue
         parts = line.split()

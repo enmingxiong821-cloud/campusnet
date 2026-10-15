@@ -274,7 +274,11 @@ function classify(text, status, url) {
   // 等号写法的 result（有的门户回 `result=1` 而不是 JSON）。成功与失败两侧
   // 都从这一条派生，避免两侧各写一份判定又走岔——只卡成功侧的话，
   // `result=10` 会绕过失败判定掉进末尾的 2xx 兜底，照样判成功。
-  const eqResult = /(?<![\w])result\s*=\s*(-?\d+)/.exec(tight);
+  //
+  // 前导必须落在 `^` / `?` / `&` / `{` 上（与 portal.py 的 _RESULT_EQ_RE 一致）：
+  // 只写成「前面不是标识符字符」的话，`obj.result=0` 这类页面内联 JS 会被当成
+  // 失败标记，把一次成功登录判成失败。
+  const eqResult = /(?:^|[?&{])result\s*=\s*(-?\d+)/.exec(tight);
 
   if (/"result":\s*1(?![\d])/.test(low)
       || (eqResult && eqResult[1] === '1')

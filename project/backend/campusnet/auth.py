@@ -81,7 +81,16 @@ class ApiAuth:
             ) from exc
 
     def check_token(self, candidate: str) -> bool:
-        return bool(candidate) and hmac.compare_digest(candidate, self._token)
+        if not candidate:
+            return False
+        # hmac.compare_digest 对含非 ASCII 的 str 直接抛 TypeError（HTTP 头按
+        # latin-1 解码，一个高位字节就能触发）。而鉴权门禁在 _dispatch 的 try
+        # 之外，异常逃出去就是连接被重置 + stderr 一整段 traceback，客户端连
+        # 401 都拿不到——发个畸形令牌头就能反复刷日志、耗线程。
+        # 统一编码成 UTF-8 字节再比：长度不等时 compare_digest 自己会短路。
+        return hmac.compare_digest(
+            candidate.encode("utf-8"), self._token.encode("utf-8")
+        )
 
     @staticmethod
     def _token_from_headers(headers: object) -> str:

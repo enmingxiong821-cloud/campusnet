@@ -203,10 +203,11 @@ class Notifier:
             return ""
         with self._lock:
             if online:
-                was_failing = (
-                    account_id in self._notified
-                    or self._failures.get(account_id, 0) > 0
-                )
+                # 只有真发过「掉线」才配发「恢复在线」。原来把 `_failures > 0`
+                # 也算作曾失败，于是 after_failures=3 时「第 1 轮失败、第 2 轮
+                # 恢复」会发出一条用户从没收到过前情的「已恢复在线」；链路每
+                # 两轮抖动一次就无限重复发，正是本模块要避免的那种轰炸。
+                was_failing = account_id in self._notified
                 if not was_failing:
                     self._failures[account_id] = 0
                     return ""
