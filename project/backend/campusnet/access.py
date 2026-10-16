@@ -6,21 +6,159 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
 from typing import Any
 
 from .auth import ApiAuth
+from .charset import decode as decode_text
 from .paths import API_HOST, API_PORT
 
 PROBE_TARGET = "8.8.8.8"
+CREATE_NO_WINDOW = 0x08000000
+
+# 虚拟网卡的名字是系统或厂商在安装时写死的英文，不跟着界面语言走——而真网卡的
+# 显示名恰好相反（中文系统上是「以太网」「WLAN」）。所以这里用黑名单：认不出
+# 名字的一律当成真网卡，宁可留着也不误杀。
+_VIRTUAL_NAME_HINTS = (
+    "hyper-v",
+    "vethernet",
+    "wsl",
+    "virtual",
+    "vmware",
+    "virtualbox",
+    "tailscale",
+    "zerotier",
+    "wireguard",
+    "openvpn",
+    "tunnel",
+    "tun",
+    "tap",
+    "wintun",
+    "clash",
+    "mihomo",
+    "docker",
+    "veth",
+    "br-",
+    "virbr",
+    "loopback",
+    "bluetooth",
+    "npcap",
+)
+
+# RFC 2544 拿这段做网络设备基准测试，Clash / Mihomo 之类用它当 TUN 的 fake-ip
+# 网段，真实局域网不会落在里面。
+_NON_LAN_NETWORKS = (ipaddress.IPv4Network("198.18.0.0/15"),)
+
+_ADDRESS_LINE_RE = re.compile(r":\s*(\d+\.\d+\.\d+\.\d+)\s*(?:\([^)]*\))?$")
+_ADAPTER_NAME_RE = re.compile(r'"([^"]+)"')
+_IFACE_METRIC_RE = re.compile(r"^\s*InterfaceMetric\s*:\s*(\d+)")
+_IP_ADDR_RE = re.compile(
+    r"^\s*\d+:\s+(\S+)\s+inet (\d+\.\d+\.\d+\.\d+)", re.M
+)
+_IFCONFIG_NAME_RE = re.compile(r"^(\S+?):\s")
+_IFCONFIG_INET_RE = re.compile(r"^\s+inet (\d+\.\d+\.\d+\.\d+)")
 
 
-def lan_ip() -> str:
-    """默认路由出口上的本机 IPv4（UDP connect 不发包，只让内核查路由表）。"""
+def _run_text(args: list[str], timeout: float = 10) -> tuple[bool, str]:
+    """跑一条系统命令并解码输出。
+
+    不能按 UTF-8 硬解：实测 netsh 的输出是 UTF-8，而 route / ipconfig 是 GBK
+    （中文系统的 ANSI 代码页），所以交给 charset.decode 按
+    「UTF-8 严格 → GB18030 → latin-1」自己挑。
+    """
+    kwargs: dict[str, Any] = {}
+    if os.name == "nt":
+        kwargs["creationflags"] = CREATE_NO_WINDOW
+    try:
+        proc = subprocess.run(args, capture_output=True, timeout=timeout, **kwargs)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return False, ""
+    return proc.returncode == 0, decode_text(proc.stdout or b"")
+
+
+def _windows_addresses() -> list[tuple[str, str]]:
+    """`netsh interface ipv4 show addresses` → [(网卡名, 地址)]，按接口跃点升序。
+
+    一条命令就同时给出网卡名、地址和跃点——route print -4 只有「接口 IP」列，
+    网卡名在另一段的「接口列表」里，路由表里没有 ifindex，两边拼不起来。
+    表头是本地化的，所以不认任何标签：名字取块头引号里的内容（实测是 ASCII
+    引号），地址取块内第一条「冒号后直接是点分十进制、到行尾为止」的行，也就是
+    IP 地址那一行（默认网关排在它后面；子网前缀带着 /16，匹配不上）。跃点字段
+    InterfaceMetric 本身就是英文。
+    """
+    ok, text = _run_text(["netsh", "interface", "ipv4", "show", "addresses"])
+    if not ok:
+        return []
+    entries: list[tuple[str, str, int]] = []
+    for block in re.split(r"\n(?=\S)", text):
+        lines = block.splitlines()
+        if not lines:
+            continue
+        name_match = _ADAPTER_NAME_RE.search(lines[0])
+        if not name_match:
+            continue
+        address = ""
+        metric = 10**9
+        for line in lines[1:]:
+            if not address:
+                hit = _ADDRESS_LINE_RE.search(line)
+                if hit:
+                    address = hit.group(1)
+            metric_hit = _IFACE_METRIC_RE.match(line)
+            if metric_hit:
+                metric = int(metric_hit.group(1))
+        if address:
+            entries.append((name_match.group(1), address, metric))
+    entries.sort(key=lambda item: item[2])
+    return [(name, address) for name, address, _ in entries]
+
+
+def _posix_addresses() -> list[tuple[str, str]]:
+    """Linux 走 `ip -o -4 addr show`；只有 macOS/BSD 回退到 `ifconfig -a`。"""
+    ok, text = _run_text(["ip", "-o", "-4", "addr", "show"])
+    if ok:
+        found = [
+            (match.group(1), match.group(2)) for match in _IP_ADDR_RE.finditer(text)
+        ]
+        if found:
+            return found
+    ok, text = _run_text(["ifconfig", "-a"])
+    if not ok:
+        return []
+    found = []
+    name = ""
+    for line in text.splitlines():
+        header = _IFCONFIG_NAME_RE.match(line)
+        if header:
+            name = header.group(1)
+            continue
+        inet = _IFCONFIG_INET_RE.match(line)
+        if inet and name:
+            found.append((name, inet.group(1)))
+    return found
+
+
+def local_ipv4_addresses(platform: str | None = None) -> list[tuple[str, str]]:
+    """本机每块网卡的 (名字, IPv4)，取不到就返回空列表。
+
+    platform 参数供测试注入，与 power.local_ipv4_networks() 同一约定。
+    """
+    name = platform or ("nt" if os.name == "nt" else "posix")
+    return _windows_addresses() if name == "nt" else _posix_addresses()
+
+
+def _exit_ip() -> str:
+    """默认路由出口上的本机 IPv4（UDP connect 不发包，只让内核查路由表）。
+
+    只能当「系统偏好哪块网卡」的提示，不能直接当局域网地址：本机挂着 Clash
+    这类 TUN 时它的默认路由跃点是 0，出口地址会是 198.18.0.1 这种虚拟地址。
+    """
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         sock.settimeout(0.5)
@@ -30,6 +168,49 @@ def lan_ip() -> str:
         return ""
     finally:
         sock.close()
+
+
+def _is_lan_address(ip: str) -> bool:
+    try:
+        addr = ipaddress.IPv4Address(ip)
+    except ValueError:
+        return False
+    if (
+        addr.is_loopback
+        or addr.is_link_local
+        or addr.is_multicast
+        or addr.is_unspecified
+    ):
+        return False
+    return not any(addr in net for net in _NON_LAN_NETWORKS)
+
+
+def _is_virtual_name(name: str) -> bool:
+    lowered = name.lower()
+    return any(hint in lowered for hint in _VIRTUAL_NAME_HINTS)
+
+
+def lan_ip() -> str:
+    """局域网地址：直接挑一块真网卡，而不是问「上网走哪条路」。
+
+    同网段多块网卡（有线 + 无线同时在线）时优先系统自己偏好的那块，即默认路由
+    的出口地址；那块恰好是虚拟网卡或没有候选匹配时，退回枚举顺序（Windows 上
+    已按接口跃点升序）。
+    """
+    addresses = local_ipv4_addresses()
+    if not addresses:
+        # 枚举命令不可用（精简系统、非预期平台）：退回老办法，总比没有强。
+        return _exit_ip()
+    exit_ip = _exit_ip()
+    fallback = ""
+    for name, ip in addresses:
+        if not _is_lan_address(ip) or _is_virtual_name(name):
+            continue
+        if ip == exit_ip:
+            return ip
+        if not fallback:
+            fallback = ip
+    return fallback
 
 
 def tailscale_ip() -> str:
