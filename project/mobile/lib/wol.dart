@@ -33,12 +33,20 @@ class WolError implements Exception {
 /// 宽松度刻意对齐后端的 `re.sub(r"[^0-9a-fA-F]", "", mac)`：冒号、短横线、
 /// 点、空格一律忽略。后端只校验最终长度是 12，这里也一样。
 String normalizeMac(String mac) {
-  final cleaned = mac.replaceAll(RegExp('[^0-9a-fA-F]'), '');
+  final cleaned = macKey(mac);
   if (cleaned.length != 12) {
     throw WolError('MAC 地址格式不对：$mac（应形如 AA:BB:CC:DD:EE:FF）');
   }
-  return cleaned.toUpperCase();
+  return cleaned;
 }
+
+/// 只归一不校验：去掉分隔符、统一大写，长度不对也照返回。
+///
+/// 用来判断「两个 MAC 是不是同一块网卡」。这种场合不能校验长度——两边可能
+/// 有一边是用户在别处手抄的脏值，报错会让整张设备表都查不成，而它们只要归一
+/// 后一致就足以说明是同一块网卡。
+String macKey(String mac) =>
+    mac.replaceAll(RegExp('[^0-9a-fA-F]'), '').toUpperCase();
 
 /// 组装魔术包。长度固定 102 字节。
 Uint8List magicPacket(String mac) {
@@ -72,10 +80,11 @@ String? guessBroadcast(String host) {
 
 /// 挑出该往哪个定向广播地址发包。
 ///
-/// 优先用后端给的值——将来后端补上真正的子网定向广播（现在 `wake_info()`
-/// 写死全局广播）时，这里自动受益。后端只回全局广播时那个值没有增量信息，
-/// 改用按控制台地址猜的那个：控制台地址就是那台电脑，跟它同网段。
-/// 两边都给不出就返回空串，调用方只发全局广播。
+/// 优先用后端给的值——`/api/power/info` 现在会按 Host 头所在子网算出真正的
+/// 定向广播（见 `power.py` 的 `directed_broadcast()`），拿到就用，不再自己猜。
+/// 后端只回全局广播时那个值没有增量信息——那说明它也算不出来（绑在回环上时
+/// 就是这样）——这时改用按控制台地址猜的 /24：控制台地址就是那台电脑，跟它
+/// 同网段。两边都给不出就返回空串，调用方只发全局广播。
 String directedBroadcastFor(String host, String fromBackend) {
   final value = fromBackend.trim();
   if (value.isNotEmpty && value != globalBroadcast) return value;

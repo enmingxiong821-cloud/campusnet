@@ -225,6 +225,8 @@ class _ConsolePageState extends State<ConsolePage> {
       onRetry: _probe,
       // 叫醒之后先探活再建 WebView：控制器可能还没建过（APP 一开就是离线态）。
       onAwoke: _probe,
+      // 离线态下 WebView 本来就没在用，绕回配置页不损失什么，还省掉第二套校验。
+      onEditRelay: widget.onEditSettings,
     );
   }
 }

@@ -39,14 +39,32 @@ class WakeTarget {
 }
 
 class AppStore {
-  AppStore._(this._prefs, this.baseUrl, this.targets);
+  AppStore._(this._prefs, this.baseUrl, this.targets,
+      this.relayUrl, this.relayToken);
 
   static const _keyBaseUrl = 'base_url';
   static const _keyTargets = 'wake_targets';
+  static const _keyRelayUrl = 'relay_url';
+  static const _keyRelayToken = 'relay_token';
 
   final SharedPreferences _prefs;
   String baseUrl;
   List<WakeTarget> targets;
+
+  /// 「中转设备」的控制台地址：手机不在电脑所在网段时，改请它代发魔术包。
+  ///
+  /// 空串表示没配——这时只走同网段直发那条路，行为跟以前一样。
+  String relayUrl;
+
+  /// 中转设备的 API 令牌，由用户从那边控制台抄来。
+  ///
+  /// 明文存在 SharedPreferences 里。这是妥协不是设计：手机与那台设备之间的
+  /// 通道本来就可能是明文 HTTP，令牌也只在校园网内有效；真要防，得先给后端
+  /// 上 TLS。别因为这条就去引进 flutter_secure_storage 之类的新依赖。
+  String relayToken;
+
+  /// 中转是否已配置齐（地址与令牌都要有，缺一不可）。
+  bool get relayReady => relayUrl.isNotEmpty && relayToken.isNotEmpty;
 
   static Future<AppStore> load() async {
     final prefs = await SharedPreferences.getInstance();
@@ -65,7 +83,13 @@ class AppStore {
         // 存坏了就当没有。这里不值得让 APP 起不来——用户重填一次即可。
       }
     }
-    return AppStore._(prefs, prefs.getString(_keyBaseUrl) ?? '', targets);
+    return AppStore._(
+      prefs,
+      prefs.getString(_keyBaseUrl) ?? '',
+      targets,
+      prefs.getString(_keyRelayUrl) ?? '',
+      prefs.getString(_keyRelayToken) ?? '',
+    );
   }
 
   Future<void> saveBaseUrl(String value) async {
@@ -81,11 +105,29 @@ class AppStore {
     );
   }
 
+  /// 存中转配置。传空串就是关掉中转。
+  Future<void> saveRelay({required String url, required String token}) async {
+    relayUrl = url;
+    relayToken = token;
+    if (url.isEmpty) {
+      // 没配地址却留着令牌等于留了一份用不上的凭据，一起清掉。
+      await _prefs.remove(_keyRelayUrl);
+      await _prefs.remove(_keyRelayToken);
+      return;
+    }
+    await _prefs.setString(_keyRelayUrl, url);
+    await _prefs.setString(_keyRelayToken, token);
+  }
+
   Future<void> clear() async {
     baseUrl = '';
     targets = const [];
+    relayUrl = '';
+    relayToken = '';
     await _prefs.remove(_keyBaseUrl);
     await _prefs.remove(_keyTargets);
+    await _prefs.remove(_keyRelayUrl);
+    await _prefs.remove(_keyRelayToken);
   }
 }
 
