@@ -1,0 +1,62 @@
+name: Mobile
+
+# 只在动到 APP 时才跑——这是一个 Python 仓库，多数改动跟 Flutter 无关，
+# 每推一次都去装一遍 Flutter SDK 纯属浪费。
+#
+# 这份检查**故意不进分支保护的必过列表**。按路径触发的检查一旦设成必过，
+# 不碰 project/mobile/ 的 PR 永远等不到这一格的状态，会一直挂在 pending 上，
+# 整条 main 从此推不动。代价是它红了不会拦合并，得靠人看。
+on:
+  push:
+    branches: [main]
+    paths:
+      - "project/mobile/**"
+      - ".github/workflows/mobile.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "project/mobile/**"
+      - ".github/workflows/mobile.yml"
+
+# 与 ci.yml 一致：只读代码。
+permissions:
+  contents: read
+
+concurrency:
+  group: mobile-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  mobile:
+    name: Flutter 分析与测试
+    runs-on: ubuntu-latest
+    # 首次要下 Flutter SDK，之后有 cache；正常两三分钟。给个上限免得异常时干等。
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      # 版本与开发者本机钉在一起。CI 上 Flutter 换版本不会有人告诉你，
+      # 而「本机过、CI 不过」这种红最难查——版本先固定住，少一个变量。
+      - name: 安装 Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 3.47.7
+          channel: stable
+          cache: true
+
+      - name: 取依赖
+        working-directory: project/mobile
+        run: flutter pub get
+
+      # 用 dart analyze 而不是 flutter analyze：本机工程路径带中文，
+      # flutter analyze 的 LSP 通道在那儿必崩，开发者只能用 dart analyze。
+      # CI 里两样都能跑，但两边跑同一条命令才不会出现「本机干净、CI 报红」。
+      - name: 静态分析
+        working-directory: project/mobile
+        run: dart analyze
+
+      # 其中 wol.dart 那组断言魔术包与后端 magic_packet() 逐字节一致——
+      # 这一条才是把「APP 发的包后端认不认」钉住的东西。
+      - name: 测试
+        working-directory: project/mobile
+        run: flutter test

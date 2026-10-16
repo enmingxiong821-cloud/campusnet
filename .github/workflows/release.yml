@@ -239,6 +239,71 @@ jobs:
           path: out/*
           retention-days: 30
 
+  build-apk:
+    name: 安卓安装包
+    needs: verify
+    # 与 build-binary 同理：tag 出正式产物，workflow_dispatch 用来在打 tag 之前
+    # 先把这条链跑一遍——Flutter 与 Gradle 的坑不少，发出去才发现编不出来最糟。
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    # 首次要下 Flutter SDK 与 Android SDK 组件，再跑一次 Gradle，比别的作业慢。
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      # AGP 要 JDK 17 以上。ubuntu-latest 自带的那份版本会随镜像漂移，
+      # 显式钉住——Flutter 对 JDK 版本是挑的。
+      - name: 安装 JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: 安装 Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 3.47.7
+          channel: stable
+          cache: true
+
+      - name: 取依赖
+        working-directory: project/mobile
+        run: flutter pub get
+
+      # 与 verify 里 Python 那步同一个理由：tag 不一定打在 main 的绿色提交上，
+      # mobile.yml 是另一条工作流、按路径触发，管不到这里。发布前再验一遍。
+      - name: 静态分析
+        working-directory: project/mobile
+        run: dart analyze
+
+      - name: 测试
+        working-directory: project/mobile
+        run: flutter test
+
+      - name: 构建 APK
+        working-directory: project/mobile
+        run: |
+          set -e
+          # 版本号取自代码里那一个，不另存一份：tag 与 __version__ 的一致性
+          # verify 已经查过，workflow_dispatch 干跑时没有 tag 可用，这样也编得出来。
+          VERSION="$(python3 -c 'import sys; sys.path.insert(0, "../backend"); import campusnet; print(campusnet.__version__)')"
+          echo "按版本 ${VERSION} 构建"
+          # --build-name 覆盖 pubspec 里的占位版本，APK 里看到的版本号才跟发版对齐。
+          # build-number 用运行序号：它必须是递增的整数，Android 靠它判断升级。
+          flutter build apk --release \
+            --build-name="$VERSION" \
+            --build-number="$GITHUB_RUN_NUMBER"
+          mkdir -p ../../out
+          cp build/app/outputs/flutter-apk/app-release.apk \
+             "../../out/campusnet-${VERSION}.apk"
+          ls -la ../../out
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: campusnet-apk
+          path: out/*
+          retention-days: 30
+
   build-image:
     name: 容器镜像 amd64+arm64
     needs: verify
@@ -298,7 +363,7 @@ jobs:
 
   release:
     name: 创建 Release
-    needs: [verify, build-binary, build-image]
+    needs: [verify, build-binary, build-image, build-apk]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     timeout-minutes: 15
@@ -324,12 +389,17 @@ jobs:
           path: dist/bin
           merge-multiple: true
 
+      - uses: actions/download-artifact@v4
+        with:
+          name: campusnet-apk
+          path: dist/apk
+
       - name: 发布
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -e
-          ls -la dist/bin
+          ls -la dist/bin dist/apk
           VERSION="${GITHUB_REF_NAME#v}"
           # 少一个平台就当场失败：Release 一旦发出去就很难收回，
           # 与其发一份残缺的，不如红在这里。
@@ -339,9 +409,14 @@ jobs:
               exit 1
             fi
           done
+          if ! ls "dist/apk/campusnet-${VERSION}.apk" >/dev/null 2>&1; then
+            echo "::error::缺少安卓安装包 campusnet-${VERSION}.apk"
+            exit 1
+          fi
           gh release create "$GITHUB_REF_NAME" \
             dist/campusnet-*.zip \
             dist/campusnet-*.zip.sha256 \
             dist/bin/* \
+            dist/apk/* \
             --title "校园网自连 v${VERSION}" \
             --generate-notes
