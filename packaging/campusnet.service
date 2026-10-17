@@ -9,6 +9,7 @@
 #   sudo useradd --system --home-dir /opt/campusnet --shell /usr/sbin/nologin campusnet
 #   sudo install -d -o campusnet -g campusnet /opt/campusnet
 #   sudo cp -r project utils database /opt/campusnet/          # 或把单文件放进去
+#   sudo chown -R campusnet:campusnet /opt/campusnet           # 见下方说明
 #   sudo install -m 0644 packaging/campusnet.service /etc/systemd/system/
 #   sudo systemctl daemon-reload
 #   sudo systemctl enable --now campusnet
@@ -16,6 +17,10 @@
 # 注意 install.sh 的默认落点是当前用户的 ~/.local/share/campusnet，
 # 那是给「登录后自启」用的；系统级服务跑在独立的 campusnet 账号下，
 # 读不到别的用户的家目录，所以这里一律用 /opt/campusnet。
+#
+# chown 那一步不能省：sudo cp 拷出来的文件属主是 root，而单元以 User=campusnet
+# 运行。database/ 归 root 时程序连库都建不出来（SQLite 也写不了 -wal/-shm），
+# 服务起来就退出，看日志只有一个含糊的权限错误。
 
 [Unit]
 Description=校园网自连（开机自动认证与掉线重连）

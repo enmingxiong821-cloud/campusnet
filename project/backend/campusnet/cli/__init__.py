@@ -199,7 +199,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_logs.set_defaults(func=cmd_logs)
 
     p_access = sub.add_parser("access", help="查看手机 / 平板访问控制台需要的信息")
-    p_access.add_argument("--host", default=API_HOST)
+    # 默认 None：不传就不知道服务是怎么起的，也就不能断言「只监听本机」。
+    p_access.add_argument(
+        "--host",
+        default=None,
+        help="服务启动时用的 --host；只在明确绑回环时提示手机访问不了",
+    )
     p_access.add_argument("--port", type=int, default=API_PORT)
     p_access.add_argument(
         "--guide",

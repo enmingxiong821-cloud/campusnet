@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from types import SimpleNamespace
 
 import pytest
 
@@ -373,11 +374,27 @@ def test_relaunch_elevated_runs_and_reports(monkeypatch) -> None:  # noqa: ANN00
     calls: list[list[str]] = []
     monkeypatch.setattr(menu_mod.shutil, "which", lambda _name: "powershell")
     monkeypatch.setattr(
-        menu_mod.subprocess, "run", lambda args, **kwargs: calls.append(args)
+        menu_mod.subprocess,
+        "run",
+        lambda args, **kwargs: calls.append(args) or SimpleNamespace(returncode=0),
     )
 
     assert menu_mod._relaunch_elevated(["power", "off"]) == 0
     assert calls and "RunAs" in " ".join(calls[0])
+    # 不带 /c 时 cmd.exe 只开一个空窗口、命令根本不执行
+    assert "/c " in " ".join(calls[0])
+
+
+def test_relaunch_elevated_reports_child_failure(monkeypatch) -> None:  # noqa: ANN001
+    """提权成功但子命令失败时不能再报成功。"""
+    monkeypatch.setattr(menu_mod.shutil, "which", lambda _name: "powershell")
+    monkeypatch.setattr(
+        menu_mod.subprocess,
+        "run",
+        lambda args, **kwargs: SimpleNamespace(returncode=1),
+    )
+
+    assert menu_mod._relaunch_elevated(["bootstart", "install"]) == 1
 
 
 def test_relaunch_elevated_swallows_oserror(monkeypatch) -> None:  # noqa: ANN001

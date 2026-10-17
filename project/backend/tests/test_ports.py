@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import socket
-import threading
 
 import pytest
 
@@ -321,11 +320,3 @@ def test_mock_portal_auto_shift_survives_conflict() -> None:
                 proc.kill()
                 out, err = proc.communicate(timeout=10)
     assert "自动改用" in out or "自动改用" in err
-
-
-def test_no_stray_listeners_after_tests() -> None:
-    """确认本模块没留下监听（回归保护）。"""
-    from campusnet import server as server_mod
-
-    threading.active_count()  # 触达线程状态即可
-    assert callable(server_mod.serve)

@@ -11,11 +11,15 @@ on:
     branches: [main]
     paths:
       - "project/mobile/**"
+      # 魔术包格式由后端 power.py 定义，wol_test.dart 逐字节对齐它；
+      # 后端改了这里却不知道，正是这组测试要防的事。
+      - "project/backend/campusnet/power.py"
       - ".github/workflows/mobile.yml"
   pull_request:
     branches: [main]
     paths:
       - "project/mobile/**"
+      - "project/backend/campusnet/power.py"
       - ".github/workflows/mobile.yml"
 
 # 与 ci.yml 一致：只读代码。

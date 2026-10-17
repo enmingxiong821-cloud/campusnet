@@ -16,8 +16,20 @@ import socket
 import subprocess
 import sys
 
+from .charset import decode_bytes
+
 CREATE_NO_WINDOW = 0x08000000
 WOL_PORT = 9
+
+# getmac 的「传输名称」列是本地化的，断开的网卡在这些系统上都带下面某一段。
+_DISCONNECTED_TOKENS = (
+    "disconnected",
+    "n/a",
+    "断开",
+    "未连接",
+    "已禁用",
+    "不可用",
+)
 
 
 class PowerError(Exception):
@@ -33,9 +45,7 @@ def _run(args: list[str]) -> None:
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         raise PowerError(f"{type(exc).__name__}: {exc}") from exc
     if proc.returncode != 0:
-        output = ((proc.stdout or b"") + (proc.stderr or b"")).decode(
-            "utf-8", "replace"
-        )
+        output = decode_bytes((proc.stdout or b"") + (proc.stderr or b""))
         raise PowerError(output.strip() or f"命令退出码 {proc.returncode}")
 
 
@@ -94,7 +104,7 @@ def _run_capture(args: list[str]) -> tuple[bool, str]:
         proc = subprocess.run(args, capture_output=True, timeout=15, **kwargs)
     except (OSError, ValueError, subprocess.SubprocessError):
         return False, ""
-    text = ((proc.stdout or b"") + (proc.stderr or b"")).decode("utf-8", "replace")
+    text = decode_bytes((proc.stdout or b"") + (proc.stderr or b""))
     return proc.returncode == 0, text
 
 
@@ -142,7 +152,12 @@ def local_macs(platform: str | None = None) -> list[str]:
                 continue
             mac = match.group(1).upper().replace("-", ":")
             transport = match.group(2).lower()
-            connected = "disconnected" not in transport and "n/a" not in transport
+            # getmac 的传输名是本地化的：英文 "Media disconnected"、中文
+            # 「媒体已断开连接」。只看英文串的话，中文系统上所有网卡（包括断开的
+            # 有线）都被算成已连接，唤醒命令就可能打在唤醒不了的那一块上。
+            connected = not any(
+                token in transport for token in _DISCONNECTED_TOKENS
+            )
             if mac not in [item[0] for item in entries]:
                 entries.append((mac, connected))
         # 已连接的网卡排在前面：唤醒命令默认取第一个，而 WOL 必须打在

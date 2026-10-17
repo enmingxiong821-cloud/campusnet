@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .bootstart import desktop_arg, launch_command_line, platform_name, python_executable
+from .charset import decode_bytes
 from .paths import ROOT, frozen_prefix
 
 
@@ -52,9 +53,66 @@ def run_script() -> Path:
     return ROOT / "utils" / "run.py"
 
 
+def _windows_desktop() -> Path | None:
+    """桌面真实位置：OneDrive 开了「备份桌面」后它会挪到 OneDrive\\Desktop。
+
+    `USERPROFILE\\Desktop` 那时多半已不存在，照着拼出来的快捷方式会落在
+    一个没人看得见的新目录里。注册表里这个值是 shell 自己用的那份。
+    """
+    try:
+        import winreg
+    except ImportError:  # 非 Windows 上跑测试
+        return None
+    key_path = r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders"
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path) as key:
+            raw = str(winreg.QueryValueEx(key, "Desktop")[0])
+    except OSError:
+        return None
+    # 值是 REG_EXPAND_SZ，里面可能还是 %USERPROFILE% 这样的变量。
+    path = os.path.expandvars(raw).strip()
+    if not path:
+        return None
+    candidate = Path(path)
+    return candidate if candidate.is_dir() else None
+
+
+def _xdg_desktop() -> Path | None:
+    """按 XDG 配置取桌面目录：中文系统上它常是「桌面」而不是 Desktop。"""
+    config_home = os.environ.get("XDG_CONFIG_HOME", "").strip()
+    base = Path(config_home) if config_home else Path.home() / ".config"
+    try:
+        text = (base / "user-dirs.dirs").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    for line in text.splitlines():
+        line = line.strip()
+        if not line.startswith("XDG_DESKTOP_DIR="):
+            continue
+        value = line.split("=", 1)[1].strip().strip('"').replace("$HOME", str(Path.home()))
+        # `XDG_DESKTOP_DIR="$HOME/"` 是「关掉桌面目录」的标准写法，
+        # 照它拼出来会把快捷方式丢到家目录根部。
+        if not value or Path(value) == Path.home():
+            return None
+        return Path(value)
+    return None
+
+
 def desktop_dir(platform: str | None = None) -> Path:
     """桌面目录；platform 参数供测试注入，避免为了测试去改全局的 os.name。"""
-    if (platform or platform_name()) == "windows":
+    if platform is None:
+        # 只有真正在跑的时候才去问系统：注入平台时（测试）只验拼路径的兜底。
+        platform = platform_name()
+        resolved = (
+            _windows_desktop()
+            if platform == "windows"
+            else _xdg_desktop()
+            if platform == "linux"
+            else None
+        )
+        if resolved is not None:
+            return resolved
+    if platform == "windows":
         profile = os.environ.get("USERPROFILE", "").strip()
         base = Path(profile) if profile else Path.home()
         return base / "Desktop"
@@ -109,7 +167,7 @@ def _run_powershell(script: str) -> tuple[bool, str]:
         )
     except (OSError, subprocess.SubprocessError) as exc:
         return False, f"{type(exc).__name__}: {exc}"
-    output = ((proc.stdout or b"") + (proc.stderr or b"")).decode("utf-8", "replace")
+    output = decode_bytes((proc.stdout or b"") + (proc.stderr or b""))
     if proc.returncode != 0:
         return False, output.strip() or f"powershell 退出码 {proc.returncode}"
     return True, ""
@@ -223,7 +281,9 @@ def create(
 ) -> tuple[bool, str]:
     """生成快捷方式；platform 参数供测试注入。"""
     name = platform or platform_name()
-    target = Path(directory).expanduser() if directory else desktop_dir(name)
+    # 传 platform 而不是 name：后者永远非空，desktop_dir 会以为这是测试注入、
+    # 跳过注册表/XDG 查询，OneDrive 备份桌面那条修复就永远不生效。
+    target = Path(directory).expanduser() if directory else desktop_dir(platform)
     removed = _remove_legacy(target)
     if name == "windows":
         ok, message = create_windows(DEFAULT_SHORTCUTS, target)

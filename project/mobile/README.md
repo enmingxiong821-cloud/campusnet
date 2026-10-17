@@ -46,8 +46,16 @@ flutter build apk --release --build-name=2.2.0 --build-number=1
 ## 安装
 
 APK 没走应用商店，需要侧载：手机「设置 → 允许安装未知来源应用」后，直接点开
-`app-release.apk` 安装。release 包目前用 debug 密钥签名（够侧载），要正式分发得先配
-`android/key.properties` + 密钥库——这两个文件已在 `.gitignore` 里，**绝不能入库**。
+`app-release.apk` 安装。
+
+CI 发布的包用仓库 Secrets 里的固定密钥签名，需要在 GitHub 配好四项：
+`ANDROID_KEYSTORE_BASE64`（密钥库文件的 base64）、`ANDROID_KEYSTORE_PASSWORD`、
+`ANDROID_KEY_ALIAS`、`ANDROID_KEY_PASSWORD`。配齐之后各版本之间可以直接覆盖安装；
+没配时退回 debug 签名——能装能用，但每个 CI runner 的调试密钥都不同，覆盖安装会失败
+（只能先卸载，而卸载会丢掉 APP 里存的地址与 MAC）。
+
+本地构建同理：放一份 `android/key.properties` + 密钥库即可，这两个文件已在
+`.gitignore` 里，**绝不能入库**。
 
 ## 使用
 

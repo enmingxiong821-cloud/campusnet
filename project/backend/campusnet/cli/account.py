@@ -81,7 +81,7 @@ def cmd_list(_: argparse.Namespace) -> int:
     store = Store()
     accounts = store.list_accounts()
     if not accounts:
-        print("还没有账号，用 `python -m campusnet add` 添加。")
+        print("还没有账号，用 `python utils/run.py add` 添加。")
         return 0
     print(f"{'ID':<4}{'名称':<16}{'状态':<12}{'登录方式':<10}门户地址")
     for acc in accounts:

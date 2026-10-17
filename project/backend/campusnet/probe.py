@@ -140,6 +140,7 @@ def probe(
     insecure: bool = False,
     _depth: int = 0,
     _opener: urllib.request.OpenerDirector | None = None,
+    _canary: bool | None = None,
 ) -> ProbeResult:
     """请求一个明文探测地址；被劫持到门户页才视为未认证。
 
@@ -152,6 +153,12 @@ def probe(
     """
     if not url:
         url = DEFAULT_PROBES[0]
+    # 是不是默认探针只在最外层判一次，随跳转带下去。默认探针常见的一跳是
+    # http → https（msftconnecttest 就是这样），跳过去之后新地址不在
+    # DEFAULT_PROBES 里；每层重新判的话，canary 校验就在跟完跳转后静默失效，
+    # 门户只要回一个 200 登录页就被当成「已在线」。
+    if _canary is None:
+        _canary = url in DEFAULT_PROBES
     # 只认 http/https。urllib 的 opener 默认挂着 FileHandler，喂 file:// 进去会把
     # 本地文件读出来当正文（online 分支的 detail 就是正文前 120 字节），而 API 的
     # url 参数是外部可控的；ftp:// 同理。这里挡在发请求之前。
@@ -182,7 +189,7 @@ def probe(
             # 只对默认探针生效：用户自定义的 probe_url 期望正文是什么我们并不知道，
             # 拿这张表去卡它只会把正常网络判成掉线。
             if (
-                url in DEFAULT_PROBES or final in DEFAULT_PROBES
+                _canary or final in DEFAULT_PROBES
             ) and not _canary_matches(body):
                 return ProbeResult(
                     False,
@@ -199,7 +206,14 @@ def probe(
             if is_portal_url(location):
                 return ProbeResult(False, "redirected", f"HTTP {exc.code} -> {location}", location)
             try:
-                followed = probe(location, timeout=timeout, insecure=insecure, _depth=_depth + 1, _opener=opener)
+                followed = probe(
+                    location,
+                    timeout=timeout,
+                    insecure=insecure,
+                    _depth=_depth + 1,
+                    _opener=opener,
+                    _canary=_canary,
+                )
             except Exception:  # noqa: BLE001
                 followed = ProbeResult(False, "redirected", f"HTTP {exc.code} -> {location}", location)
             if followed.online:

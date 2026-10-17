@@ -97,6 +97,18 @@ def decode(
         return raw.decode("utf-8", errors="replace")
 
 
+def decode_bytes(raw: bytes) -> str:
+    """解码本机命令行工具的输出（powercfg / netsh / getmac / PowerShell）。
+
+    子进程把控制台代码页（中文 Windows 上是 GBK）的字节直接写进管道，
+    按 UTF-8 硬解会得到一串 U+FFFD：按中文关键字判定或解析的分支会全部失效
+    （睡眠超时「当前交流电源设置索引」、netsh 的「媒体已断开连接」、
+    PowerShell 的「拒绝访问」都是这样）。顺序与网页一致：
+    UTF-8 严格 → GB18030（GBK 超集）→ latin-1。
+    """
+    return decode(raw)
+
+
 def needs_charset_fix(text: str) -> bool:
     """粗判是否解错了：出现大量替换字符或典型乱码片段。"""
     if not text:

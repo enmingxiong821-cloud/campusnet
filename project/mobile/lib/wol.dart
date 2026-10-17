@@ -107,7 +107,15 @@ String formatMac(String mac) {
 /// 每次都用新 socket：绑定时会占用一个随机端口，随用随关最省心，也避免
 /// 上一次的 socket 还在收包时把这次的状态搅乱。
 Future<int> _sendOnce(Uint8List packet, String broadcast, int port) async {
-  final socket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
+  final RawDatagramSocket socket;
+  try {
+    socket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
+  } on SocketException catch (error) {
+    // bind 也可能失败（并发唤醒时端口耗尽、系统限制）。它不在下面那个
+    // try 里，漏出去的是一个 SocketException，而调用方只接 WolError——
+    // 用户看到的是整页红屏，不是「唤醒失败」的提示。
+    throw WolError('无法创建广播 socket：${error.message}');
+  }
   try {
     // 不发这一句，Android/Linux 会把发往广播地址的包直接拒掉。
     socket.broadcastEnabled = true;

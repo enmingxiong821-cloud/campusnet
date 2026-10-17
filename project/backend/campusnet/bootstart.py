@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
 
+from .charset import decode_bytes
 from .paths import API_HOST, API_PORT, ROOT, frozen_prefix
 
 TASK_NAME = "campusnet"
@@ -581,8 +582,10 @@ def _run_quiet(args: list[str]) -> tuple[bool, str]:
         proc = subprocess.run(args, capture_output=True, timeout=20, **kwargs)
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         return False, f"{type(exc).__name__}: {exc}"
-    out = (proc.stdout or b"").decode("utf-8", "replace")
-    err = (proc.stderr or b"").decode("utf-8", "replace")
+    # 调用方按中文关键词判定失败原因（「拒绝访问」「找不到」），必须按控制台
+    # 代码页解码；UTF-8 硬解会把这些词全毁掉，判据永远不成立。
+    out = decode_bytes(proc.stdout or b"")
+    err = decode_bytes(proc.stderr or b"")
     return proc.returncode == 0, (out + err).strip()
 
 

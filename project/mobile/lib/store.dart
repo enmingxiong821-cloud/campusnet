@@ -159,7 +159,11 @@ String normalizeBaseUrl(String input, {int defaultPort = 2268}) {
     throw FormatException('只支持 http/https，收到的是 ${uri.scheme}');
   }
   final port = uri.hasPort ? uri.port : defaultPort;
-  final buffer = StringBuffer('${uri.scheme}://${uri.host}:$port');
+  // Uri.host 会把 IPv6 字面量的方括号去掉（`[::1]` → `::1`），直接拼回去
+  // 得到的是 `http://::1:2268`，既不是合法 URL，也连不上。
+  final host = uri.host;
+  final authority = host.contains(':') ? '[$host]' : host;
+  final buffer = StringBuffer('${uri.scheme}://$authority:$port');
   if (uri.path.isNotEmpty && uri.path != '/') {
     buffer.write(uri.path);
   }

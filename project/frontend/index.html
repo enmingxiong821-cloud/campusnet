@@ -654,12 +654,28 @@ function hideAuth() {
 }
 
 async function initAuth() {
+  // 这条同样是「启动时服务还没起来」最容易踩的请求：没有超时的话，
+  // 半开连接会让它一直悬着，authReady 永远为假，10 秒一次的轮询还会
+  // 一轮轮再发一条，界面上只看到一个停在「连不上服务」的页面。
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 10000);
   let res;
   try {
-    res = await fetch('/api/auth/status', { credentials:'same-origin' });
+    res = await fetch('/api/auth/status', {
+      credentials: 'same-origin',
+      signal: controller.signal,
+    });
   } catch (e) {
+    if (e && e.name === 'AbortError') {
+      const err = new Error('请求超时（10 秒无响应）');
+      err.isNetwork = true;
+      err.timeout = true;
+      throw err;
+    }
     e.isNetwork = true;   // 同上：请求没到达，不是服务给了否定答案
     throw e;
+  } finally {
+    clearTimeout(timer);
   }
   // 不检查 res.ok 就把失败读成成功：服务还在启动、或返回了非 JSON 的 500 时，
   // 下面那句 catch 会兜出一个「不需要令牌且已认证」，于是令牌框不弹、直接进

@@ -13,14 +13,22 @@
     sudo dscl . -create /Users/campusnet UserShell /usr/bin/false
     sudo dscl . -create /Users/campusnet UniqueID 420
     sudo dscl . -create /Users/campusnet PrimaryGroupID 420
+    sudo dscl . -create /Groups/campusnet
+    sudo dscl . -create /Groups/campusnet PrimaryGroupID 420
     sudo install -d -o campusnet -g campusnet /opt/campusnet
     sudo cp -r project utils database /opt/campusnet/
+    sudo chown -R campusnet:campusnet /opt/campusnet
     sudo install -m 0644 packaging/com.campusnet.daemon.plist /Library/LaunchDaemons/
     sudo launchctl load -w /Library/LaunchDaemons/com.campusnet.daemon.plist
 
   install.sh 的默认落点是 ~/Library/Application Support/campusnet，那是给
   「登录后自启」用的；LaunchDaemon 跑在独立账号下，读不到用户家目录，
   所以这里一律用 /opt/campusnet。
+
+  chown 那一步不能省：sudo cp 拷出来的文件属主是 root，而 plist 里写的是
+  UserName=campusnet。database/ 归 root 时程序连库都建不出来，守护进程
+  起来就退出。同理，上面要先建 GroupName 指向的那个组，否则 launchd
+  加载 plist 时会因为找不到组而拒绝启动。
 -->
 <plist version="1.0">
 <dict>

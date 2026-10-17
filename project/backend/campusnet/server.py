@@ -252,8 +252,18 @@ class ApiHandler(BaseHTTPRequestHandler):
         ctype, _ = mimetypes.guess_type(str(target))
         if target.suffix == ".webmanifest":
             ctype = "application/manifest+json"  # PWA 清单，mimetypes 不一定认这个扩展名
+        try:
+            data = target.read_bytes()
+        except OSError:
+            # 文件在 is_file() 之后被删、权限不对、磁盘出错都会走到这里。
+            # 让它抛出去的话，连接只能被重置，浏览器看到的是一个空白页。
+            self._send(
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+                {"ok": False, "error": f"读取 {path} 失败"},
+            )
+            return
         self._send(
-            HTTPStatus.OK, target.read_bytes(), ctype or "application/octet-stream"
+            HTTPStatus.OK, data, ctype or "application/octet-stream"
         )
 
 
@@ -928,6 +938,11 @@ def _pair_source_failed(address: Any) -> bool:
     ]:
         del _PAIR_SOURCE_FAILURES[key]
     hits = _PAIR_SOURCE_FAILURES.setdefault(source, [])
+    # 已经锁定的来源不再往列表里追加：窗口是 5 分钟，不设上限的话一个来源
+    # 能在这段时间里把列表撑到任意长度，猜码变成一条内存耗尽的路子。
+    # 旧时间戳仍会在下一次调用时被上面的清理循环淘汰。
+    if len(hits) >= pair_mod.MAX_FAILURES:
+        return True
     hits.append(now)
     return len(hits) >= pair_mod.MAX_FAILURES
 
@@ -1345,6 +1360,9 @@ def _install_dispatch(handler: type[ApiHandler]) -> None:
         # （CL.0 请求走私）。读完即可，预检本身照常返回 204。
         # 长度非法／超限时 _read_raw_body 已经把 close_connection 置上了，
         # 这里只需照常回一个错误体，让客户端知道是它自己的请求有问题。
+        # 先丢掉上一请求缓存的正文：BaseHTTPRequestHandler 在 keep-alive 下复用
+        # 同一个实例，不重置的话这里读的是上一个请求的体。
+        self.__dict__.pop("_request_body", None)
         try:
             self._read_raw_body()
         except ApiError as exc:

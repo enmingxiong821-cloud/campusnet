@@ -235,7 +235,7 @@ def token_text() -> str:
         return ""
 
 
-def report(host: str = API_HOST, port: int = API_PORT) -> list[str]:
+def report(host: str | None = None, port: int = API_PORT) -> list[str]:
     lines = [f"本机控制台      http://127.0.0.1:{port}"]
     ip = lan_ip()
     if ip:
@@ -249,7 +249,10 @@ def report(host: str = API_HOST, port: int = API_PORT) -> list[str]:
         "手机快捷方式    控制台打开后点「添加到主屏幕」，以后像 App 一样一键打开"
         "（远程接入看 run.py access --guide）"
     )
-    if host in ("127.0.0.1", "localhost", "::1"):
+    # 只在调用方明确说了绑回环时才提醒。host 原来默认取 API_HOST，于是
+    # `access` 不带参数就断言「服务只监听本机」——哪怕服务其实是按
+    # --host 0.0.0.0 起的，用户会被这句话推着去改一份没问题的启动参数。
+    if host is not None and host in ("127.0.0.1", "localhost", "::1"):
         lines.append(
             "提示            服务当前只监听本机，手机访问不了："
             "改用 --host 0.0.0.0 启动，或让两台设备都进同一个 Tailscale 网络"
@@ -318,7 +321,7 @@ def _tailnet_name(data: dict[str, Any]) -> str:
     return parts[1] if len(parts) >= 3 else ""
 
 
-def guide(host: str = API_HOST, port: int = API_PORT) -> list[str]:
+def guide(host: str | None = None, port: int = API_PORT) -> list[str]:
     """远程接入三步向导：装 Tailscale → 装远程桌面 → 手机怎么点。"""
     status = tailscale_status()
     lines = ["远程接入三步走（只检测与指引，不改网络配置）：", ""]
@@ -354,7 +357,7 @@ def guide(host: str = API_HOST, port: int = API_PORT) -> list[str]:
         lines.append(f"   局域网地址（同一 Wi-Fi 下）：http://{ip}:{port}")
     if not status["ip"] and not ip:
         lines.append("   先装好 ① 的 Tailscale，这里才会有手机能用的地址")
-    if host in ("127.0.0.1", "localhost", "::1"):
+    if host is not None and host in ("127.0.0.1", "localhost", "::1"):
         lines.append("   提示：服务当前只监听本机，手机访问需以 --host 0.0.0.0 启动")
     if os.name == "nt":
         # 按上面那步改了还连不上，卡点基本都在这里：Windows 防火墙的入站规则。

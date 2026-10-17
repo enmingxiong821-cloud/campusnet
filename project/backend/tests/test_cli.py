@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 
@@ -441,6 +442,20 @@ def test_discover_prints_candidate_and_command(
     # 隐藏域应给出 --extra 追加提示
     assert "--extra" in out
     assert "0MKKey" in out
+
+
+def test_shell_line_quotes_placeholders_and_ampersand() -> None:
+    """生成的命令要能直接粘贴：占位符 `<学号>` 不加引号会被当成输入重定向，
+    URL 里的 `&` 在 cmd 下会把命令截断。"""
+    from campusnet.cli.net import _shell_line
+
+    line = _shell_line(
+        ["add", "--portal", "http://h/p?a=1&b=2", "--username", "<学号>"]
+    )
+
+    quote = '"' if os.name == "nt" else "'"
+    assert f"{quote}http://h/p?a=1&b=2{quote}" in line
+    assert f"{quote}<学号>{quote}" in line
 
 
 def test_discover_flags_captcha(

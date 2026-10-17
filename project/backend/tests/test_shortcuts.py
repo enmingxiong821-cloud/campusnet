@@ -122,6 +122,31 @@ def test_desktop_dir_falls_back_to_home(
     assert fallback.is_absolute()
 
 
+def test_xdg_desktop_dir_reads_user_dirs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """中文 Linux 的桌面目录叫「桌面」，写死 Desktop 会落到看不见的目录。"""
+    config = tmp_path / "config"
+    config.mkdir()
+    (config / "user-dirs.dirs").write_text(
+        'XDG_DESKTOP_DIR="$HOME/桌面"\n', encoding="utf-8"
+    )
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config))
+
+    assert shortcuts_mod._xdg_desktop() == Path.home() / "桌面"
+
+
+def test_xdg_desktop_dir_disabled(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = tmp_path / "config"
+    config.mkdir()
+    (config / "user-dirs.dirs").write_text('XDG_DESKTOP_DIR="$HOME/"\n', encoding="utf-8")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config))
+
+    assert shortcuts_mod._xdg_desktop() is None
+
+
 def test_remove_legacy_skips_unremovable(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

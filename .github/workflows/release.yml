@@ -280,6 +280,30 @@ jobs:
         working-directory: project/mobile
         run: flutter test
 
+      # 用仓库 Secrets 里的固定密钥签 APK。没有配置时退回调试签名：能装能用，
+      # 但每次 runner 的调试密钥都不同，覆盖安装会失败（见 README 的说明）。
+      - name: 准备 APK 签名材料
+        working-directory: project/mobile/android
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -e
+          if [ -z "$KEYSTORE_BASE64" ]; then
+            echo "::warning::未配置 ANDROID_KEYSTORE_BASE64，本次 APK 使用调试签名；与上一版签名不同，覆盖安装会失败。"
+            exit 0
+          fi
+          printf '%s' "$KEYSTORE_BASE64" | base64 -d > app/ci-release.jks
+          # storeFile 相对 app/ 解析，所以写 ci-release.jks 而不是 app/…
+          cat > key.properties <<EOF
+          storePassword=${STORE_PASSWORD}
+          keyPassword=${KEY_PASSWORD}
+          keyAlias=${KEY_ALIAS}
+          storeFile=ci-release.jks
+          EOF
+
       - name: 构建 APK
         working-directory: project/mobile
         run: |

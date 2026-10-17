@@ -126,7 +126,14 @@ def load_profiles(directory: Path | None = None) -> list[Profile]:
     ordered = _read_dir(directory or BUILTIN_DIR)
     extra = user_dir()
     if directory is None and extra is not None:
-        overrides = {item.id: item for item in _read_dir(extra)}
+        try:
+            overrides = {item.id: item for item in _read_dir(extra)}
+        except ProfileError:
+            # 用户自己写的规则坏了，不该让整个程序起不来：discovery 在 import
+            # 时就调 load_profiles()，抛在这里等于 CLI、服务和 doctor 全打不开。
+            # 内置规则（或显式传入的目录）出错仍然照旧抛——那是打包问题，
+            # 测试也按这个语义断言。
+            overrides = {}
         if overrides:
             ordered = [overrides.pop(item.id, item) for item in ordered] + list(
                 overrides.values()

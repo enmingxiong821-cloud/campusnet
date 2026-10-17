@@ -1,7 +1,18 @@
+import java.io.FileInputStream
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
     id("dev.flutter.flutter-gradle-plugin")
+}
+
+// 发版签名材料放在 android/key.properties（口令）与 .jks（密钥库）里，
+// 两者都不入库。没有时退回调试签名，本地照样能装、能跑。
+val keystorePropertiesFile = rootProject.file("key.properties")
+val keystoreProperties = Properties()
+if (keystorePropertiesFile.exists()) {
+    keystoreProperties.load(FileInputStream(keystorePropertiesFile))
 }
 
 android {
@@ -29,11 +40,28 @@ android {
         versionName = flutter.versionName
     }
 
+    signingConfigs {
+        // Android 只认可同一个密钥签出来的升级包。一直用调试签名的话，
+        // 每台机器（每个 CI runner）的调试密钥都不一样，覆盖安装必然报
+        // INSTALL_FAILED_UPDATE_INCOMPATIBLE，用户只能先卸载——而卸载会
+        // 丢掉本地存的地址与 MAC。
+        create("release") {
+            if (keystorePropertiesFile.exists()) {
+                keyAlias = keystoreProperties["keyAlias"] as String
+                keyPassword = keystoreProperties["keyPassword"] as String
+                storeFile = file(keystoreProperties["storeFile"] as String)
+                storePassword = keystoreProperties["storePassword"] as String
+            }
+        }
+    }
+
     buildTypes {
         release {
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = if (keystorePropertiesFile.exists()) {
+                signingConfigs.getByName("release")
+            } else {
+                signingConfigs.getByName("debug")
+            }
         }
     }
 }

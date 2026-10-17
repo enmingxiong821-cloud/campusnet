@@ -34,13 +34,20 @@ def _relaunch_elevated(args: list[str]) -> int:
     from .bootstart import launch_command_line
     from .shortcuts import elevate_command_line
 
-    # -Wait：等提权后的那次注册真正跑完，菜单里才能紧接着报告结果。
-    script = elevate_command_line(launch_command_line(args)) + " -Wait"
+    # 必须带 /c：cmd.exe 收到不带开关的参数时只开一个交互式窗口并忽略它们，
+    # 用户看到的是一闪而过的空窗口、命令根本没执行（快捷方式那边用的是 /k）。
+    # 光提权成功不代表注册成功，所以取子进程退出码再判一次——原来固定返回 0，
+    # 注册失败也会被菜单报成「已注册」。
+    script = (
+        "$ErrorActionPreference = 'Stop'; try { $p = "
+        + elevate_command_line("/c " + launch_command_line(args))
+        + " -Wait -PassThru; exit $p.ExitCode } catch { exit 1 }"
+    )
     try:
-        subprocess.run([exe, "-NoProfile", "-Command", script], timeout=600)
+        proc = subprocess.run([exe, "-NoProfile", "-Command", script], timeout=600)
     except (OSError, subprocess.SubprocessError):
         return 1
-    return 0
+    return 0 if proc.returncode == 0 else 1
 
 
 def bootstart_hint() -> str:

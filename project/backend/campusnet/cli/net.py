@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import re
+import shlex
 import sys
 
 from .. import discovery as discovery_mod
@@ -52,6 +55,33 @@ def cmd_check(args: argparse.Namespace) -> int:
     return 0 if failed == 0 else 1
 
 
+_WIN_SAFE_ARG = re.compile(r"^[\w@+=:,./\\-]+$", re.UNICODE)
+
+
+def _quote_arg(part: str) -> str:
+    """单个参数按当前 shell 的规则加引号。
+
+    Windows 上不能用 subprocess.list2cmdline：它只管 argv 拆分，不管 shell
+    元字符——`http://x/y?a=1&b=2` 里没有空格，它原样输出，cmd 会把 `&` 当成
+    命令分隔符，后半截命令就丢了。这里对含 `& | < > ^ ( ) % ! "` 或空白的
+    参数一律加双引号，内层引号按 CommandLineToArgvW 的规则反斜杠转义。
+    """
+    if os.name == "nt":
+        if _WIN_SAFE_ARG.match(part):
+            return part
+        return '"' + part.replace('"', '\\"') + '"'
+    return shlex.quote(part)
+
+
+def _shell_line(parts: list[str]) -> str:
+    """把参数拼成一条能直接粘贴的命令。
+
+    不能手拼空格：`<学号>`、`<密码>` 这种占位符不加引号时，cmd / PowerShell /
+    bash 都会把它当输入重定向，粘贴后报的是「找不到指定文件」。
+    """
+    return " ".join(_quote_arg(part) for part in parts)
+
+
 def cmd_discover(args: argparse.Namespace) -> int:
     stdout_ready()
     report = discovery_mod.discover(
@@ -89,19 +119,39 @@ def cmd_discover(args: argparse.Namespace) -> int:
     best = candidates[0]
     fields = discovery_mod.to_account_fields(best)
     print("\n一键建号命令（用最佳候选）：")
-    print(
-        "  python utils/run.py add --name 我的校园网"
-        f" --portal {fields['portal_url']}"
-        f" --username <学号> --password <密码>"
-        f" --password-mode {fields['password_mode']}"
-        f" --login-mode {fields['login_mode']}"
-    )
+    parts = [
+        "python",
+        "utils/run.py",
+        "add",
+        "--name",
+        "我的校园网",
+        "--portal",
+        fields["portal_url"],
+        "--username",
+        "<学号>",
+        "--password",
+        "<密码>",
+        "--password-mode",
+        fields["password_mode"],
+        "--login-mode",
+        fields["login_mode"],
+    ]
+    print("  " + _shell_line(parts))
     if fields["username_field"]:
-        print(f"  追加：--username-field {fields['username_field']}"
-              f" --password-field {fields['password_field']}")
+        print(
+            "  追加："
+            + _shell_line(
+                [
+                    "--username-field",
+                    fields["username_field"],
+                    "--password-field",
+                    fields["password_field"],
+                ]
+            )
+        )
     if fields["extra_fields"]:
         extra = json.dumps(fields["extra_fields"], ensure_ascii=False)
-        print(f"  追加：--extra '{extra}'")
+        print("  追加：" + _shell_line(["--extra", extra]))
     return 0
 
 

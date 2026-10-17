@@ -488,7 +488,13 @@ def http_login(
         data = urllib.parse.urlencode(payload).encode("utf-8")
         url = target
     else:
-        url = f"{target}?{urllib.parse.urlencode(payload)}"
+        # 表单 action 自带查询串时不能再拼一个 "?"：那会把原有参数并进第一个
+        # 参数的值里（`a=1?user=x`），门户收不到它要的参数。按组件合并，
+        # 顺带保住 fragment。
+        parts = urllib.parse.urlsplit(target)
+        query = urllib.parse.parse_qsl(parts.query, keep_blank_values=True)
+        query.extend(payload.items())
+        url = urllib.parse.urlunsplit(parts._replace(query=urllib.parse.urlencode(query)))
         method = "GET"
 
     hidden = [k for k in payload if k not in (user_field, pass_field)]

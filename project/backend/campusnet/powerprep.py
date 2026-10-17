@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from . import tls as tls_mod
+from .charset import decode_bytes
 
 OK = "ok"
 FIXED = "fixed"
@@ -55,7 +56,7 @@ def _run(args: list[str], timeout: int = 20) -> tuple[bool, str]:
         proc = subprocess.run(args, capture_output=True, timeout=timeout, **kwargs)
     except (OSError, ValueError, subprocess.SubprocessError):
         return False, ""
-    text = ((proc.stdout or b"") + (proc.stderr or b"")).decode("utf-8", "replace")
+    text = decode_bytes((proc.stdout or b"") + (proc.stderr or b""))
     return proc.returncode == 0, text
 
 
@@ -131,10 +132,19 @@ def _check_fast_startup(fix: bool) -> PowerItem:
 
 
 def _wake_magic_adapters() -> tuple[list[str], list[str]]:
-    """返回 (允许魔术包唤醒的网卡名, 不允许的网卡名)。"""
+    """返回 (允许魔术包唤醒的网卡名, 明确关着、可以修的网卡名)。
+
+    枚举必须在 PowerShell 里就转成字符串：`ConvertTo-Json` 在 5.1 上把
+    Enabled / Disabled / Unsupported 写成 0 / 1 / 2，Python 侧拿 `== "enabled"`
+    比对永远为假，于是每块网卡（含 vEthernet 这类根本管不了唤醒的）都被判成
+    「没开魔术包唤醒」，`--fix` 一轮下来还是同样的结果。
+    """
     script = (
         "Get-NetAdapterPowerManagement -ErrorAction SilentlyContinue | "
-        "Select-Object Name,WakeOnMagicPacket,WakeOnPattern | ConvertTo-Json -Compress"
+        "ForEach-Object { [pscustomobject]@{ "
+        "Name = $_.Name; "
+        "WakeOnMagicPacket = [string]$_.WakeOnMagicPacket; "
+        "WakeOnPattern = [string]$_.WakeOnPattern } } | ConvertTo-Json -Compress"
     )
     ok, text = _run(["powershell", "-NoProfile", "-Command", script])
     if not ok or not text.strip():
@@ -152,9 +162,15 @@ def _wake_magic_adapters() -> tuple[list[str], list[str]]:
         name = str(item.get("Name", "")).strip()
         if not name:
             continue
-        magic = str(item.get("WakeOnMagicPacket", "")).lower() == "enabled"
-        pattern = str(item.get("WakeOnPattern", "")).lower() == "enabled"
-        (allowed if magic or pattern else denied).append(name)
+        states = {
+            str(item.get("WakeOnMagicPacket", "")).strip().lower(),
+            str(item.get("WakeOnPattern", "")).strip().lower(),
+        }
+        if "enabled" in states:
+            allowed.append(name)
+        elif "disabled" in states:
+            denied.append(name)
+        # Unsupported / 空：这块网卡不参与唤醒，列进去只会让人以为「改一下就好」
     return allowed, denied
 
 

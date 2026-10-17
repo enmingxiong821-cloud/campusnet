@@ -8,6 +8,7 @@ library;
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 
 import 'api.dart';
@@ -83,6 +84,10 @@ class _ConsolePageState extends State<ConsolePage> {
           ),
         )
         ..loadRequest(Uri.parse(_initialUrl));
+    } else if (reachable) {
+      // 重试唤醒时 controller 已经建过了，它也还停在刚才那张错误页上。
+      // 不 reload 的话状态切回「在线」，屏幕却仍是「网页无法打开」。
+      await _controller!.reload();
     }
   }
 
@@ -189,7 +194,16 @@ class _ConsolePageState extends State<ConsolePage> {
             return;
           }
         }
-        if (context.mounted) Navigator.of(context).pop();
+        if (context.mounted) {
+          // 这一页是 MaterialApp 的 home，即根路由：Navigator.pop() 在根路由上
+          // 什么也不做，用户按返回键会以为程序坏了。根路由要交给系统处理。
+          final navigator = Navigator.of(context);
+          if (navigator.canPop()) {
+            navigator.pop();
+          } else {
+            await SystemNavigator.pop();
+          }
+        }
       },
       child: Scaffold(
         appBar: AppBar(

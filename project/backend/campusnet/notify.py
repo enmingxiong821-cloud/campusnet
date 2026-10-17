@@ -147,7 +147,11 @@ class Notifier:
         self.channel = channel if channel in CHANNELS else "generic"
         self.key = (key or "").strip()
         # 默认只发「掉线 / 恢复在线」，与旧行为一致；其余分类要显式打开。
-        self.events = set(events) if events else {"recovered", "failing"}
+        # 空列表是「一个都不发」的显式选择，不能落回默认——原来 events=[]
+        # 会被当成没配置，用户在设置里关掉全部通知也照样收到两条。
+        self.events = (
+            {"recovered", "failing"} if events is None else set(events)
+        )
         self._failures: dict[int, int] = {}
         self._notified: set[int] = set()
         self._lock = threading.Lock()

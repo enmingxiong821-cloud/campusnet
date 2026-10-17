@@ -20,6 +20,8 @@ import subprocess
 from dataclasses import dataclass
 from typing import Any
 
+from .charset import decode_bytes
+
 CREATE_NO_WINDOW = 0x08000000
 NETSH_TIMEOUT = 8.0
 CONNECT_WAIT = 30.0
@@ -49,8 +51,10 @@ def _run_netsh(args: list[str], timeout: float = NETSH_TIMEOUT) -> tuple[bool, s
         proc = subprocess.run(args, capture_output=True, timeout=timeout, **kwargs)
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         return False, f"{type(exc).__name__}: {exc}"
-    out = (proc.stdout or b"").decode("utf-8", "replace")
-    err = (proc.stderr or b"").decode("utf-8", "replace")
+    # netsh 按控制台代码页（中文 Windows 上是 GBK）写管道，UTF-8 硬解会把
+    # SSID 里和「媒体已断开连接」这类中文全部变成 U+FFFD。
+    out = decode_bytes(proc.stdout or b"")
+    err = decode_bytes(proc.stderr or b"")
     return proc.returncode == 0, (out + err).strip()
 
 
