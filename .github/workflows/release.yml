@@ -400,20 +400,20 @@ jobs:
 
       # download-artifact 故意留在 v4：release job 只在打 tag 时跑，workflow_dispatch
       # 干跑覆盖不到它，升上去就是把未验证的改动留给下一次真发布。下次发版时再升。
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: campusnet-release
           path: dist
 
       # pattern 只取单文件产物；merge-multiple 让四个平台的二进制平铺到一个目录，
       # 免得 gh release create 还要逐个展开子目录。
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: campusnet-bin-*
           path: dist/bin
           merge-multiple: true
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: campusnet-apk
           path: dist/apk
