@@ -179,7 +179,7 @@ def test_serve_rejects_second_instance_and_releases_lock(
     import subprocess
     import sys
 
-    from campusnet import server
+    from campusnet import ports, server
 
     lock_path = tmp_path / "service.lock"
     monkeypatch.setenv("CAMPUSNET_INSTANCE_LOCK_FILE", str(lock_path))
@@ -213,7 +213,10 @@ def test_serve_rejects_second_instance_and_releases_lock(
         first.shutdown()
         first.server_close()
 
-    second = server.serve(port=api_port + 1, autostart=False, blocking=False)
+    # 不能直接用 api_port + 1：临时端口是顺序发放的，那个号正是系统下一个最
+    # 可能分出去的，机器上任何进程发出站连接都可能在这两句之间抢走它。
+    second_port = ports.find_free_port(api_port + 1)
+    second = server.serve(port=second_port, autostart=False, blocking=False)
     second.shutdown()
     second.server_close()
 
