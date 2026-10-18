@@ -254,7 +254,7 @@ jobs:
       # AGP 要 JDK 17 以上。ubuntu-latest 自带的那份版本会随镜像漂移，
       # 显式钉住——Flutter 对 JDK 版本是挑的。
       - name: 安装 JDK
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "21"
